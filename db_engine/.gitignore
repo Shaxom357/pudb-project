@@ -1,1 +1,21 @@
 /target
+# ビルド生成物
+/target/
+
+# IDE/エディタ設定
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS一時ファイル
+.DS_Store
+Thumbs.db
+
+# 環境変数・機密情報
+.env
+*.pem
+credentials
+
+# Cline関係（もしルールを共有したくない場合）
+# .clinerules

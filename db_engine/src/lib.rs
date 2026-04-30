@@ -1,14 +1,17 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
+pub struct Database {
+    data: Vec<u8>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+impl Database {
+    pub fn new() -> Self {
+        Database { data: Vec::new() }
+    }
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
+    pub fn insert(&mut self, value: u8) {
+        self.data.push(value);
+    }
+
+    pub fn get(&self, index: usize) -> Option<u8> {
+        self.data.get(index).cloned()
     }
 }
