@@ -1,7 +1,0 @@
-[workspace]
-members = [
-    "db_engine",
-    "db_client",
-    "db_ffi",
-]
-resolver = "2"
