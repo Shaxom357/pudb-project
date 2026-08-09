@@ -1,0 +1,15 @@
+[package]
+name = "dynamic_label_management"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "dynamic_label_management"
+path = "src/main.rs"
+
+[lib]
+name = "dynamic_label_management"
+path = "src/lib.rs"
+
+[dependencies]
+db_engine = { path = "../db_engine" }

@@ -3,4 +3,12 @@ name = "db_ffi"
 version = "0.1.0"
 edition = "2024"
 
+# cdylib: Python/C から読み込む共有ライブラリ (.so) を生成する
+# rlib:   Rust クレートとしても使えるようにする
+[lib]
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
+db_engine = { path = "../db_engine" }
+serde_json = "1"
+
