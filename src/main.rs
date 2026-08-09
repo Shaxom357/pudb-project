@@ -1,49 +1,46 @@
-use std::collections::HashMap;
-use serde::{Serialize, Deserialize};
-use std::fs;
-use std::env;
+use axum::{
+    extract::{Path, Query, Json},
+    http::StatusCode,
+    response::IntoResponse,
+    routing::{get, post},
+    Router,
+};
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use db_engine::get_by_label;
 
-#[derive(Serialize, Deserialize, Debug)]
-struct Label {
-    name: String,
+#[derive(Serialize, Deserialize)]
+struct Data {
+    label: String,
     value: String,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-struct LabelSchema {
-    labels: HashMap<String, Label>,
+#[derive(Serialize, Deserialize)]
+struct DataResponse {
+    data: Vec<Data>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-struct SystemCatalog {
-    schemas: HashMap<String, LabelSchema>,
+async fn get_data(query: Query<String>) -> impl IntoResponse {
+    let label = query.0;
+    match get_by_label(&label) {
+        Ok(data) => (StatusCode::OK, Json(DataResponse { data })),
+        Err(_) => (StatusCode::NOT_FOUND, "Data not found".to_string()),
+    }
 }
 
-fn main() {
-    let mut catalog = SystemCatalog {
-        schemas: HashMap::new(),
-    };
+async fn post_data(Json(payload): Json<Data>) -> impl IntoResponse {
+    // ここでデータを保存する処理を実装
+    (StatusCode::CREATED, Json(payload))
+}
 
-    let mut schema = LabelSchema {
-        labels: HashMap::new(),
-    };
+#[tokio::main]
+async fn main() {
+    let app = Router::new()
+       .route("/data", get(get_data).post(post_data));
 
-    // Adding a new label dynamically
-    schema.labels.insert("label1".to_string(), Label {
-        name: "label1".to_string(),
-        value: "value1".to_string(),
-    });
-
-    // Adding the schema to the system catalog
-    catalog.schemas.insert("schema1".to_string(), schema);
-
-    // Serializing the catalog to a file
-    let serialized_catalog = serde_json::to_string(&catalog).unwrap();
-    fs::write("catalog.json", serialized_catalog).unwrap();
-
-    println!("Catalog saved to catalog.json");
-
-    // Printing the current working directory
-    let current_dir = env::current_dir().unwrap();
-    println!("Current working directory: {:?}", current_dir);
+    axum::Server::bind(&"0.0.0.0:3000".parse().unwrap())
+       .serve(app.into_make_service())
+       .await
+       .unwrap();
 }

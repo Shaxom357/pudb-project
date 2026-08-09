@@ -146,4 +146,31 @@ impl ColumnStore {
         }
     }
 }
+
+pub struct MainTable {
+    pub rows: Vec<DataRow>,
+}
+
+impl MainTable {
+    pub fn new() -> Self {
+        MainTable { rows: Vec::new() }
+    }
+
+    pub fn insert(&mut self, row: DataRow) {
+        self.rows.push(row);
+    }
+
+pub fn get_by_label(&self, label: &str) -> Vec<&DataRow> {
+    self.rows
+    .iter()
+    .filter(|row| {
+            if let DataType::String(Some(ref label_value)) = row.label1 {
+                label_value == label
+            } else {
+                false
+            }
+        })
+    .collect()
+}
+}
 }
