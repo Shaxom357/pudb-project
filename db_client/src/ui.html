@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KAGURA DB Admin</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f0f2f5; color: #333; font-size: 14px; }
+.header { background: #1a1a2e; color: #fff; padding: 0 20px; display: flex; align-items: center; height: 52px; box-shadow: 0 2px 8px rgba(0,0,0,.3); }
+.header h1 { font-size: 18px; font-weight: 600; }
+.header .badge { margin-left: 12px; background: #e94560; color: #fff; font-size: 11px; padding: 2px 8px; border-radius: 10px; }
+.header .spacer { flex: 1; }
+.header .stats { font-size: 12px; color: #aaa; }
+.layout { display: flex; height: calc(100vh - 52px); overflow: hidden; }
+.sidebar { width: 220px; background: #fff; border-right: 1px solid #e0e0e0; overflow-y: auto; flex-shrink: 0; }
+.sidebar-section { padding: 12px 16px 4px; font-size: 11px; font-weight: 700; color: #888; text-transform: uppercase; letter-spacing: .8px; }
+.sidebar-item { padding: 8px 16px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; border-left: 3px solid transparent; transition: all .15s; }
+.sidebar-item:hover { background: #f5f5f5; }
+.sidebar-item.active { background: #eef2ff; border-left-color: #4f6ef7; color: #4f6ef7; font-weight: 600; }
+.sidebar-item .count { background: #eee; color: #666; font-size: 11px; padding: 1px 6px; border-radius: 10px; }
+.sidebar-item.active .count { background: #c7d2fe; color: #4f6ef7; }
+.sidebar-all { padding: 8px 16px; cursor: pointer; color: #4f6ef7; font-size: 13px; display: flex; align-items: center; gap: 6px; }
+.sidebar-all:hover { background: #f5f5f5; }
+.main { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
+.toolbar { background: #fff; border-bottom: 1px solid #e0e0e0; padding: 10px 20px; display: flex; gap: 10px; align-items: center; }
+.toolbar input { border: 1px solid #ddd; border-radius: 6px; padding: 6px 12px; font-size: 13px; width: 260px; outline: none; transition: border .15s; }
+.toolbar input:focus { border-color: #4f6ef7; }
+.btn { border: none; border-radius: 6px; padding: 7px 14px; font-size: 13px; cursor: pointer; font-weight: 500; transition: all .15s; }
+.btn-primary { background: #4f6ef7; color: #fff; }
+.btn-primary:hover { background: #3b5bdb; }
+.btn-danger { background: #fa5252; color: #fff; }
+.btn-danger:hover { background: #e03131; }
+.btn-ghost { background: transparent; color: #4f6ef7; border: 1px solid #4f6ef7; }
+.btn-ghost:hover { background: #eef2ff; }
+.btn-sm { padding: 4px 10px; font-size: 12px; }
+.table-wrap { flex: 1; overflow: auto; }
+table { width: 100%; border-collapse: collapse; background: #fff; }
+thead th { background: #f8f9fa; padding: 10px 14px; text-align: left; font-size: 12px; font-weight: 700; color: #555; border-bottom: 2px solid #e0e0e0; white-space: nowrap; position: sticky; top: 0; z-index: 1; }
+tbody tr { border-bottom: 1px solid #f0f0f0; transition: background .1s; }
+tbody tr:hover { background: #fafbff; }
+tbody td { padding: 10px 14px; vertical-align: middle; }
+.id-cell { font-weight: 700; color: #888; font-size: 12px; width: 50px; }
+.col-kv { font-size: 12px; }
+.col-kv span.key { color: #888; }
+.col-kv span.val { color: #222; font-weight: 500; }
+.label-tag { display: inline-block; background: #eef2ff; color: #4f6ef7; border-radius: 12px; padding: 2px 8px; font-size: 11px; margin: 2px; font-weight: 500; cursor: pointer; }
+.actions { white-space: nowrap; width: 130px; }
+.empty { text-align: center; padding: 60px; color: #aaa; }
+.overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 100; align-items: center; justify-content: center; }
+.overlay.open { display: flex; }
+.modal { background: #fff; border-radius: 12px; padding: 28px; width: 520px; max-width: 95vw; max-height: 90vh; overflow-y: auto; box-shadow: 0 20px 60px rgba(0,0,0,.3); }
+.modal h2 { font-size: 16px; margin-bottom: 20px; }
+.form-group { margin-bottom: 14px; }
+.form-group label { display: block; font-size: 12px; font-weight: 600; color: #555; margin-bottom: 5px; }
+.form-group input, .form-group textarea { width: 100%; border: 1px solid #ddd; border-radius: 6px; padding: 8px 10px; font-size: 13px; outline: none; font-family: inherit; }
+.form-group input:focus { border-color: #4f6ef7; }
+.form-hint { font-size: 11px; color: #888; margin-top: 4px; }
+.col-editor { border: 1px solid #ddd; border-radius: 6px; overflow: hidden; }
+.col-row { display: flex; border-bottom: 1px solid #eee; }
+.col-row:last-child { border-bottom: none; }
+.col-row input, .col-row select { border: none; border-right: 1px solid #eee; padding: 7px 10px; font-size: 13px; outline: none; background: #fff; }
+.col-row .col-name { flex: 2; }
+.col-row .col-type { flex: 1.2; }
+.col-row .col-val { flex: 2.5; }
+.col-row .col-del { flex: 0 0 36px; cursor: pointer; color: #fa5252; font-size: 16px; display: flex; align-items: center; justify-content: center; }
+.col-row .col-del:hover { background: #fff5f5; }
+.modal-footer { display: flex; gap: 10px; justify-content: flex-end; margin-top: 20px; }
+.toast { position: fixed; bottom: 24px; right: 24px; padding: 12px 20px; border-radius: 8px; color: #fff; font-size: 13px; font-weight: 500; opacity: 0; transition: opacity .3s; z-index: 200; pointer-events: none; }
+.toast.show { opacity: 1; }
+.toast.success { background: #2f9e44; }
+.toast.error { background: #e03131; }
+.statusbar { background: #1a1a2e; color: #aaa; font-size: 11px; padding: 3px 16px; }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>&#x1F5C4;&#xFE0F; KAGURA DB Admin</h1>
+  <span class="badge" id="headerCount">0 records</span>
+  <div class="spacer"></div>
+  <span class="stats">localhost:3000</span>
+</div>
+<div class="layout">
+  <div class="sidebar">
+    <div class="sidebar-section">Filter</div>
+    <div class="sidebar-all" onclick="filterByLabel(null)">&#x1F4CB; All records</div>
+    <div class="sidebar-section" style="margin-top:8px">Labels</div>
+    <div id="labelList"></div>
+  </div>
+  <div class="main">
+    <div class="toolbar">
+      <input type="text" id="searchInput" placeholder="Search columns / labels..." oninput="renderTable()">
+      <button class="btn btn-primary" onclick="openCreateModal()">+ New Record</button>
+      <span style="flex:1"></span>
+      <button class="btn btn-ghost" onclick="loadAll()">Refresh</button>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th class="id-cell">ID</th>
+          <th>Columns</th>
+          <th>Labels</th>
+          <th class="actions">Actions</th>
+        </tr></thead>
+        <tbody id="tableBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+<div class="statusbar"><span id="statusText">Loading...</span></div>
+
+<div class="overlay" id="modal">
+  <div class="modal">
+    <h2 id="modalTitle">New Record</h2>
+    <input type="hidden" id="editId">
+    <div class="form-group">
+      <label>Columns</label>
+      <div class="col-editor" id="colEditor"></div>
+      <button class="btn btn-ghost btn-sm" style="margin-top:8px" onclick="addColRow()">+ Add column</button>
+    </div>
+    <div class="form-group">
+      <label>Labels (comma separated)</label>
+      <input type="text" id="labelsInput" placeholder="dept:eng, env:prod">
+      <div class="form-hint">Allowed: alphanumeric, hyphens, colons, underscores, slashes</div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveRecord()">Save</button>
+    </div>
+  </div>
+</div>
+
+<div class="overlay" id="deleteModal">
+  <div class="modal" style="width:360px">
+    <h2>Delete Record</h2>
+    <p style="margin:16px 0;color:#666">Delete ID: <strong id="deleteTargetId"></strong>?<br>This cannot be undone.</p>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeDeleteModal()">Cancel</button>
+      <button class="btn btn-danger" onclick="confirmDelete()">Delete</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+let allRecords=[], allLabels=[], activeLabel=null, deleteTarget=null;
+
+const api = {
+  async get(p){ return (await fetch(p)).json(); },
+  async post(p,b){ return (await fetch(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)})).json(); },
+  async put(p,b){ return (await fetch(p,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)})).json(); },
+  async delete(p){ return fetch(p,{method:'DELETE'}); },
+};
+
+async function loadAll(){
+  try{
+    const [records, labelsResp] = await Promise.all([api.get('/records'), api.get('/labels')]);
+    allRecords = records; allLabels = labelsResp.labels || [];
+    renderSidebar(); renderTable(); updateHeader();
+    setStatus(allRecords.length+' records | '+allLabels.length+' labels');
+  } catch(e){ setStatus('Cannot connect to server'); showToast('Connection failed','error'); }
+}
+
+function renderSidebar(){
+  const counts = {};
+  allRecords.forEach(r=>(r.labels||[]).forEach(l=>counts[l]=(counts[l]||0)+1));
+  document.getElementById('labelList').innerHTML = allLabels.map(l=>
+    '<div class="sidebar-item '+(activeLabel===l?'active':'')
+    +'" onclick="filterByLabel(\''+l+'\')"><span>'+esc(l)+'</span><span class="count">'+(counts[l]||0)+'</span></div>'
+  ).join('');
+}
+
+function filterByLabel(l){ activeLabel=l; renderSidebar(); renderTable(); }
+
+function renderTable(){
+  const q = document.getElementById('searchInput').value.toLowerCase();
+  let rows = allRecords;
+  if(activeLabel) rows = rows.filter(r=>(r.labels||[]).includes(activeLabel));
+  if(q) rows = rows.filter(r=>JSON.stringify(r.columns).toLowerCase().includes(q)||(r.labels||[]).join(' ').toLowerCase().includes(q)||String(r.id).includes(q));
+  const body = document.getElementById('tableBody');
+  if(!rows.length){ body.innerHTML='<tr><td colspan="4" class="empty"><div style="font-size:48px">&#x1F4ED;</div><div style="margin-top:12px">'+(activeLabel?'No records with label: '+esc(activeLabel):'No records')+'</div></td></tr>'; return; }
+  body.innerHTML = rows.map(r=>{
+    const cols = Object.entries(r.columns||{}).map(([k,v])=>{
+      // v は {type:"text", value:"太郎"} 形式のオブジェクト
+      const display = (v && typeof v === 'object') ? (v.value ?? 'NULL') : (v ?? '');
+      return '<div class="col-kv"><span class="key">'+esc(k)+'</span>: <span class="val">'+esc(String(display))+'</span></div>';
+    }).join('')||'<span style="color:#bbb">(no columns)</span>';
+    const labels = (r.labels||[]).map(l=>'<span class="label-tag" onclick="filterByLabel(\''+esc(l)+'\')">' + esc(l)+'</span>').join('')||'-';
+    return '<tr><td class="id-cell">#'+r.id+'</td><td>'+cols+'</td><td>'+labels+'</td><td class="actions"><button class="btn btn-ghost btn-sm" onclick="openEditModal('+r.id+')">Edit</button> <button class="btn btn-danger btn-sm" onclick="openDeleteModal('+r.id+')">Del</button></td></tr>';
+  }).join('');
+}
+
+function updateHeader(){ document.getElementById('headerCount').textContent=allRecords.length+' records'; }
+
+function openCreateModal(){
+  document.getElementById('editId').value='';
+  document.getElementById('modalTitle').textContent='New Record';
+  document.getElementById('labelsInput').value='';
+  document.getElementById('colEditor').innerHTML='';
+  addColRow();
+  document.getElementById('modal').classList.add('open');
+}
+
+function openEditModal(id){
+  const r=allRecords.find(x=>x.id===id); if(!r)return;
+  document.getElementById('editId').value=id;
+  document.getElementById('modalTitle').textContent='Edit Record #'+id;
+  document.getElementById('labelsInput').value=(r.labels||[]).join(', ');
+  const editor=document.getElementById('colEditor'); editor.innerHTML='';
+  const entries=Object.entries(r.columns||{});
+  if(!entries.length) addColRow();
+  else entries.forEach(([k,v])=>{
+    // v は {type:"text", value:"太郎"} 形式のオブジェクト
+    const type  = (v && typeof v==='object' && v.type)  ? v.type  : guessType(v);
+    const value = (v && typeof v==='object' && 'value' in v) ? v.value : v;
+    addColRow(k, type, value);
+  });
+  document.getElementById('modal').classList.add('open');
+}
+
+function guessType(v){
+  // v は {type:"text", value:...} 形式のオブジェクト
+  if(v && typeof v === 'object' && v.type) return v.type;
+  if(typeof v==='boolean') return 'boolean';
+  if(typeof v==='number') return Number.isInteger(v)?'integer':'float';
+  if(v===null) return 'null';
+  return 'text';
+}
+
+function addColRow(name='',type='text',value=''){
+  const editor=document.getElementById('colEditor');
+  const row=document.createElement('div'); row.className='col-row';
+  row.innerHTML='<input class="col-name" placeholder="column name" value="'+esc(name)+'">'
+    +'<select class="col-type" onchange="onTypeChange(this)">'
+    +['text','integer','float','boolean','null'].map(t=>'<option value="'+t+'"'+(t===type?' selected':'')+'>'+t+'</option>').join('')
+    +'</select><input class="col-val" placeholder="value" value="'+esc(String(value??''))+'"'+(type==='null'?' disabled':'')+'><div class="col-del" onclick="this.parentElement.remove()">\u00d7</div>';
+  editor.appendChild(row);
+}
+
+function onTypeChange(sel){ const v=sel.parentElement.querySelector('.col-val'); v.disabled=sel.value==='null'; if(sel.value==='null')v.value=''; }
+function closeModal(){ document.getElementById('modal').classList.remove('open'); }
+
+async function saveRecord(){
+  const id=document.getElementById('editId').value;
+  const labels=document.getElementById('labelsInput').value.split(',').map(s=>s.trim()).filter(Boolean);
+  const columns={};
+  document.querySelectorAll('#colEditor .col-row').forEach(row=>{
+    const name=row.querySelector('.col-name').value.trim();
+    const type=row.querySelector('.col-type').value;
+    const val=row.querySelector('.col-val').value;
+    if(!name)return;
+    columns[name]=type==='null'?{type:'null',value:null}:type==='integer'?{type:'integer',value:parseInt(val)||0}:type==='float'?{type:'float',value:parseFloat(val)||0}:type==='boolean'?{type:'boolean',value:val==='true'||val==='1'}:{type:'text',value:val};
+  });
+  try{
+    if(id){ await api.put('/records/'+id,{columns,labels}); showToast('Updated #'+id,'success'); }
+    else{ const r=await api.post('/records',{columns,labels}); showToast('Created #'+r.id,'success'); }
+    closeModal(); await loadAll();
+  }catch(e){ showToast('Save failed','error'); }
+}
+
+function openDeleteModal(id){ deleteTarget=id; document.getElementById('deleteTargetId').textContent=id; document.getElementById('deleteModal').classList.add('open'); }
+function closeDeleteModal(){ deleteTarget=null; document.getElementById('deleteModal').classList.remove('open'); }
+async function confirmDelete(){
+  if(!deleteTarget)return;
+  await api.delete('/records/'+deleteTarget);
+  showToast('Deleted #'+deleteTarget,'success');
+  closeDeleteModal(); await loadAll();
+}
+
+function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function setStatus(m){ document.getElementById('statusText').textContent=m; }
+let toastTimer;
+function showToast(msg,type='success'){ const t=document.getElementById('toast'); t.textContent=msg; t.className='toast '+type+' show'; clearTimeout(toastTimer); toastTimer=setTimeout(()=>t.classList.remove('show'),3000); }
+
+document.getElementById('modal').addEventListener('click',e=>{ if(e.target.id==='modal')closeModal(); });
+document.getElementById('deleteModal').addEventListener('click',e=>{ if(e.target.id==='deleteModal')closeDeleteModal(); });
+
+loadAll();
+setInterval(loadAll,10000);
+</script>
+</body>
+</html>

@@ -1,14 +1,19 @@
-/target
-# ビルド生成物
-/target/
+# Rust ビルド成果物（全クレートの target/ を除外）
+target/
 
-# IDE/エディタ設定
+# Cargo.lock はアプリケーションはコミットするが、ライブラリはしない
+# ワークスペースのルート Cargo.lock のみ管理する
+db_engine/Cargo.lock
+db_ffi/Cargo.lock
+dynamic_label_management/Cargo.lock
+
+# IDE / エディタ設定
 .vscode/
 .idea/
 *.swp
 *.swo
 
-# OS一時ファイル
+# OS 一時ファイル
 .DS_Store
 Thumbs.db
 
@@ -17,5 +22,14 @@ Thumbs.db
 *.pem
 credentials
 
-# Cline関係（もしルールを共有したくない場合）
+# データファイル（サーバー起動時に生成されるDBファイル）
+*.json.tmp
+db_data.json
+
+# Python キャッシュ
+__pycache__/
+*.pyc
+*.pyo
+
+# Cline 設定（必要に応じてコメント解除）
 # .clinerules
