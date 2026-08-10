@@ -140,7 +140,7 @@ dependencies = [
 
 [[package]]
 name = "db_client"
-version = "0.1.0"
+version = "1.4.1"
 dependencies = [
  "axum",
  "db_engine",
@@ -148,12 +148,13 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sql_engine",
  "tokio",
 ]
 
 [[package]]
 name = "db_engine"
-version = "0.1.0"
+version = "1.4.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -161,7 +162,7 @@ dependencies = [
 
 [[package]]
 name = "db_ffi"
-version = "0.1.0"
+version = "1.4.1"
 dependencies = [
  "db_engine",
  "serde_json",
@@ -180,7 +181,7 @@ dependencies = [
 
 [[package]]
 name = "dynamic_label_management"
-version = "0.1.0"
+version = "1.4.1"
 dependencies = [
  "db_engine",
 ]
@@ -941,6 +942,14 @@ checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "sql_engine"
+version = "1.4.1"
+dependencies = [
+ "db_engine",
+ "serde",
 ]
 
 [[package]]

@@ -1,0 +1,8 @@
+[package]
+name = "sql_engine"
+version = "1.4.1"
+edition = "2024"
+
+[dependencies]
+db_engine = { path = "../db_engine" }
+serde = { version = "1.0.228", features = ["derive"] }

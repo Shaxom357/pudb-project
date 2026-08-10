@@ -4,5 +4,6 @@ members = [
     "db_client",
     "db_ffi",
     "dynamic_label_management",
+    "sql_engine",
 ]
 resolver = "2"
