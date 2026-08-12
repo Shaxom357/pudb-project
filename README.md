@@ -185,3 +185,284 @@ pudb-project/
 ```
 
 ---
+
+## クイックスタート
+
+### 必要環境
+
+- Rust 1.80 以上（edition 2024）
+- cargo
+
+### ビルド & 起動
+
+```bash
+# KDB モード（推奨・デフォルト）
+cargo run -p db_client
+# → http://localhost:3000 で起動
+# → db_data.kdb に暗号化して保存
+
+# ポート・ファイルパスを指定
+DB_ADDR=0.0.0.0:8080 DB_FILE=mydata.kdb cargo run -p db_client
+
+# JSON モード（後方互换・暗号化なし）
+DB_FILE=mydata.json cargo run -p db_client
+
+# リリースビルド
+cargo build --release -p db_client && ./target/release/db_client
+```
+
+### 動作確認
+
+```bash
+# バージョン・状態確認
+curl http://localhost:3000/db/info
+
+# レコード作成
+curl -X POST http://localhost:3000/records \
+  -H 'Content-Type: application/json' \
+  -d '{"columns":{"name":{"type":"text","value":"田中"},"age":{"type":"integer","value":35}},"labels":["employee"]}'
+
+# SQL で検索
+curl -X POST http://localhost:3000/sql \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "SELECT * FROM label.employee WHERE age > 30"}'
+
+# Web UI
+open http://localhost:3000/ui
+```
+
+---
+
+## KDB ストレージフォーマット
+
+`.kdb` 拡張子のファイルは KAGURA DB 独自の暗号化バイナリ形式です。
+
+### ファイル構造
+
+```
+┌──────────────────────────────────────────────────┐
+│  HEADER  (64 bytes, 平文)                         │
+│  magic[4]="KGDB"  version[2]  flags[2]           │
+│  salt[16]  next_id[8]  record_count[8]            │
+│  wal_entries[8]  reserved[16]                     │
+├──────────────────────────────────────────────────┤
+│  WAL ENTRIES (暗号化・追記ログ)                   │
+│  [entry_len: u32][nonce: 24B][ciphertext + MAC]   │
+│  ↑ レコード1件ずつ繰り返し                        │
+└──────────────────────────────────────────────────┘
+```
+
+### 暗号化仕様
+
+| 項目 | 仕様 |
+|------|------|
+| 暗号アルゴリズム | XChaCha20-Poly1305 AEAD |
+| 鍵長 | 256 bit（32 bytes） |
+| Nonce | 192 bit（24 bytes）・毎回ランダム生成 |
+| 認証タグ | Poly1305 MAC（16 bytes）・改ざん検知 |
+| 鍵導出 | HChaCha20(master_key, file_salt) |
+| Salt | ファイル作成時に `/dev/urandom` から生成（16 bytes） |
+| 実装 | 外部クレート不使用・純 Rust 手実装 |
+
+### INSERT 高速化（WAL 方式）
+
+```
+従来の JSON 方式: O(n) → 10,000件目: 約600秒超・平均 5 req/s
+KDB WAL 方式: O(1) → 10,000件目でも ~1,200 req/s（10,000件を 8.1秒で完了）
+```
+
+### セキュリティ特性
+
+- テキストエディタで開いても内容は読めない（バイナリ）
+- `strings` コマンドで意味のある文字列が抽出されない
+- ファイル先頭 4 bytes は `KGDB` マジックナンバーのみ平文
+- Poly1305 MAC により 1 bit の改ざんも検知可能
+- マスターキーを変えれば同一ファイルを別環境で開けない
+
+---
+
+## SQL 機能
+
+`POST /sql` エンドポイントで SQL SELECT クエリを実行できます。
+
+### 構文
+
+```sql
+SELECT * FROM label.employee
+SELECT * FROM label.*
+SELECT * FROM label.employee AND label.manager
+SELECT * FROM label.employee OR label.developer
+SELECT * FROM label.employee WHERE name = '田中'
+SELECT * FROM label.employee WHERE age > 30 AND city = 'Tokyo'
+SELECT * FROM label.employee WHERE name LIKE '田%'
+SELECT * FROM label.employee ORDER BY salary DESC LIMIT 10
+```
+
+### リクエスト例
+
+```bash
+curl -X POST http://localhost:3000/sql \
+  -H 'Content-Type: application/json' \
+  -d '{"query": "SELECT employee_name, age, salary FROM label.employee WHERE age > 30 ORDER BY salary DESC LIMIT 10"}'
+```
+
+### 10,000件での性能測定
+
+| クエリ | 応答時間 |
+|--------|-------|
+| `SELECT * FROM label.* LIMIT 100` | **9.7 ms** |
+| `WHERE 等値検索` | **9.7 ms** |
+| `WHERE LIKE` | **10.6 ms** |
+| `WHERE 複合 AND` | **12.7 ms** |
+| `FROM label.A AND label.B` | **30.9 ms** |
+| `ORDER BY LIMIT 50` | **33.9 ms** |
+| `WHERE 範囲検索` | **88.7 ms** |
+| `SELECT * FROM label.employee`（2000件） | **154.8 ms** |
+| `FROM label.A OR label.B`（3200件） | **252.9 ms** |
+| `SELECT * FROM label.*`（全 10,000件） | **750.4 ms** |
+
+---
+
+## API リファレンス
+
+### エンドポイント一覧
+
+| メソッド | パス | 説明 |
+|---------|------|------|
+| `GET`    | `/ui` | Web 管理 UI |
+| `GET`    | `/records` | 全レコード取得 |
+| `POST`   | `/records` | レコード作成 |
+| `GET`    | `/records/{id}` | ID で取得 |
+| `PUT`    | `/records/{id}` | レコード更新 |
+| `DELETE` | `/records/{id}` | レコード削除 |
+| `GET`    | `/records/label/{label}` | ラベルで絞り込み取得 |
+| `GET`    | `/records/{id}/labels` | レコードのラベル一覧 |
+| `POST`   | `/records/{id}/labels` | ラベル追加 |
+| `DELETE` | `/records/{id}/labels/{label}` | ラベル削除 |
+| `GET`    | `/labels` | 全ラベル一覧+統計 |
+| `POST`   | `/labels/search` | AND/OR ラベル検索 |
+| `PUT`    | `/labels/rename` | ラベルリネーム |
+| `GET`    | `/db/info` | DB バージョン・統計情報 |
+| `POST`   | `/sql` | SQL SELECT 実行 |
+
+### GET /db/info レスポンス例
+
+```json
+{
+  "engine_name":    "KAGURA DB Engine",
+  "app_version":    "1.4.1",
+  "storage_mode":   "kdb",
+  "storage_format": "KDB Binary (WAL + XChaCha20-Poly1305 encrypted)",
+  "encrypted":      true,
+  "db_file_path":   "db_data.kdb",
+  "record_count":   10000,
+  "label_count":    87,
+  "column_count":   68,
+  "next_id":        10001
+}
+```
+
+---
+
+## Web 管理UI
+
+`http://localhost:3000/ui` でブラウザから DB を操作できます。
+
+| ビュー | 説明 |
+|--------|------|
+| **📋 Records** | レコードの一覧・検索・作成・編集・削除・ラベルフィルター・自動更新（10秒） |
+| **ℹ️ DB Info** | バージョン・ストレージモード・暗号化状態・統計カード・カラム一覧 |
+| **🔍 SQL Query** | SQL SELECT 実行・テーブル形式結果表示・ Ctrl+Enter 対応 |
+
+---
+
+## テストデータ生成
+
+```bash
+# 10,000件生成 + 性能テスト
+python3 examples/python/generate_testdata.py --bench
+
+# 性能テストのみ
+python3 examples/python/generate_testdata.py --bench-only --repeat 5
+```
+
+**依存**: Python 3.6+ 標準ライブラリのみ（pip 不要）
+
+---
+
+## Python バインディング
+
+```bash
+cargo build --release -p db_ffi
+cd examples/python && python3 demo.py
+```
+
+```python
+from db_engine import DbEngine
+db = DbEngine()
+id = db.insert({"name": "Alice", "age": 30}, labels=["dept:engineering"])
+print(db.get(id))
+db.save("/tmp/kagura.json")
+```
+
+---
+
+## テスト
+
+```bash
+cargo test --workspace
+```
+
+| クレート | テスト数 | 内容 |
+|----------|----------|---------|
+| `db_engine` | 38 | CRUD・ラベル操作・KDB暗号化・バイナリコーデック |
+| `dynamic_label_management` | 24 | AND/OR 検索・リネーム・差分 |
+| `db_ffi` | 10 | FFI 関数・メモリ管理 |
+| `db_client`（統合テスト） | 28 | HTTP API・ラベル操作・永続化 |
+| `sql_engine` | 13 | パーサー（SELECT・WHERE・ORDER BY・LIKE） |
+| **合計** | **113** | |
+
+---
+
+## 技術スタック
+
+| カテゴリ | 技術 |
+|----------|---------|
+| 言語 | Rust 2024 edition |
+| HTTP フレームワーク | [axum](https://github.com/tokio-rs/axum) 0.8 |
+| 非同期ランタイム | [tokio](https://tokio.rs/) 1.x |
+| シリアライゼーション | [serde](https://serde.rs/) + serde_json |
+| 暗号化 | XChaCha20-Poly1305 AEAD（純 Rust 手実装・外部クレートなし） |
+| SQL パーサー | 手書き再帰下降パーサー（外部ライブラリなし） |
+| FFI | Rust `extern "C"` + Python `ctypes` |
+| フロントエンド | バニラ HTML / CSS / JavaScript（外部依存なし） |
+| テスト（HTTP） | [reqwest](https://github.com/seanmonstar/reqwest) 0.12 |
+| テストデータ生成 | Python 3.6+ 標準ライブラリのみ |
+
+---
+
+## バージョン履歴
+
+バージョン表記: **A.B.C**
+
+| 区分 | ルール |
+|------|-------|
+| **A（メジャー）** | 破壊的変更・旧バージョンとの非互換が生じたとき +1 |
+| **B（マイナー）** | 破壊的変更を伴わない新機能追加のとき +1 |
+| **C（ビルド）** | 規模に関わらず何らかの変更・修正を加えたとき +1 |
+
+| バージョン | 主な変更内容 |
+|-----------|-------------|
+| **1.4.1** | DB Info UI のバージョン・ストレージ表示修正、全クレートバージョン統一 |
+| **1.4.0** | KDB 暗号化バイナリ形式（XChaCha20-Poly1305）、WAL 高速 INSERT、JSON 後方互换 |
+| **1.3.0** | テストデータ自動生成スクリプト（`generate_testdata.py`）、SQL 性能テスト |
+| **1.2.0** | SQL SELECT エンジン（`sql_engine` クレート新設）、`POST /sql` エンドポイント |
+| **1.1.0** | DB Info API（`GET /db/info`）、Web UI に DB Info ビュー・SQL Query ビュー追加 |
+| **1.0.0** | Web 管理 UI（Records ビュー）、ラベル管理 API 拡充 |
+| **0.1.0** | 初期実装（db_engine・db_client・dynamic_label_management・db_ffi） |
+
+---
+
+## ライセンス
+
+MIT License
