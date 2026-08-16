@@ -140,7 +140,7 @@ dependencies = [
 
 [[package]]
 name = "db_client"
-version = "1.4.1"
+version = "1.5.0"
 dependencies = [
  "axum",
  "db_engine",
@@ -154,7 +154,7 @@ dependencies = [
 
 [[package]]
 name = "db_engine"
-version = "1.4.1"
+version = "1.5.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -162,7 +162,7 @@ dependencies = [
 
 [[package]]
 name = "db_ffi"
-version = "1.4.1"
+version = "1.5.0"
 dependencies = [
  "db_engine",
  "serde_json",
@@ -181,7 +181,7 @@ dependencies = [
 
 [[package]]
 name = "dynamic_label_management"
-version = "1.4.1"
+version = "1.5.0"
 dependencies = [
  "db_engine",
 ]
@@ -946,7 +946,7 @@ dependencies = [
 
 [[package]]
 name = "sql_engine"
-version = "1.4.1"
+version = "1.5.0"
 dependencies = [
  "db_engine",
  "serde",

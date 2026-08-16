@@ -178,7 +178,7 @@ tbody td { padding: 10px 14px; vertical-align: middle; }
       </div>
       <div class="sql-panel">
         <div class="sql-editor-wrap">
-          <textarea id="sqlInput" class="sql-editor" placeholder="SELECT * FROM label.employee WHERE age > 30 ORDER BY age DESC LIMIT 10" spellcheck="false"></textarea>
+          <textarea id="sqlInput" class="sql-editor" placeholder="SELECT * FROM label.employee WHERE age > 30 ORDER BY age DESC LIMIT 10&#10;INSERT INTO (label.employee) (employee_name, employee_age, employee_department) VALUE ('田中', 24, 'developer')" spellcheck="false"></textarea>
           <div class="sql-actions">
             <button class="btn btn-primary" onclick="runSql()">&#x25B6; Run</button>
             <button class="btn btn-ghost" onclick="clearSql()">Clear</button>
@@ -187,7 +187,7 @@ tbody td { padding: 10px 14px; vertical-align: middle; }
         </div>
         <div class="sql-result-wrap">
           <div id="sqlResult" class="sql-result">
-            <div class="empty" style="padding:40px"><div style="font-size:36px">&#x1F4DD;</div><div style="margin-top:10px;font-size:13px">Enter a SQL SELECT query above and click Run</div></div>
+            <div class="empty" style="padding:40px"><div style="font-size:36px">&#x1F4DD;</div><div style="margin-top:10px;font-size:13px">Enter a SQL SELECT or INSERT query above and click Run</div></div>
           </div>
         </div>
       </div>
@@ -428,6 +428,8 @@ const SQL_EXAMPLES = [
   "SELECT name, age FROM label.employee WHERE age >= 25 ORDER BY age DESC",
   "SELECT * FROM label.employee WHERE name LIKE 'Tana%'",
   "SELECT * FROM label.* LIMIT 5",
+  "INSERT INTO (label.employee) (employee_name, employee_age, employee_department) VALUE ('田中', 24, 'developer')",
+  "INSERT INTO (label.employee, label.manager) (employee_name, employee_age, employee_department) VALUE ('鈴木', 41, 'lead')",
 ];
 let sqlExampleIdx = 0;
 
@@ -438,7 +440,7 @@ function sqlInsertExample(){
 
 function clearSql(){
   document.getElementById('sqlInput').value='';
-  document.getElementById('sqlResult').innerHTML='<div class="empty" style="padding:40px"><div style="font-size:36px">&#x1F4DD;</div><div style="margin-top:10px;font-size:13px">Enter a SQL SELECT query above and click Run</div></div>';
+  document.getElementById('sqlResult').innerHTML='<div class="empty" style="padding:40px"><div style="font-size:36px">&#x1F4DD;</div><div style="margin-top:10px;font-size:13px">Enter a SQL SELECT or INSERT query above and click Run</div></div>';
   document.getElementById('sqlStatus').textContent='';
 }
 
@@ -453,9 +455,13 @@ async function runSql(){
     const resp = await fetch('/sql',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query})});
     const data = await resp.json();
     if(data.ok){
-      const total = data.total_matched ?? 0;
-      const ret   = data.returned    ?? 0;
-      statusEl.innerHTML = '<span class="ok">&#x2714; '+ret+' row(s) returned</span>'+(total!==ret?' ('+total+' matched, limited)':'');
+      if(data.inserted_id!==undefined && data.inserted_id!==null){
+        statusEl.innerHTML = '<span class="ok">&#x2714; inserted id='+data.inserted_id+'</span>';
+      } else {
+        const total = data.total_matched ?? 0;
+        const ret   = data.returned    ?? 0;
+        statusEl.innerHTML = '<span class="ok">&#x2714; '+ret+' row(s) returned</span>'+(total!==ret?' ('+total+' matched, limited)':'');
+      }
       resultEl.innerHTML = renderSqlResult(data);
     } else {
       statusEl.innerHTML = '<span class="err">&#x2718; Error</span>';
@@ -478,8 +484,11 @@ function renderSqlResult(data){
     if(cell===null||cell===undefined) return '<td class="null-cell">NULL</td>';
     return '<td>'+esc(String(cell))+'</td>';
   }).join('')+'</tr>').join('')+'</tbody>';
-  return '<div class="sql-meta"><span class="ok">'+data.rows.length+' row(s)</span><span>total matched: '+data.total_matched+'</span></div>'
-    +'<table>'+thead+tbody+'</table>';
+  const isInsert = data.inserted_id!==undefined && data.inserted_id!==null;
+  const meta = isInsert
+    ? '<div class="sql-meta"><span class="ok">inserted id='+data.inserted_id+'</span><span>labels: '+(data.labels||[]).join(', ')+'</span></div>'
+    : '<div class="sql-meta"><span class="ok">'+data.rows.length+' row(s)</span><span>total matched: '+data.total_matched+'</span></div>';
+  return meta+'<table>'+thead+tbody+'</table>';
 }
 
 // Ctrl+Enter でSQL実行

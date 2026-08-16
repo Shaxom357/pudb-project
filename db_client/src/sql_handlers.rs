@@ -8,8 +8,8 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
-use crate::handlers::AppState;
-use sql_engine::{run_select, CellValue};
+use crate::handlers::{auto_save, AppState};
+use sql_engine::{run_select, run_insert, CellValue};
 
 // ---------------------------------------------------------------------------
 // リクエスト / レスポンス DTO
@@ -37,11 +37,26 @@ pub struct SqlQueryResponse {
     /// 返却行数
     #[serde(skip_serializing_if = "Option::is_none")]
     pub returned: Option<usize>,
+    /// INSERTで発行されたレコードID（成功時）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inserted_id: Option<u64>,
+    /// INSERTで付与されたラベル（成功時）
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
     /// エラーメッセージ（失敗時）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// 実行したSQL（エコーバック）
     pub query: String,
+}
+
+impl SqlQueryResponse {
+    fn error(query: String, message: impl Into<String>) -> Self {
+        SqlQueryResponse {
+            ok: false, columns: vec![], rows: vec![], total_matched: None, returned: None,
+            inserted_id: None, labels: vec![], error: Some(message.into()), query,
+        }
+    }
 }
 
 fn cell_to_json(cell: &CellValue) -> serde_json::Value {
@@ -66,51 +81,68 @@ pub async fn execute_sql(
 ) -> impl IntoResponse {
     let query = payload.query.trim().to_string();
 
-    // 現時点では SELECT のみサポート
+    // 現時点では SELECT / INSERT のみサポート
     let upper = query.to_uppercase();
     let trimmed = upper.trim_start();
 
-    if !trimmed.starts_with("SELECT") {
-        return (StatusCode::BAD_REQUEST, Json(SqlQueryResponse {
-            ok: false,
-            columns: vec![],
-            rows: vec![],
-            total_matched: None,
-            returned: None,
-            error: Some("Only SELECT statements are supported in this version.".to_string()),
-            query,
-        }));
+    if trimmed.starts_with("SELECT") {
+        let inner = state.read().await;
+        let db = inner.mgr.db();
+
+        return match run_select(db, &query) {
+            Ok(result) => {
+                let returned = result.rows.len();
+                let rows: Vec<Vec<serde_json::Value>> = result.rows.iter()
+                    .map(|row| row.iter().map(cell_to_json).collect())
+                    .collect();
+                (StatusCode::OK, Json(SqlQueryResponse {
+                    ok: true,
+                    columns: result.columns,
+                    rows,
+                    total_matched: Some(result.total_matched),
+                    returned: Some(returned),
+                    inserted_id: None,
+                    labels: vec![],
+                    error: None,
+                    query,
+                }))
+            }
+            Err(e) => (StatusCode::BAD_REQUEST, Json(SqlQueryResponse::error(query, e.to_string()))),
+        };
     }
 
-    let inner = state.read().await;
-    let db = inner.mgr.db();
+    if trimmed.starts_with("INSERT") {
+        let mut inner = state.write().await;
+        let insert_result = run_insert(inner.mgr.db_mut(), &query);
 
-    match run_select(db, &query) {
-        Ok(result) => {
-            let returned = result.rows.len();
-            let rows: Vec<Vec<serde_json::Value>> = result.rows.iter()
-                .map(|row| row.iter().map(cell_to_json).collect())
-                .collect();
-            (StatusCode::OK, Json(SqlQueryResponse {
-                ok: true,
-                columns: result.columns,
-                rows,
-                total_matched: Some(result.total_matched),
-                returned: Some(returned),
-                error: None,
-                query,
-            }))
-        }
-        Err(e) => {
-            (StatusCode::BAD_REQUEST, Json(SqlQueryResponse {
-                ok: false,
-                columns: vec![],
-                rows: vec![],
-                total_matched: None,
-                returned: None,
-                error: Some(e.to_string()),
-                query,
-            }))
-        }
+        return match insert_result {
+            Ok(result) => {
+                auto_save(&mut inner);
+                // 挿入後のレコードを読み直し、使用したカラム順に値を並べて返す
+                let record = inner.mgr.db().get(result.id).unwrap();
+                let row: Vec<serde_json::Value> = result.columns.iter()
+                    .map(|col| record.columns.get(col)
+                        .map(CellValue::from_data_type)
+                        .map(|c| cell_to_json(&c))
+                        .unwrap_or(serde_json::Value::Null))
+                    .collect();
+                (StatusCode::CREATED, Json(SqlQueryResponse {
+                    ok: true,
+                    columns: result.columns,
+                    rows: vec![row],
+                    total_matched: None,
+                    returned: Some(1),
+                    inserted_id: Some(result.id),
+                    labels: result.labels,
+                    error: None,
+                    query,
+                }))
+            }
+            Err(e) => (StatusCode::BAD_REQUEST, Json(SqlQueryResponse::error(query, e.to_string()))),
+        };
     }
+
+    (StatusCode::BAD_REQUEST, Json(SqlQueryResponse::error(
+        query, "Only SELECT and INSERT statements are supported in this version.",
+    )))
 }

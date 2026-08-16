@@ -205,6 +205,90 @@ fn sort_records(records: &mut Vec<&Record>, order_by: &[OrderByItem]) {
     });
 }
 
+// ---------------------------------------------------------------------------
+// INSERT 実行
+// ---------------------------------------------------------------------------
+
+/// INSERT実行結果
+#[derive(Debug, Clone, PartialEq)]
+pub struct InsertResult {
+    /// 発行されたレコードID
+    pub id: u64,
+    /// 実際に使用されたカラム名（値との対応順）
+    pub columns: Vec<String>,
+    /// 付与されたラベル
+    pub labels: Vec<String>,
+}
+
+/// INSERT実行エラー
+#[derive(Debug, PartialEq)]
+pub enum InsertExecError {
+    /// VALUE の個数とカラム名の個数が一致しない
+    ColumnValueCountMismatch { columns: usize, values: usize },
+    /// カラム順が指定されておらず、DBにも既存カラムが1つも無いため推測できない
+    NoColumnsToInfer,
+    /// db_engine 側のエラー（主に ID 重複）
+    Database(db_engine::DatabaseError),
+}
+
+impl std::fmt::Display for InsertExecError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            InsertExecError::ColumnValueCountMismatch { columns, values } => write!(
+                f, "column count ({}) does not match value count ({})", columns, values
+            ),
+            InsertExecError::NoColumnsToInfer => write!(
+                f, "cannot infer column order: no existing columns in database; specify INSERT INTO (...) (col1, col2, ...) VALUE (...)"
+            ),
+            InsertExecError::Database(e) => write!(f, "{}", e),
+        }
+    }
+}
+
+impl From<db_engine::DatabaseError> for InsertExecError {
+    fn from(e: db_engine::DatabaseError) -> Self { InsertExecError::Database(e) }
+}
+
+fn literal_to_data_type(v: &LiteralValue) -> DataType {
+    match v {
+        LiteralValue::Text(s)    => DataType::Text(s.clone()),
+        LiteralValue::Integer(n) => DataType::Integer(*n),
+        LiteralValue::Float(f)   => DataType::Float(*f),
+        LiteralValue::Boolean(b) => DataType::Boolean(*b),
+        LiteralValue::Null       => DataType::Null,
+    }
+}
+
+pub fn execute_insert(db: &mut Database, stmt: &InsertStatement) -> Result<InsertResult, InsertExecError> {
+    // カラム順が明示されていなければ、DB内の既存カラムをソート順で採用する
+    // （SELECT * の列順と同じ規則）
+    let columns: Vec<String> = match &stmt.columns {
+        Some(cols) => cols.clone(),
+        None => {
+            let cols = db.list_all_columns();
+            if cols.is_empty() { return Err(InsertExecError::NoColumnsToInfer); }
+            cols
+        }
+    };
+
+    if columns.len() != stmt.values.len() {
+        return Err(InsertExecError::ColumnValueCountMismatch {
+            columns: columns.len(), values: stmt.values.len(),
+        });
+    }
+
+    let mut record = Record::new(0);
+    for (col, val) in columns.iter().zip(stmt.values.iter()) {
+        record.set(col.clone(), literal_to_data_type(val));
+    }
+    for label in &stmt.labels {
+        record.add_label(label.clone());
+    }
+
+    let id = db.insert(record)?;
+    Ok(InsertResult { id, columns, labels: stmt.labels.clone() })
+}
+
 fn cmp_dt(a: Option<&DataType>, b: Option<&DataType>) -> std::cmp::Ordering {
     use std::cmp::Ordering::*;
     match (a, b) {
@@ -223,6 +307,80 @@ fn cmp_dt(a: Option<&DataType>, b: Option<&DataType>) -> std::cmp::Ordering {
                 x.partial_cmp(&(*y as f64)).unwrap_or(Equal),
             _ => Equal,
         }
+    }
+}
+
+#[cfg(test)]
+mod insert_tests {
+    use super::*;
+    use crate::parser::parse_insert;
+
+    fn exec(db: &mut Database, sql: &str) -> Result<InsertResult, InsertExecError> {
+        let stmt = parse_insert(sql).expect("parse should succeed");
+        execute_insert(db, &stmt)
+    }
+
+    #[test]
+    fn test_insert_with_explicit_columns_creates_record() {
+        let mut db = Database::new();
+        let result = exec(&mut db,
+            "INSERT INTO (label.employee) (employee_name, employee_age, employee_department) VALUE ('田中', 24, 'developer')"
+        ).unwrap();
+        assert_eq!(result.id, 1);
+        assert_eq!(result.labels, vec!["employee".to_string()]);
+        let record = db.get(1).unwrap();
+        assert_eq!(record.columns.get("employee_name"), Some(&DataType::Text("田中".into())));
+        assert_eq!(record.columns.get("employee_age"), Some(&DataType::Integer(24)));
+        assert!(record.labels.contains(&"employee".to_string()));
+    }
+
+    #[test]
+    fn test_insert_infers_column_order_from_existing_columns() {
+        let mut db = Database::new();
+        exec(&mut db,
+            "INSERT INTO (label.employee) (age, name) VALUE (24, '田中')"
+        ).unwrap();
+        // 既存カラムは age, name (ソート順)。列指定なしならその順に値を対応させる。
+        let result = exec(&mut db, "INSERT INTO (label.employee) VALUE (31, 'Suzuki')").unwrap();
+        assert_eq!(result.columns, vec!["age".to_string(), "name".to_string()]);
+        let record = db.get(result.id).unwrap();
+        assert_eq!(record.columns.get("age"), Some(&DataType::Integer(31)));
+        assert_eq!(record.columns.get("name"), Some(&DataType::Text("Suzuki".into())));
+    }
+
+    #[test]
+    fn test_insert_without_columns_and_empty_db_errors() {
+        let mut db = Database::new();
+        let err = exec(&mut db, "INSERT INTO (label.employee) VALUE ('田中', 24)").unwrap_err();
+        assert_eq!(err, InsertExecError::NoColumnsToInfer);
+    }
+
+    #[test]
+    fn test_insert_column_value_count_mismatch_errors() {
+        let mut db = Database::new();
+        let err = exec(&mut db,
+            "INSERT INTO (label.employee) (name) VALUE ('田中', 24)"
+        ).unwrap_err();
+        assert_eq!(err, InsertExecError::ColumnValueCountMismatch { columns: 1, values: 2 });
+    }
+
+    #[test]
+    fn test_insert_multiple_labels_attached() {
+        let mut db = Database::new();
+        let result = exec(&mut db,
+            "INSERT INTO (label.employee, label.manager) (name) VALUE ('田中')"
+        ).unwrap();
+        let record = db.get(result.id).unwrap();
+        assert!(record.labels.contains(&"employee".to_string()));
+        assert!(record.labels.contains(&"manager".to_string()));
+    }
+
+    #[test]
+    fn test_insert_creates_new_label_on_the_fly() {
+        let mut db = Database::new();
+        assert!(db.list_all_labels().is_empty());
+        exec(&mut db, "INSERT INTO (label.brandnew) (name) VALUE ('x')").unwrap();
+        assert_eq!(db.list_all_labels(), vec!["brandnew".to_string()]);
     }
 }
 
