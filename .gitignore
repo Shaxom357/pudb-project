@@ -26,6 +26,10 @@ credentials
 *.json.tmp
 db_data.json
 
+# ログファイル（サーバー起動時に生成されるログ保管先）
+logs/
+*.log
+
 # Python キャッシュ
 __pycache__/
 *.pyc

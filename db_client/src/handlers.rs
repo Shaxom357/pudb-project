@@ -8,9 +8,11 @@ use axum::{
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use db_engine::{Record, DataType};
-use db_engine::kdb_store::KdbFile;
+use db_engine::kdb_store::{KdbError, KdbFile};
+use db_engine::PersistError;
 use dynamic_label_management::LabelManager;
 
+use crate::logging::Logger;
 use crate::models::{
     CreateRecordRequest, UpdateRecordRequest,
     RecordResponse, ErrorResponse,
@@ -23,6 +25,7 @@ pub struct AppStateInner {
     /// HTTPリクエスト（/records, /labels 系のREST API）を受け付けるかどうか。
     /// false の場合、データ操作はSQL経由(/sql)のみ許可される。
     pub http_api_enabled: bool,
+    pub logger: Arc<Logger>,
 }
 
 pub type AppState = Arc<RwLock<AppStateInner>>;
@@ -33,13 +36,23 @@ pub(crate) fn auto_save(state: &mut AppStateInner) {
         let next_id = state.mgr.db().next_id();
         if let Err(e) = kdb.compact(&records, next_id) {
             eprintln!("[WARN] KDB compact failed: {}", e);
+            if let KdbError::Io(io_err) = &e {
+                state.logger.db_io_error("KDB compact failed", io_err);
+            } else {
+                state.logger.db_warn(format!("KDB compact failed: {}", e));
+            }
         } else {
-            println!("[INFO] KDB saved to '{}'", state.db_path);
+            state.logger.db_info(format!("KDB saved to '{}' ({} record(s))", state.db_path, records.len()));
         }
     } else if let Err(e) = state.mgr.db().save(&state.db_path) {
         eprintln!("[WARN] Failed to save DB: {}", e);
+        if let PersistError::Io(io_err) = &e {
+            state.logger.db_io_error("DB save failed", io_err);
+        } else {
+            state.logger.db_warn(format!("DB save failed: {}", e));
+        }
     } else {
-        println!("[INFO] DB saved to '{}'", state.db_path);
+        state.logger.db_info(format!("DB saved to '{}'", state.db_path));
     }
 }
 
@@ -88,10 +101,14 @@ pub async fn create_record(
         Ok(id) => {
             let response = RecordResponse::from_record(inner.mgr.db().get(id).unwrap());
             if inner.kdb.is_none() { auto_save(&mut inner); }
+            inner.logger.db_info(format!("record created id={}", id));
             (StatusCode::CREATED, Json(serde_json::to_value(response).unwrap()))
         }
-        Err(e) => (StatusCode::CONFLICT,
-            Json(serde_json::to_value(ErrorResponse::new(e.to_string())).unwrap())),
+        Err(e) => {
+            inner.logger.db_warn(format!("record create failed: {}", e));
+            (StatusCode::CONFLICT,
+                Json(serde_json::to_value(ErrorResponse::new(e.to_string())).unwrap()))
+        }
     }
 }
 
@@ -108,17 +125,28 @@ pub async fn update_record(
         Ok(()) => {
             let response = RecordResponse::from_record(inner.mgr.db().get(id).unwrap());
             auto_save(&mut inner);
+            inner.logger.db_info(format!("record updated id={}", id));
             (StatusCode::OK, Json(serde_json::to_value(response).unwrap()))
         }
-        Err(e) => (StatusCode::NOT_FOUND,
-            Json(serde_json::to_value(ErrorResponse::new(e.to_string())).unwrap())),
+        Err(e) => {
+            inner.logger.db_warn(format!("record update failed id={}: {}", id, e));
+            (StatusCode::NOT_FOUND,
+                Json(serde_json::to_value(ErrorResponse::new(e.to_string())).unwrap()))
+        }
     }
 }
 
 pub async fn delete_record(State(state): State<AppState>, Path(id): Path<u64>) -> impl IntoResponse {
     let mut inner = state.write().await;
     match inner.mgr.db_mut().delete(id) {
-        Ok(()) => { auto_save(&mut inner); StatusCode::NO_CONTENT.into_response() }
-        Err(e) => (StatusCode::NOT_FOUND, Json(ErrorResponse::new(e.to_string()))).into_response(),
+        Ok(()) => {
+            auto_save(&mut inner);
+            inner.logger.db_info(format!("record deleted id={}", id));
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(e) => {
+            inner.logger.db_warn(format!("record delete failed id={}: {}", id, e));
+            (StatusCode::NOT_FOUND, Json(ErrorResponse::new(e.to_string()))).into_response()
+        }
     }
 }

@@ -86,6 +86,7 @@ pub async fn execute_sql(
     let trimmed = upper.trim_start();
 
     if trimmed.starts_with("SELECT") {
+        let started = std::time::Instant::now();
         let inner = state.read().await;
         let db = inner.mgr.db();
 
@@ -95,6 +96,7 @@ pub async fn execute_sql(
                 let rows: Vec<Vec<serde_json::Value>> = result.rows.iter()
                     .map(|row| row.iter().map(cell_to_json).collect())
                     .collect();
+                inner.logger.sql_query(&query, true, started.elapsed().as_millis(), None);
                 (StatusCode::OK, Json(SqlQueryResponse {
                     ok: true,
                     columns: result.columns,
@@ -107,17 +109,22 @@ pub async fn execute_sql(
                     query,
                 }))
             }
-            Err(e) => (StatusCode::BAD_REQUEST, Json(SqlQueryResponse::error(query, e.to_string()))),
+            Err(e) => {
+                inner.logger.sql_query(&query, false, started.elapsed().as_millis(), Some(&e.to_string()));
+                (StatusCode::BAD_REQUEST, Json(SqlQueryResponse::error(query, e.to_string())))
+            }
         };
     }
 
     if trimmed.starts_with("INSERT") {
+        let started = std::time::Instant::now();
         let mut inner = state.write().await;
         let insert_result = run_insert(inner.mgr.db_mut(), &query);
 
         return match insert_result {
             Ok(result) => {
                 auto_save(&mut inner);
+                inner.logger.sql_query(&query, true, started.elapsed().as_millis(), None);
                 // 挿入後のレコードを読み直し、使用したカラム順に値を並べて返す
                 let record = inner.mgr.db().get(result.id).unwrap();
                 let row: Vec<serde_json::Value> = result.columns.iter()
@@ -138,10 +145,17 @@ pub async fn execute_sql(
                     query,
                 }))
             }
-            Err(e) => (StatusCode::BAD_REQUEST, Json(SqlQueryResponse::error(query, e.to_string()))),
+            Err(e) => {
+                inner.logger.sql_query(&query, false, started.elapsed().as_millis(), Some(&e.to_string()));
+                (StatusCode::BAD_REQUEST, Json(SqlQueryResponse::error(query, e.to_string())))
+            }
         };
     }
 
+    {
+        let inner = state.read().await;
+        inner.logger.sql_query(&query, false, 0, Some("unsupported statement"));
+    }
     (StatusCode::BAD_REQUEST, Json(SqlQueryResponse::error(
         query, "Only SELECT and INSERT statements are supported in this version.",
     )))

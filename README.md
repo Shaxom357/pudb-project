@@ -7,13 +7,13 @@
 > ・メジャーバージョンが異なると互換性は無くなります。  
 > ・メジャーバージョンが一致し、マイナーバージョンだけが異なる場合問題なく移行ができ互換性を保ちます。
 
-**バージョン: `1.6.0`**
+**バージョン: `1.7.0`**
 
 | 区分 | 説明 |
 |------|------|
 | **A = 1** (メジャー) | KDB 暗号化バイナリ形式導入による旧 JSON 形式との破壊的変更 |
-| **B = 6** (マイナー) | Web管理UI・DB Info API・SQL SELECT・テストデータ生成・SQL INSERT・設定管理(HTTPリクエスト受付オンオフ) の 6 機能追加 |
-| **C = 0** (ビルド) | 1.6系での修正なし |
+| **B = 7** (マイナー) | Web管理UI・DB Info API・SQL SELECT・テストデータ生成・SQL INSERT・設定管理(HTTPリクエスト受付オンオフ)・ログ出力保管機能 の 7 機能追加 |
+| **C = 0** (ビルド) | 1.7系での修正なし |
 
 ---
 
@@ -26,6 +26,7 @@
 - [クイックスタート](#クイックスタート)
 - [KDB ストレージフォーマット](#kdb-ストレージフォーマット)
 - [SQL 機能](#sql-機能)
+- [ログ機能](#ログ機能)
 - [各クレートの詳細](#各クレートの詳細)
 - [API リファレンス](#api-リファレンス)
 - [Web 管理UI](#web-管理ui)
@@ -110,7 +111,7 @@ KAGURA DB は Rust で一から実装したデータベースエンジンです�
 - ✅ `KAGURA_MASTER_KEY` 環境変数によるカスタムマスターキー設定
 
 ### db_client（REST API サーバー）
-- ✅ 17 本のエンドポイント（レコード CRUD・ラベル管理・DB 情報・SQL・設定・Web UI）
+- ✅ 18 本のエンドポイント（レコード CRUD・ラベル管理・DB 情報・SQL・設定・ログ・Web UI）
 - ✅ KDB モード（`.kdb`）と JSON モードの自動判別・後方互换
 - ✅ 起動時自動ロード・書き込み時自動セーブ
 - ✅ 環境変数による設定（`DB_FILE` / `DB_ADDR` / `KAGURA_MASTER_KEY`）
@@ -119,6 +120,7 @@ KAGURA DB は Rust で一から実装したデータベースエンジンです�
 - ✅ `POST /sql` で SQL SELECT / INSERT クエリを実行
 - ✅ `GET /settings` / `PUT /settings` で HTTPリクエスト（`/records` `/labels` 系 REST API）受付のオンオフを切替可能（**既定は無効**。データ操作は基本 SQL 経由とし、REST API は大量テストデータ投入など用途に応じて有効化する）
 - ✅ Web UI の Records 一覧は `POST /sql`（`SELECT * FROM label.*`）経由で取得するため、REST API が無効でも常に閲覧可能
+- ✅ **ログ出力保管機能**: 起動/停止時刻、停止理由（正常 / エラー / HW・ストレージ障害）、SQL・HTTPリクエストの成功/失敗、Webクライアントの応答時間、DB保存・レコード/ラベル操作などを JSON Lines 形式でファイルへ永続保存（詳細は [ログ機能](#ログ機能) を参照）。`GET /logs` および Web UI の「ログ」ビューから閲覧可能
 
 ### sql_engine（SQL SELECT/INSERT エンジン）
 - ✅ 独自拡張 SQL `SELECT ... FROM label.xxx` 構文
@@ -368,6 +370,42 @@ curl -X POST http://localhost:3000/sql \
 
 ---
 
+## ログ機能
+
+KAGURA DB の稼働ログを JSON Lines（1行1JSONオブジェクト）形式でファイルへ永続保存する。
+保存先は環境変数 `KAGURA_LOG_FILE`（既定: `logs/kagura.log`）で変更できる。
+
+### 記録される内容
+
+| 項目 | 説明 |
+|------|------|
+| 起動・停止時刻 | サーバー起動時／停止時に `category: "lifecycle"` で記録 |
+| 停止理由 | `stop_reason` フィールドで `normal`（SIGINT/SIGTERM による正常終了）・`error`（設定不備やバインド失敗などアプリケーション上のエラー）・`hardware`（ディスクI/Oエラー等、HW/ストレージ起因と判定できる異常）を区別 |
+| SQLクエリ実行 | `category: "sql"` で成功/失敗（`success`）・実行時間（`duration_ms`）・エラー内容を記録 |
+| HTTPリクエスト | `category: "http"` で全リクエストのメソッド・パス・ステータスコード・応答時間（`duration_ms`）を記録 |
+| DB操作 | `category: "db"` でレコード/ラベルの作成・更新・削除、KDB/JSON保存の成功・失敗を記録 |
+| HW/ストレージ異常 | `category: "hardware"` でディスクI/Oエラー（`EIO` `ENOSPC` `EROFS` `ENODEV` 等）を検知した際に記録 |
+
+各エントリは共通で `timestamp`（RFC3339）・`level`（`info`/`warn`/`error`）・`category`・`message` を持つ。
+
+### ログの閲覧
+
+```bash
+# 直近200件（既定）を新しい順に取得
+curl http://localhost:3000/logs
+
+# 件数を指定（上限2000）
+curl "http://localhost:3000/logs?lines=50"
+```
+
+Web UI の「📜 ログ」ビューからも、カテゴリで絞り込みながら閲覧できる。
+
+### 停止理由の判定について
+
+「HW問題による停止」は、OSが返す I/O エラーコード（`EIO`=入出力エラー、`ENOSPC`=ディスク容量不足、`EROFS`=読み取り専用ファイルシステム等）をもとに分類する。物理的な故障そのものを検知しているわけではなく、OSレベルで観測できるストレージ関連のエラーを手がかりにした分類である点に留意する。
+
+---
+
 ## API リファレンス
 
 ### エンドポイント一覧
@@ -394,13 +432,14 @@ HTTPリクエスト欄が「要HTTP API」の行は、既定では無効な `/re
 | `POST`   | `/sql` | SQL SELECT / INSERT 実行 | - |
 | `GET`    | `/settings` | 現在の設定取得 | - |
 | `PUT`    | `/settings` | 設定更新（HTTPリクエスト受付オンオフ） | - |
+| `GET`    | `/logs` | 保管されたログを新しい順に取得（`?lines=` で件数指定、既定200・上限2000） | - |
 
 ### GET /db/info レスポンス例
 
 ```json
 {
   "engine_name":    "KAGURA DB Engine",
-  "app_version":    "1.6.0",
+  "app_version":    "1.7.0",
   "storage_mode":   "kdb",
   "storage_format": "KDB Binary (WAL + XChaCha20-Poly1305 encrypted)",
   "encrypted":      true,
@@ -424,6 +463,7 @@ HTTPリクエスト欄が「要HTTP API」の行は、既定では無効な `/re
 | **ℹ️ DB Info** | バージョン・ストレージモード・暗号化状態・統計カード・カラム一覧 |
 | **🔍 SQL Query** | SQL SELECT / INSERT 実行・テーブル形式結果表示・ Ctrl+Enter 対応 |
 | **⚙️ 設定** | HTTPリクエスト（`/records` `/labels` 系 REST API）受付のオンオフを切替（既定は無効）。大量テストデータ投入など HTTP 経由の操作が必要なときに有効化する |
+| **📜 ログ** | 保管されたログ（起動/停止・SQL・HTTP・DB操作・HW異常）をカテゴリで絞り込みながら一覧表示・自動更新（10秒） |
 
 ---
 
@@ -469,9 +509,10 @@ cargo test --workspace
 | `db_engine` | 38 | CRUD・ラベル操作・KDB暗号化・バイナリコーデック |
 | `dynamic_label_management` | 24 | AND/OR 検索・リネーム・差分 |
 | `db_ffi` | 10 | FFI 関数・メモリ管理 |
-| `db_client`（統合テスト） | 41 | HTTP API・ラベル操作・永続化・SQL SELECT/INSERT・設定（HTTPリクエスト受付オンオフ） |
+| `db_client`（ユニットテスト） | 5 | ログ出力保管機能（JSON Lines 書き込み/読み出し・HW起因エラー判定） |
+| `db_client`（統合テスト） | 45 | HTTP API・ラベル操作・永続化・SQL SELECT/INSERT・設定（HTTPリクエスト受付オンオフ）・ログ（`GET /logs`） |
 | `sql_engine` | 28 | パーサー・実行エンジン（SELECT・INSERT・WHERE・ORDER BY・LIKE） |
-| **合計** | **141** | |
+| **合計** | **150** | |
 
 ---
 
@@ -489,6 +530,7 @@ cargo test --workspace
 | フロントエンド | バニラ HTML / CSS / JavaScript（外部依存なし） |
 | テスト（HTTP） | [reqwest](https://github.com/seanmonstar/reqwest) 0.12 |
 | テストデータ生成 | Python 3.6+ 標準ライブラリのみ |
+| ログ | JSON Lines 形式でファイル保存（[chrono](https://github.com/chronotope/chrono) でタイムスタンプ生成） |
 
 ---
 
@@ -504,6 +546,7 @@ cargo test --workspace
 
 | バージョン | 主な変更内容 |
 |-----------|-------------|
+| **1.7.0** | ログ出力保管機能を追加。起動/停止時刻・停止理由（正常/エラー/HW異常）・SQL/HTTPリクエストの成功失敗・Webクライアントの応答時間・DB操作を JSON Lines 形式でファイルへ永続保存。`GET /logs` エンドポイントと Web UI「ログ」ビューを追加 |
 | **1.6.0** | Web UI に「設定」ビューを追加し `GET`/`PUT /settings` で HTTPリクエスト（`/records` `/labels` 系 REST API）受付のオンオフを切替可能に（**既定を無効化**）。Web UI の Records 一覧を REST から SQL（`SELECT * FROM label.*`）経由の取得に変更し、REST API 無効時も閲覧可能に。`SELECT *` の結果に `labels` 列（カンマ区切り）を追加 |
 | **1.5.0** | SQL INSERT 機能追加（`INSERT INTO (label.xxx) (col, ...) VALUE (...)`、複数ラベル同時付与、ラベル自動作成）、`POST /sql` の INSERT 対応 |
 | **1.4.1** | DB Info UI のバージョン・ストレージ表示修正、全クレートバージョン統一 |

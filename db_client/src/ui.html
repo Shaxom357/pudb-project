@@ -143,17 +143,18 @@ tbody td { padding: 10px 14px; vertical-align: middle; }
 <div class="layout">
   <div class="sidebar">
     <div class="sidebar-section">Views</div>
-    <div class="sidebar-nav active" id="navRecords" onclick="showView('records')">&#x1F4CB; Records</div>
-    <div class="sidebar-nav" id="navDbInfo" onclick="showView('dbinfo')">&#x2139;&#xFE0F; DB Info</div>
+    <div class="sidebar-nav" id="navRecords" onclick="showView('records')">&#x1F4CB; Records</div>
+    <div class="sidebar-nav active" id="navDbInfo" onclick="showView('dbinfo')">&#x2139;&#xFE0F; DB Info</div>
     <div class="sidebar-nav" id="navSql" onclick="showView('sql')">&#x1F50D; SQL Query</div>
     <div class="sidebar-nav" id="navSettings" onclick="showView('settings')">&#x2699;&#xFE0F; 設定</div>
+    <div class="sidebar-nav" id="navLogs" onclick="showView('logs')">&#x1F4DC; ログ</div>
     <div class="sidebar-section" style="margin-top:8px">Filter by Label</div>
     <div class="sidebar-all" onclick="filterByLabel(null)">&#x1F4CB; All records</div>
     <div id="labelList"></div>
   </div>
   <div class="main">
     <!-- Records View -->
-    <div id="viewRecords">
+    <div id="viewRecords" style="display:none">
       <div class="toolbar">
         <input type="text" id="searchInput" placeholder="Search columns / labels..." oninput="renderTable()">
         <button class="btn btn-primary" onclick="openCreateModal()">+ New Record</button>
@@ -173,7 +174,7 @@ tbody td { padding: 10px 14px; vertical-align: middle; }
       </div>
     </div>
     <!-- DB Info View -->
-    <div id="viewDbInfo" style="display:none;flex:1;overflow:hidden;display:none;flex-direction:column">
+    <div id="viewDbInfo" style="flex:1;overflow:hidden;flex-direction:column">
       <div class="toolbar">
         <span style="font-weight:700;font-size:15px">&#x2139;&#xFE0F; DB Version &amp; Info</span>
         <span style="flex:1"></span>
@@ -228,6 +229,35 @@ tbody td { padding: 10px 14px; vertical-align: middle; }
         </div>
       </div>
     </div>
+    <!-- Logs View -->
+    <div id="viewLogs" style="display:none;flex:1;overflow:hidden;flex-direction:column">
+      <div class="toolbar">
+        <span style="font-weight:700;font-size:15px">&#x1F4DC; ログ</span>
+        <select id="logsCategoryFilter" onchange="renderLogs()" style="border:1px solid #ddd;border-radius:6px;padding:6px 10px;font-size:13px">
+          <option value="">全カテゴリ</option>
+          <option value="lifecycle">lifecycle（起動/停止）</option>
+          <option value="http">http</option>
+          <option value="sql">sql</option>
+          <option value="db">db</option>
+          <option value="hardware">hardware</option>
+        </select>
+        <span style="flex:1"></span>
+        <button class="btn btn-ghost" onclick="loadLogs()">&#x21BA; Refresh</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th style="width:210px">Timestamp</th>
+            <th style="width:70px">Level</th>
+            <th style="width:100px">Category</th>
+            <th>Message</th>
+            <th style="width:90px">Status</th>
+            <th style="width:90px">Duration</th>
+          </tr></thead>
+          <tbody id="logsTableBody"></tbody>
+        </table>
+      </div>
+    </div>
   </div>
 </div>
 <div class="statusbar"><span id="statusText">Loading...</span></div>
@@ -268,7 +298,7 @@ tbody td { padding: 10px 14px; vertical-align: middle; }
 
 <script>
 let allRecords=[], allLabels=[], activeLabel=null, deleteTarget=null;
-let currentView='records';
+let currentView='dbinfo';
 
 async function checkOk(r){
   if(!r.ok){
@@ -292,12 +322,16 @@ function showView(name){
   document.getElementById('viewDbInfo').style.display   = name==='dbinfo'   ? '' : 'none';
   document.getElementById('viewSql').style.display      = name==='sql'      ? '' : 'none';
   document.getElementById('viewSettings').style.display = name==='settings' ? '' : 'none';
+  document.getElementById('viewLogs').style.display     = name==='logs'     ? '' : 'none';
   document.getElementById('navRecords').classList.toggle('active', name==='records');
   document.getElementById('navDbInfo').classList.toggle('active',  name==='dbinfo');
   document.getElementById('navSql').classList.toggle('active',     name==='sql');
   document.getElementById('navSettings').classList.toggle('active',name==='settings');
+  document.getElementById('navLogs').classList.toggle('active',    name==='logs');
+  if(name==='records') loadAll();
   if(name==='dbinfo') loadDbInfo();
   if(name==='settings') loadSettings();
+  if(name==='logs') loadLogs();
 }
 
 // SQLクエリ結果 ({columns, rows}) を Records一覧が期待する {id, columns, labels} の形に変換する。
@@ -374,6 +408,7 @@ async function loadDbInfo(){
   try{
     const info = await api.get('/db/info');
     container.innerHTML = renderDbInfo(info);
+    document.getElementById('headerCount').textContent = info.record_count+' records';
   }catch(e){
     container.innerHTML = '<div class="empty"><div style="font-size:36px">&#x274C;</div><div style="margin-top:10px">Failed to load DB info</div></div>';
     showToast('DB info load failed','error');
@@ -452,6 +487,44 @@ async function onHttpApiToggle(){
     statusEl.textContent = '更新に失敗しました';
     showToast('設定の更新に失敗しました','error');
   }
+}
+
+// ---- Logs ----
+let allLogs=[];
+async function loadLogs(){
+  const body = document.getElementById('logsTableBody');
+  try{
+    allLogs = await api.get('/logs?lines=300');
+    renderLogs();
+  }catch(e){
+    body.innerHTML = '<tr><td colspan="6" class="empty"><div style="font-size:36px">&#x274C;</div><div style="margin-top:10px">ログの読み込みに失敗しました</div></td></tr>';
+  }
+}
+
+function renderLogs(){
+  const cat = document.getElementById('logsCategoryFilter').value;
+  const body = document.getElementById('logsTableBody');
+  const rows = cat ? allLogs.filter(l=>l.category===cat) : allLogs;
+  if(!rows.length){
+    body.innerHTML = '<tr><td colspan="6" class="empty"><div style="font-size:48px">&#x1F4ED;</div><div style="margin-top:12px">ログがありません</div></td></tr>';
+    return;
+  }
+  const levelBadge = lvl => {
+    const cls = lvl==='error' ? 'red' : lvl==='warn' ? 'orange' : 'green';
+    return '<span class="info-badge '+(cls==='red'?'warn':cls==='orange'?'warn':'ok')+'" style="'+(cls==='red'?'background:#ffe3e3;color:#e03131':'')+'">'+lvl.toUpperCase()+'</span>';
+  };
+  body.innerHTML = rows.map(l=>{
+    const status = l.status_code!=null ? l.status_code : (l.stop_reason ? l.stop_reason : '-');
+    const duration = l.duration_ms!=null ? l.duration_ms+' ms' : '-';
+    return '<tr>'
+      +'<td style="font-family:monospace;font-size:12px">'+esc(l.timestamp)+'</td>'
+      +'<td>'+levelBadge(l.level)+'</td>'
+      +'<td><span class="tag">'+esc(l.category)+'</span></td>'
+      +'<td style="font-family:monospace;font-size:12px;white-space:pre-wrap;word-break:break-all">'+esc(l.message)+'</td>'
+      +'<td>'+esc(String(status))+'</td>'
+      +'<td>'+esc(duration)+'</td>'
+      +'</tr>';
+  }).join('');
 }
 
 function openCreateModal(){
@@ -617,8 +690,13 @@ function showToast(msg,type='success'){ const t=document.getElementById('toast')
 document.getElementById('modal').addEventListener('click',e=>{ if(e.target.id==='modal')closeModal(); });
 document.getElementById('deleteModal').addEventListener('click',e=>{ if(e.target.id==='deleteModal')closeDeleteModal(); });
 
-loadAll();
-setInterval(loadAll,10000);
+// 初回表示は軽量な DB Info。Records一覧（全件取得＋巨大テーブル再描画）はRecordsビューを
+// 実際に開いたときにだけ取得する（10,000件規模だと初回表示が非常に重くなるため）。
+showView('dbinfo');
+// Records一覧の自動更新もRecordsビュー表示中のみ行う。
+// 他の画面（DB Info/SQL/設定/ログ）を見ている間はこの重いポーリングを止め、操作性を優先する。
+setInterval(()=>{ if(currentView==='records') loadAll(); },10000);
+setInterval(()=>{ if(currentView==='logs') loadLogs(); },10000);
 </script>
 </body>
 </html>
