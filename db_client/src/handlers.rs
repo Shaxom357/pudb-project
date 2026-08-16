@@ -24,7 +24,7 @@ pub struct AppStateInner {
 
 pub type AppState = Arc<RwLock<AppStateInner>>;
 
-fn auto_save(state: &mut AppStateInner) {
+pub(crate) fn auto_save(state: &mut AppStateInner) {
     if let Some(kdb) = state.kdb.as_mut() {
         let records: Vec<Record> = state.mgr.db().list_all().into_iter().cloned().collect();
         let next_id = state.mgr.db().next_id();

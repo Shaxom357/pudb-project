@@ -13,6 +13,7 @@ pub enum Token {
     Select, From, Where, And, Or, Not,
     OrderBy, // ORDER BY は2語だが1トークンとして扱う
     Limit, Like, Asc, Desc, Null, True, False,
+    Insert, Into, Value,
     // 記号
     Star, Comma, Dot,
     Eq, Ne, Lt, Le, Gt, Ge,
@@ -146,6 +147,9 @@ impl<'a> Lexer<'a> {
             "NULL"   => Token::Null,
             "TRUE"   => Token::True,
             "FALSE"  => Token::False,
+            "INSERT" => Token::Insert,
+            "INTO"   => Token::Into,
+            "VALUE" | "VALUES" => Token::Value,
             _        => Token::Ident(s),
         }
     }
@@ -231,6 +235,12 @@ impl Parser {
         let t = self.advance();
         if t == e { Ok(()) } else { Err(ParseError::UnexpectedToken {
             got: format!("{:?}", t), expected: format!("{:?}", e) }) }
+    }
+    /// 文の終端で余分なトークンが残っていないことを確認する
+    fn expect_eof(&mut self) -> Result<(), ParseError> {
+        if self.peek() == &Token::Eof { Ok(()) }
+        else { Err(ParseError::UnexpectedToken {
+            got: format!("{:?}", self.peek()), expected: "end of statement".into() }) }
     }
 
     pub fn parse_select(&mut self) -> Result<SelectStatement, ParseError> {
@@ -337,17 +347,21 @@ impl Parser {
             o => return Err(ParseError::UnexpectedToken {
                 got: format!("{:?}", o), expected: "comparison operator".into() }),
         };
-        let value = match self.advance() {
-            Token::StringLit(s) => LiteralValue::Text(s),
-            Token::IntLit(n)    => LiteralValue::Integer(n),
-            Token::FloatLit(f)  => LiteralValue::Float(f),
-            Token::True         => LiteralValue::Boolean(true),
-            Token::False        => LiteralValue::Boolean(false),
-            Token::Null         => LiteralValue::Null,
-            o => return Err(ParseError::UnexpectedToken {
-                got: format!("{:?}", o), expected: "literal value".into() }),
-        };
+        let value = self.parse_literal()?;
         Ok(Comparison { column, op, value })
+    }
+
+    fn parse_literal(&mut self) -> Result<LiteralValue, ParseError> {
+        match self.advance() {
+            Token::StringLit(s) => Ok(LiteralValue::Text(s)),
+            Token::IntLit(n)    => Ok(LiteralValue::Integer(n)),
+            Token::FloatLit(f)  => Ok(LiteralValue::Float(f)),
+            Token::True         => Ok(LiteralValue::Boolean(true)),
+            Token::False        => Ok(LiteralValue::Boolean(false)),
+            Token::Null         => Ok(LiteralValue::Null),
+            o => Err(ParseError::UnexpectedToken {
+                got: format!("{:?}", o), expected: "literal value".into() }),
+        }
     }
 
     fn parse_order_by(&mut self) -> Result<Vec<OrderByItem>, ParseError> {
@@ -364,13 +378,114 @@ impl Parser {
         }
         Ok(items)
     }
+
+    // -----------------------------------------------------------------
+    // INSERT
+    // -----------------------------------------------------------------
+
+    /// INSERT INTO (label.a, ...) [(col1, col2, ...)] VALUE (v1, v2, ...)
+    /// カラム名の丸括弧はラベル指定の直後・VALUEの前に置く（標準SQLの
+    /// `INSERT INTO table (col1, col2) VALUES (...)` に準じる語順）。省略時は
+    /// DB内の既存カラムをソート順で対応付ける。
+    pub fn parse_insert(&mut self) -> Result<InsertStatement, ParseError> {
+        self.expect(Token::Insert)?;
+        self.expect(Token::Into)?;
+        self.expect(Token::LParen)?;
+        let labels = self.parse_insert_label_list()?;
+        self.expect(Token::RParen)?;
+        let columns = if self.peek() == &Token::LParen {
+            self.advance();
+            let cols = self.parse_ident_list()?;
+            self.expect(Token::RParen)?;
+            Some(cols)
+        } else { None };
+        self.expect(Token::Value)?;
+        self.expect(Token::LParen)?;
+        let values = self.parse_value_list()?;
+        self.expect(Token::RParen)?;
+        Ok(InsertStatement { labels, values, columns })
+    }
+
+    /// INSERT INTO の丸括弧内: label.name を1つ以上、カンマ区切りで受け取る。
+    /// `label.name`（識別子形式、SELECTと同じ）と `'label.name'`（文字列リテラル形式）の
+    /// 両方を受理する。
+    fn parse_insert_label_list(&mut self) -> Result<Vec<String>, ParseError> {
+        let mut labels = vec![self.parse_insert_label_item()?];
+        while self.peek() == &Token::Comma {
+            self.advance();
+            labels.push(self.parse_insert_label_item()?);
+        }
+        Ok(labels)
+    }
+
+    fn parse_insert_label_item(&mut self) -> Result<String, ParseError> {
+        if let Token::StringLit(_) = self.peek() {
+            let s = match self.advance() { Token::StringLit(s) => s, _ => unreachable!() };
+            let name = s.strip_prefix("label.")
+                .ok_or_else(|| ParseError::UnsupportedSyntax(
+                    format!("label must be in 'label.<name>' form, got '{}'", s)))?;
+            return validate_insert_label_name(name);
+        }
+        match self.advance() {
+            Token::Ident(s) if s.to_lowercase() == "label" => {}
+            o => return Err(ParseError::UnexpectedToken {
+                got: format!("{:?}", o), expected: "'label' or 'label.<name>' string".into() }),
+        }
+        self.expect(Token::Dot)?;
+        match self.advance() {
+            Token::Star => Err(ParseError::UnsupportedSyntax(
+                "INSERT label name cannot be empty or '*'".into())),
+            Token::Ident(name) => validate_insert_label_name(&name),
+            o => Err(ParseError::UnexpectedToken {
+                got: format!("{:?}", o), expected: "label name".into() }),
+        }
+    }
+
+    fn parse_value_list(&mut self) -> Result<Vec<LiteralValue>, ParseError> {
+        let mut values = vec![self.parse_literal()?];
+        while self.peek() == &Token::Comma {
+            self.advance();
+            values.push(self.parse_literal()?);
+        }
+        Ok(values)
+    }
+
+    fn parse_ident_list(&mut self) -> Result<Vec<String>, ParseError> {
+        let mut items = vec![self.expect_ident()?];
+        while self.peek() == &Token::Comma {
+            self.advance();
+            items.push(self.expect_ident()?);
+        }
+        Ok(items)
+    }
+}
+
+fn validate_insert_label_name(name: &str) -> Result<String, ParseError> {
+    if name.is_empty() || name == "*" {
+        return Err(ParseError::UnsupportedSyntax(
+            "INSERT label name cannot be empty or '*'".into()));
+    }
+    Ok(name.to_string())
 }
 
 /// SELECT文をパースする公開エントリーポイント
 pub fn parse_select(sql: &str) -> Result<SelectStatement, ParseError> {
     if sql.trim().is_empty() { return Err(ParseError::EmptyQuery); }
     let tokens = Lexer::new(sql).tokenize()?;
-    Parser::new(tokens).parse_select()
+    let mut parser = Parser::new(tokens);
+    let stmt = parser.parse_select()?;
+    parser.expect_eof()?;
+    Ok(stmt)
+}
+
+/// INSERT文をパースする公開エントリーポイント
+pub fn parse_insert(sql: &str) -> Result<InsertStatement, ParseError> {
+    if sql.trim().is_empty() { return Err(ParseError::EmptyQuery); }
+    let tokens = Lexer::new(sql).tokenize()?;
+    let mut parser = Parser::new(tokens);
+    let stmt = parser.parse_insert()?;
+    parser.expect_eof()?;
+    Ok(stmt)
 }
 
 // ---------------------------------------------------------------------------
@@ -465,6 +580,76 @@ mod tests {
     fn test_semicolon_terminator() {
         let s = parse_select("SELECT * FROM label.employee;").unwrap();
         assert_eq!(s.from, FromClause::Label(LabelTarget::LabelName("employee".into())));
+    }
+
+    // -- INSERT --
+
+    #[test]
+    fn test_insert_quoted_label_no_column_order() {
+        let s = parse_insert(
+            "INSERT INTO ('label.employee') VALUE ('田中', '24', 'developer');"
+        ).unwrap();
+        assert_eq!(s.labels, vec!["employee".to_string()]);
+        assert_eq!(s.values, vec![
+            LiteralValue::Text("田中".into()),
+            LiteralValue::Text("24".into()),
+            LiteralValue::Text("developer".into()),
+        ]);
+        assert_eq!(s.columns, None);
+    }
+
+    #[test]
+    fn test_insert_with_explicit_column_order() {
+        let s = parse_insert(
+            "INSERT INTO ('label.employee') (employee_name, employee_age, employee_department) VALUE ('田中', 24, 'developer')"
+        ).unwrap();
+        assert_eq!(s.columns, Some(vec![
+            "employee_name".into(), "employee_age".into(), "employee_department".into(),
+        ]));
+        assert_eq!(s.values[1], LiteralValue::Integer(24));
+    }
+
+    #[test]
+    fn test_insert_identifier_label_form() {
+        let s = parse_insert("INSERT INTO (label.employee) VALUES (1, 2)").unwrap();
+        assert_eq!(s.labels, vec!["employee".to_string()]);
+    }
+
+    #[test]
+    fn test_insert_multiple_labels() {
+        let s = parse_insert(
+            "INSERT INTO (label.employee, label.manager) VALUE ('田中', 24)"
+        ).unwrap();
+        assert_eq!(s.labels, vec!["employee".to_string(), "manager".to_string()]);
+    }
+
+    #[test]
+    fn test_insert_rejects_empty_label() {
+        assert!(parse_insert("INSERT INTO ('label.') VALUE (1)").is_err());
+    }
+
+    #[test]
+    fn test_insert_rejects_star_label() {
+        assert!(parse_insert("INSERT INTO (label.*) VALUE (1)").is_err());
+    }
+
+    #[test]
+    fn test_insert_rejects_non_label_prefixed_string() {
+        assert!(parse_insert("INSERT INTO ('employee') VALUE (1)").is_err());
+    }
+
+    #[test]
+    fn test_insert_rejects_trailing_tokens() {
+        // 旧構文（VALUE の後に WHERE でカラム順指定）は廃止されたため、
+        // 末尾に余分なトークンが残っている場合は明示的にエラーとする
+        assert!(parse_insert(
+            "INSERT INTO (label.employee) VALUE ('X', 1, 'Y') WHERE (a, b, c)"
+        ).is_err());
+    }
+
+    #[test]
+    fn test_select_rejects_trailing_tokens() {
+        assert!(parse_select("SELECT * FROM label.employee GARBAGE").is_err());
     }
 }
 

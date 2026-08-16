@@ -101,3 +101,17 @@ pub enum OrderDirection {
     Asc,
     Desc,
 }
+
+/// INSERT文全体
+/// 例: INSERT INTO (label.employee) VALUE ('田中', 24, 'developer')
+///     INSERT INTO (label.employee) (employee_name, employee_age, employee_department) VALUE ('田中', 24, 'developer')
+#[derive(Debug, Clone, PartialEq)]
+pub struct InsertStatement {
+    /// 追加先ラベル（1つ以上。空や `label.*` は不可）
+    pub labels: Vec<String>,
+    /// 追加する値
+    pub values: Vec<LiteralValue>,
+    /// 値に対応するカラム名（ラベル指定の直後に丸括弧で明示指定された場合のみ Some）。
+    /// None の場合は DB内の既存カラムをソート順で対応付ける。
+    pub columns: Option<Vec<String>>,
+}

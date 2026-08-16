@@ -1,19 +1,19 @@
 # 🗄️ KAGURA DB
 
 > Rust で一から実装したオリジナルのデータベースエンジン。  
-> 列指向ストレージ・ラベル検索・KDB暗号化バイナリ形式・SQL SELECT・REST API・Web管理UI を備えたフルスタックな DB システムです。  
+> 列指向ストレージ・ラベル検索・KDB暗号化バイナリ形式・SQL SELECT/INSERT・REST API・Web管理UI を備えたフルスタックな DB システムです。  
 > バージョンの情報については以下の補足を確認ください。  
 > 補足  
 > ・メジャーバージョンが異なると互換性は無くなります。  
 > ・メジャーバージョンが一致し、マイナーバージョンだけが異なる場合問題なく移行ができ互換性を保ちます。
 
-**バージョン: `1.4.1`**
+**バージョン: `1.5.0`**
 
 | 区分 | 説明 |
 |------|------|
 | **A = 1** (メジャー) | KDB 暗号化バイナリ形式導入による旧 JSON 形式との破壊的変更 |
-| **B = 4** (マイナー) | Web管理UI・DB Info API・SQL SELECT・テストデータ生成 の 4 機能追加 |
-| **C = 1** (ビルド) | バージョン情報・UI表示の修正 |
+| **B = 5** (マイナー) | Web管理UI・DB Info API・SQL SELECT・テストデータ生成・SQL INSERT の 5 機能追加 |
+| **C = 0** (ビルド) | 1.5系での修正なし |
 
 ---
 
@@ -49,7 +49,7 @@ KAGURA DB は Rust で一から実装したデータベースエンジンです�
 | **スキーマレス** | レコードごとに任意のカラムを持てる |
 | **KDB 暗号化ストレージ** | XChaCha20-Poly1305 AEAD による暗号化バイナリ形式（`.kdb`） |
 | **WAL 高速挿入** | Write-Ahead Log 追記方式で INSERT が O(1)（ファイル全体の再書き込みなし） |
-| **SQL SELECT** | `FROM label.xxx` 構文による独自拡張 SQL クエリ |
+| **SQL SELECT/INSERT** | `FROM label.xxx` / `INTO (label.xxx)` 構文による独自拡張 SQL クエリ |
 | **多言語対応** | REST API と C FFI（Python 向け）の 2 種インターフェース |
 
 ---
@@ -85,7 +85,7 @@ KAGURA DB は Rust で一から実装したデータベースエンジンです�
     +----------------------------------------------------------+
 
     +----------------------------------------------------------+
-    |              sql_engine  (SQL SELECT エンジン)           |
+    |            sql_engine  (SQL SELECT/INSERT エンジン)       |
     |   ast / parser / executor                               |
     |   手書き再帰下降パーサー（外部ライブラリ不使用）         |
     +----------------------------------------------------------+
@@ -116,9 +116,9 @@ KAGURA DB は Rust で一から実装したデータベースエンジンです�
 - ✅ 環境変数による設定（`DB_FILE` / `DB_ADDR` / `KAGURA_MASTER_KEY`）
 - ✅ ブラウザ Web 管理 UI（Records / DB Info / SQL Query の 3 ビュー）
 - ✅ `GET /db/info` でバージョン・ストレージ状態・統計を取得
-- ✅ `POST /sql` で SQL SELECT クエリを実行
+- ✅ `POST /sql` で SQL SELECT / INSERT クエリを実行
 
-### sql_engine（SQL SELECT エンジン）
+### sql_engine（SQL SELECT/INSERT エンジン）
 - ✅ 独自拡張 SQL `SELECT ... FROM label.xxx` 構文
 - ✅ `WHERE` 句（`=` `!=` `<` `<=` `>` `>=` `LIKE`）
 - ✅ `AND` / `OR` / `NOT` / 括弧による複合条件
@@ -129,6 +129,10 @@ KAGURA DB は Rust で一から実装したデータベースエンジンです�
 - ✅ `LIMIT n`
 - ✅ カラム指定 `SELECT col1, col2 FROM ...`
 - ✅ 大文字小文字無視・セミコロン対応
+- ✅ 独自拡張 SQL `INSERT INTO (label.xxx) VALUE (...)` 構文
+- ✅ `INSERT INTO (label.a, label.b) VALUE (...)`（複数ラベルへの同時付与）
+- ✅ `INTO (label.xxx) (col1, col2, ...)` によるカラム順の明示指定（省略時は既存カラムのソート順に対応）
+- ✅ 存在しないラベルは INSERT 時に自動作成
 
 ### dynamic_label_management
 - ✅ ラベルの AND / OR 検索
@@ -149,34 +153,35 @@ KAGURA DB は Rust で一から実装したデータベースエンジンです�
 pudb-project/
 ├── Cargo.toml
 ├── README.md
-├── db_engine/                          # コアエンジン (v1.4.1)
+├── db_engine/                          # コアエンジン (v1.5.0)
 │   └── src/
 │       ├── lib.rs                      # Database / Record / DataType / 永続化
 │       ├── codec.rs                    # バイナリシリアライザ
 │       ├── crypto.rs                   # XChaCha20-Poly1305 AEAD（純Rust）
 │       ├── kdb_store.rs                # .kdb ファイル管理（WAL方式）
 │       └── tests.rs                    # ユニットテスト（38件）
-├── db_client/                          # REST API サーバー (v1.4.1)
+├── db_client/                          # REST API サーバー (v1.5.0)
 │   ├── src/
 │   │   ├── main.rs                     # エントリーポイント（KDB/JSON 自動判別）
 │   │   ├── app.rs                      # Router 定義
 │   │   ├── handlers.rs                 # レコード CRUD ハンドラー
 │   │   ├── label_handlers.rs           # ラベル管理ハンドラー
 │   │   ├── info_handlers.rs            # DB 情報 API ハンドラー
-│   │   ├── sql_handlers.rs             # SQL 実行ハンドラー
+│   │   ├── sql_handlers.rs             # SQL 実行ハンドラー（SELECT / INSERT）
 │   │   ├── models.rs                   # JSON DTO
 │   │   └── ui.html                     # 管理画面（HTML/CSS/JS）
 │   └── tests/
 │       ├── test_records.rs             # レコード API テスト（12件）
 │       ├── test_labels.rs              # ラベル API テスト（12件）
-│       └── test_persistence.rs         # 永続化テスト（4件）
-├── sql_engine/                         # SQL SELECT エンジン (v1.4.1)
+│       ├── test_persistence.rs         # 永続化テスト（4件）
+│       └── test_sql.rs                 # SQL API テスト（8件）
+├── sql_engine/                         # SQL SELECT/INSERT エンジン (v1.5.0)
 │   └── src/
 │       ├── ast.rs / parser.rs / executor.rs
-│       └── lib.rs                      # 公開 API（run_select）
-├── dynamic_label_management/           # ラベル管理ライブラリ (v1.4.1)
+│       └── lib.rs                      # 公開 API（run_select・run_insert）
+├── dynamic_label_management/           # ラベル管理ライブラリ (v1.5.0)
 │   └── src/lib.rs + tests.rs           # ユニットテスト（24件）
-├── db_ffi/                             # C FFI バインディング (v1.4.1)
+├── db_ffi/                             # C FFI バインディング (v1.5.0)
 │   └── src/lib.rs                      # FFI 関数（13本）＋テスト（10件）
 └── examples/python/
     ├── db_engine.py                    # Python ctypes ラッパー
@@ -283,9 +288,10 @@ KDB WAL 方式: O(1) → 10,000件目でも ~1,200 req/s（10,000件を 8.1秒�
 
 ## SQL 機能
 
-`POST /sql` エンドポイントで SQL SELECT クエリを実行できます。
+`POST /sql` エンドポイントで SQL SELECT / INSERT クエリを実行できます。
+通常の SQL とは異なり、テーブル名の代わりに `label.xxx` でラベルを指定する独自拡張構文です。
 
-### 構文
+### SELECT 構文
 
 ```sql
 SELECT * FROM label.employee
@@ -298,12 +304,38 @@ SELECT * FROM label.employee WHERE name LIKE '田%'
 SELECT * FROM label.employee ORDER BY salary DESC LIMIT 10
 ```
 
+### INSERT 構文
+
+```sql
+-- カラム順を明示（推奨）: ラベル指定の直後に (col1, col2, ...) を置く
+-- （標準SQLの INSERT INTO table (col1, col2) VALUES (...) に準じた語順）
+INSERT INTO (label.employee) (employee_name, employee_age, employee_department) VALUE ('田中', 24, 'developer')
+
+-- 複数ラベルを同時に付与
+INSERT INTO (label.employee, label.manager) (employee_name, employee_age, employee_department) VALUE ('田中', 24, 'developer')
+
+-- カラム順省略時: DB内の既存カラムをソート順に対応付ける（1件も既存カラムが無い場合はエラー）
+INSERT INTO (label.employee) VALUE ('田中', 24, 'developer')
+
+-- ラベル名は 'label.xxx' の文字列リテラル形式でも指定可能
+INSERT INTO ('label.employee') (employee_name, employee_age, employee_department) VALUE ('田中', 24, 'developer')
+```
+
+補足:
+- `INTO` の後のラベル名は必須で、`label.*` や空文字列は指定できない（無ラベル・全ラベル一括付与は不可）。
+- 指定したラベルが未作成の場合、INSERT 実行時に自動作成される。
+- `id` は自動採番のみで、INSERT 文からは指定できない。
+
 ### リクエスト例
 
 ```bash
 curl -X POST http://localhost:3000/sql \
   -H 'Content-Type: application/json' \
   -d '{"query": "SELECT employee_name, age, salary FROM label.employee WHERE age > 30 ORDER BY salary DESC LIMIT 10"}'
+
+curl -X POST http://localhost:3000/sql \
+  -H 'Content-Type: application/json' \
+  -d "{\"query\": \"INSERT INTO (label.employee) (employee_name, employee_age, employee_department) VALUE ('田中', 24, 'developer')\"}"
 ```
 
 ### 10,000件での性能測定
@@ -343,14 +375,14 @@ curl -X POST http://localhost:3000/sql \
 | `POST`   | `/labels/search` | AND/OR ラベル検索 |
 | `PUT`    | `/labels/rename` | ラベルリネーム |
 | `GET`    | `/db/info` | DB バージョン・統計情報 |
-| `POST`   | `/sql` | SQL SELECT 実行 |
+| `POST`   | `/sql` | SQL SELECT / INSERT 実行 |
 
 ### GET /db/info レスポンス例
 
 ```json
 {
   "engine_name":    "KAGURA DB Engine",
-  "app_version":    "1.4.1",
+  "app_version":    "1.5.0",
   "storage_mode":   "kdb",
   "storage_format": "KDB Binary (WAL + XChaCha20-Poly1305 encrypted)",
   "encrypted":      true,
@@ -372,7 +404,7 @@ curl -X POST http://localhost:3000/sql \
 |--------|------|
 | **📋 Records** | レコードの一覧・検索・作成・編集・削除・ラベルフィルター・自動更新（10秒） |
 | **ℹ️ DB Info** | バージョン・ストレージモード・暗号化状態・統計カード・カラム一覧 |
-| **🔍 SQL Query** | SQL SELECT 実行・テーブル形式結果表示・ Ctrl+Enter 対応 |
+| **🔍 SQL Query** | SQL SELECT / INSERT 実行・テーブル形式結果表示・ Ctrl+Enter 対応 |
 
 ---
 
@@ -418,9 +450,9 @@ cargo test --workspace
 | `db_engine` | 38 | CRUD・ラベル操作・KDB暗号化・バイナリコーデック |
 | `dynamic_label_management` | 24 | AND/OR 検索・リネーム・差分 |
 | `db_ffi` | 10 | FFI 関数・メモリ管理 |
-| `db_client`（統合テスト） | 28 | HTTP API・ラベル操作・永続化 |
-| `sql_engine` | 13 | パーサー（SELECT・WHERE・ORDER BY・LIKE） |
-| **合計** | **113** | |
+| `db_client`（統合テスト） | 36 | HTTP API・ラベル操作・永続化・SQL SELECT/INSERT |
+| `sql_engine` | 28 | パーサー・実行エンジン（SELECT・INSERT・WHERE・ORDER BY・LIKE） |
+| **合計** | **136** | |
 
 ---
 
@@ -453,6 +485,7 @@ cargo test --workspace
 
 | バージョン | 主な変更内容 |
 |-----------|-------------|
+| **1.5.0** | SQL INSERT 機能追加（`INSERT INTO (label.xxx) (col, ...) VALUE (...)`、複数ラベル同時付与、ラベル自動作成）、`POST /sql` の INSERT 対応 |
 | **1.4.1** | DB Info UI のバージョン・ストレージ表示修正、全クレートバージョン統一 |
 | **1.4.0** | KDB 暗号化バイナリ形式（XChaCha20-Poly1305）、WAL 高速 INSERT、JSON 後方互换 |
 | **1.3.0** | テストデータ自動生成スクリプト（`generate_testdata.py`）、SQL 性能テスト |
