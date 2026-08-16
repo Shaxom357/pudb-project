@@ -7,13 +7,13 @@
 > ・メジャーバージョンが異なると互換性は無くなります。  
 > ・メジャーバージョンが一致し、マイナーバージョンだけが異なる場合問題なく移行ができ互換性を保ちます。
 
-**バージョン: `1.5.0`**
+**バージョン: `1.6.0`**
 
 | 区分 | 説明 |
 |------|------|
 | **A = 1** (メジャー) | KDB 暗号化バイナリ形式導入による旧 JSON 形式との破壊的変更 |
-| **B = 5** (マイナー) | Web管理UI・DB Info API・SQL SELECT・テストデータ生成・SQL INSERT の 5 機能追加 |
-| **C = 0** (ビルド) | 1.5系での修正なし |
+| **B = 6** (マイナー) | Web管理UI・DB Info API・SQL SELECT・テストデータ生成・SQL INSERT・設定管理(HTTPリクエスト受付オンオフ) の 6 機能追加 |
+| **C = 0** (ビルド) | 1.6系での修正なし |
 
 ---
 
@@ -64,7 +64,7 @@ KAGURA DB は Rust で一から実装したデータベースエンジンです�
     +----------+----------------------------------+----------+
     |              db_client  (axum REST API + Web UI)       |
     |   handlers / label_handlers / info_handlers            |
-    |   sql_handlers / app / models / ui                     |
+    |   sql_handlers / settings_handlers / app / models / ui |
     +----------------------------+----------------------------+
                                  | Rust クレート依存
     +----------------------------+----------------------------+
@@ -110,13 +110,15 @@ KAGURA DB は Rust で一から実装したデータベースエンジンです�
 - ✅ `KAGURA_MASTER_KEY` 環境変数によるカスタムマスターキー設定
 
 ### db_client（REST API サーバー）
-- ✅ 15 本のエンドポイント（レコード CRUD・ラベル管理・DB 情報・SQL・Web UI）
+- ✅ 17 本のエンドポイント（レコード CRUD・ラベル管理・DB 情報・SQL・設定・Web UI）
 - ✅ KDB モード（`.kdb`）と JSON モードの自動判別・後方互换
 - ✅ 起動時自動ロード・書き込み時自動セーブ
 - ✅ 環境変数による設定（`DB_FILE` / `DB_ADDR` / `KAGURA_MASTER_KEY`）
-- ✅ ブラウザ Web 管理 UI（Records / DB Info / SQL Query の 3 ビュー）
+- ✅ ブラウザ Web 管理 UI（Records / DB Info / SQL Query / 設定 の 4 ビュー）
 - ✅ `GET /db/info` でバージョン・ストレージ状態・統計を取得
 - ✅ `POST /sql` で SQL SELECT / INSERT クエリを実行
+- ✅ `GET /settings` / `PUT /settings` で HTTPリクエスト（`/records` `/labels` 系 REST API）受付のオンオフを切替可能（**既定は無効**。データ操作は基本 SQL 経由とし、REST API は大量テストデータ投入など用途に応じて有効化する）
+- ✅ Web UI の Records 一覧は `POST /sql`（`SELECT * FROM label.*`）経由で取得するため、REST API が無効でも常に閲覧可能
 
 ### sql_engine（SQL SELECT/INSERT エンジン）
 - ✅ 独自拡張 SQL `SELECT ... FROM label.xxx` 構文
@@ -129,6 +131,7 @@ KAGURA DB は Rust で一から実装したデータベースエンジンです�
 - ✅ `LIMIT n`
 - ✅ カラム指定 `SELECT col1, col2 FROM ...`
 - ✅ 大文字小文字無視・セミコロン対応
+- ✅ `SELECT *` は `id` 列を先頭、`labels` 列（カンマ区切り）を末尾に付与して返す
 - ✅ 独自拡張 SQL `INSERT INTO (label.xxx) VALUE (...)` 構文
 - ✅ `INSERT INTO (label.a, label.b) VALUE (...)`（複数ラベルへの同時付与）
 - ✅ `INTO (label.xxx) (col1, col2, ...)` によるカラム順の明示指定（省略時は既存カラムのソート順に対応）
@@ -153,14 +156,14 @@ KAGURA DB は Rust で一から実装したデータベースエンジンです�
 pudb-project/
 ├── Cargo.toml
 ├── README.md
-├── db_engine/                          # コアエンジン (v1.5.0)
+├── db_engine/                          # コアエンジン (v1.6.0)
 │   └── src/
 │       ├── lib.rs                      # Database / Record / DataType / 永続化
 │       ├── codec.rs                    # バイナリシリアライザ
 │       ├── crypto.rs                   # XChaCha20-Poly1305 AEAD（純Rust）
 │       ├── kdb_store.rs                # .kdb ファイル管理（WAL方式）
 │       └── tests.rs                    # ユニットテスト（38件）
-├── db_client/                          # REST API サーバー (v1.5.0)
+├── db_client/                          # REST API サーバー (v1.6.0)
 │   ├── src/
 │   │   ├── main.rs                     # エントリーポイント（KDB/JSON 自動判別）
 │   │   ├── app.rs                      # Router 定義
@@ -168,20 +171,22 @@ pudb-project/
 │   │   ├── label_handlers.rs           # ラベル管理ハンドラー
 │   │   ├── info_handlers.rs            # DB 情報 API ハンドラー
 │   │   ├── sql_handlers.rs             # SQL 実行ハンドラー（SELECT / INSERT）
+│   │   ├── settings_handlers.rs        # 設定 API ハンドラー（HTTPリクエスト受付オンオフ）
 │   │   ├── models.rs                   # JSON DTO
 │   │   └── ui.html                     # 管理画面（HTML/CSS/JS）
 │   └── tests/
 │       ├── test_records.rs             # レコード API テスト（12件）
 │       ├── test_labels.rs              # ラベル API テスト（12件）
 │       ├── test_persistence.rs         # 永続化テスト（4件）
-│       └── test_sql.rs                 # SQL API テスト（8件）
-├── sql_engine/                         # SQL SELECT/INSERT エンジン (v1.5.0)
+│       ├── test_sql.rs                 # SQL API テスト（9件）
+│       └── test_settings.rs            # 設定 API テスト（4件）
+├── sql_engine/                         # SQL SELECT/INSERT エンジン (v1.6.0)
 │   └── src/
 │       ├── ast.rs / parser.rs / executor.rs
 │       └── lib.rs                      # 公開 API（run_select・run_insert）
-├── dynamic_label_management/           # ラベル管理ライブラリ (v1.5.0)
+├── dynamic_label_management/           # ラベル管理ライブラリ (v1.6.0)
 │   └── src/lib.rs + tests.rs           # ユニットテスト（24件）
-├── db_ffi/                             # C FFI バインディング (v1.5.0)
+├── db_ffi/                             # C FFI バインディング (v1.6.0)
 │   └── src/lib.rs                      # FFI 関数（13本）＋テスト（10件）
 └── examples/python/
     ├── db_engine.py                    # Python ctypes ラッパー
@@ -222,17 +227,25 @@ cargo build --release -p db_client && ./target/release/db_client
 # バージョン・状態確認
 curl http://localhost:3000/db/info
 
-# レコード作成
-curl -X POST http://localhost:3000/records \
+# SQL でレコード作成（既定の状態でそのまま使える）
+curl -X POST http://localhost:3000/sql \
   -H 'Content-Type: application/json' \
-  -d '{"columns":{"name":{"type":"text","value":"田中"},"age":{"type":"integer","value":35}},"labels":["employee"]}'
+  -d "{\"query\": \"INSERT INTO (label.employee) (name, age) VALUE ('田中', 35)\"}"
 
 # SQL で検索
 curl -X POST http://localhost:3000/sql \
   -H 'Content-Type: application/json' \
   -d '{"query": "SELECT * FROM label.employee WHERE age > 30"}'
 
-# Web UI
+# HTTPリクエスト(REST API)は既定で無効。大量テストデータ投入などで使う場合は先に有効化する
+curl -X PUT http://localhost:3000/settings \
+  -H 'Content-Type: application/json' -d '{"http_api_enabled": true}'
+
+curl -X POST http://localhost:3000/records \
+  -H 'Content-Type: application/json' \
+  -d '{"columns":{"name":{"type":"text","value":"田中"},"age":{"type":"integer","value":35}},"labels":["employee"]}'
+
+# Web UI（Records一覧はSQL経由のため、HTTPリクエストが無効でも閲覧可能）
 open http://localhost:3000/ui
 ```
 
@@ -359,30 +372,35 @@ curl -X POST http://localhost:3000/sql \
 
 ### エンドポイント一覧
 
-| メソッド | パス | 説明 |
-|---------|------|------|
-| `GET`    | `/ui` | Web 管理 UI |
-| `GET`    | `/records` | 全レコード取得 |
-| `POST`   | `/records` | レコード作成 |
-| `GET`    | `/records/{id}` | ID で取得 |
-| `PUT`    | `/records/{id}` | レコード更新 |
-| `DELETE` | `/records/{id}` | レコード削除 |
-| `GET`    | `/records/label/{label}` | ラベルで絞り込み取得 |
-| `GET`    | `/records/{id}/labels` | レコードのラベル一覧 |
-| `POST`   | `/records/{id}/labels` | ラベル追加 |
-| `DELETE` | `/records/{id}/labels/{label}` | ラベル削除 |
-| `GET`    | `/labels` | 全ラベル一覧+統計 |
-| `POST`   | `/labels/search` | AND/OR ラベル検索 |
-| `PUT`    | `/labels/rename` | ラベルリネーム |
-| `GET`    | `/db/info` | DB バージョン・統計情報 |
-| `POST`   | `/sql` | SQL SELECT / INSERT 実行 |
+HTTPリクエスト欄が「要HTTP API」の行は、既定では無効な `/records` `/labels` 系 REST API に属し、
+`PUT /settings` で `http_api_enabled: true` にするまで `403 Forbidden` を返す（詳細は [設定](#web-管理ui) を参照）。
+
+| メソッド | パス | 説明 | 要HTTP API |
+|---------|------|------|:---:|
+| `GET`    | `/ui` | Web 管理 UI | - |
+| `GET`    | `/records` | 全レコード取得 | ✅ |
+| `POST`   | `/records` | レコード作成 | ✅ |
+| `GET`    | `/records/{id}` | ID で取得 | ✅ |
+| `PUT`    | `/records/{id}` | レコード更新 | ✅ |
+| `DELETE` | `/records/{id}` | レコード削除 | ✅ |
+| `GET`    | `/records/label/{label}` | ラベルで絞り込み取得 | ✅ |
+| `GET`    | `/records/{id}/labels` | レコードのラベル一覧 | ✅ |
+| `POST`   | `/records/{id}/labels` | ラベル追加 | ✅ |
+| `DELETE` | `/records/{id}/labels/{label}` | ラベル削除 | ✅ |
+| `GET`    | `/labels` | 全ラベル一覧+統計 | ✅ |
+| `POST`   | `/labels/search` | AND/OR ラベル検索 | ✅ |
+| `PUT`    | `/labels/rename` | ラベルリネーム | ✅ |
+| `GET`    | `/db/info` | DB バージョン・統計情報 | - |
+| `POST`   | `/sql` | SQL SELECT / INSERT 実行 | - |
+| `GET`    | `/settings` | 現在の設定取得 | - |
+| `PUT`    | `/settings` | 設定更新（HTTPリクエスト受付オンオフ） | - |
 
 ### GET /db/info レスポンス例
 
 ```json
 {
   "engine_name":    "KAGURA DB Engine",
-  "app_version":    "1.5.0",
+  "app_version":    "1.6.0",
   "storage_mode":   "kdb",
   "storage_format": "KDB Binary (WAL + XChaCha20-Poly1305 encrypted)",
   "encrypted":      true,
@@ -402,9 +420,10 @@ curl -X POST http://localhost:3000/sql \
 
 | ビュー | 説明 |
 |--------|------|
-| **📋 Records** | レコードの一覧・検索・作成・編集・削除・ラベルフィルター・自動更新（10秒） |
+| **📋 Records** | レコード一覧（`POST /sql` の `SELECT * FROM label.*` 経由で取得。HTTPリクエストが無効でも閲覧可能）・検索・ラベルフィルター・自動更新（10秒）。作成・編集・削除は REST API（`/records`）を使うため、これらの操作には設定で HTTPリクエストを有効化する必要がある |
 | **ℹ️ DB Info** | バージョン・ストレージモード・暗号化状態・統計カード・カラム一覧 |
 | **🔍 SQL Query** | SQL SELECT / INSERT 実行・テーブル形式結果表示・ Ctrl+Enter 対応 |
+| **⚙️ 設定** | HTTPリクエスト（`/records` `/labels` 系 REST API）受付のオンオフを切替（既定は無効）。大量テストデータ投入など HTTP 経由の操作が必要なときに有効化する |
 
 ---
 
@@ -450,9 +469,9 @@ cargo test --workspace
 | `db_engine` | 38 | CRUD・ラベル操作・KDB暗号化・バイナリコーデック |
 | `dynamic_label_management` | 24 | AND/OR 検索・リネーム・差分 |
 | `db_ffi` | 10 | FFI 関数・メモリ管理 |
-| `db_client`（統合テスト） | 36 | HTTP API・ラベル操作・永続化・SQL SELECT/INSERT |
+| `db_client`（統合テスト） | 41 | HTTP API・ラベル操作・永続化・SQL SELECT/INSERT・設定（HTTPリクエスト受付オンオフ） |
 | `sql_engine` | 28 | パーサー・実行エンジン（SELECT・INSERT・WHERE・ORDER BY・LIKE） |
-| **合計** | **136** | |
+| **合計** | **141** | |
 
 ---
 
@@ -485,6 +504,7 @@ cargo test --workspace
 
 | バージョン | 主な変更内容 |
 |-----------|-------------|
+| **1.6.0** | Web UI に「設定」ビューを追加し `GET`/`PUT /settings` で HTTPリクエスト（`/records` `/labels` 系 REST API）受付のオンオフを切替可能に（**既定を無効化**）。Web UI の Records 一覧を REST から SQL（`SELECT * FROM label.*`）経由の取得に変更し、REST API 無効時も閲覧可能に。`SELECT *` の結果に `labels` 列（カンマ区切り）を追加 |
 | **1.5.0** | SQL INSERT 機能追加（`INSERT INTO (label.xxx) (col, ...) VALUE (...)`、複数ラベル同時付与、ラベル自動作成）、`POST /sql` の INSERT 対応 |
 | **1.4.1** | DB Info UI のバージョン・ストレージ表示修正、全クレートバージョン統一 |
 | **1.4.0** | KDB 暗号化バイナリ形式（XChaCha20-Poly1305）、WAL 高速 INSERT、JSON 後方互换 |

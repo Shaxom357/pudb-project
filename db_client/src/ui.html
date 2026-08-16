@@ -117,6 +117,19 @@ tbody td { padding: 10px 14px; vertical-align: middle; }
 .sql-meta span.ok { color: #2f9e44; font-weight: 700; }
 .sql-meta span.err { color: #e03131; font-weight: 700; }
 .sql-error { padding: 20px; color: #e03131; font-family: monospace; font-size: 13px; background: #fff5f5; border-left: 4px solid #e03131; margin: 16px; border-radius: 6px; }
+/* Settings */
+.settings-card { background: #fff; border-radius: 10px; padding: 20px; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
+.toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+.toggle-label { font-size: 14px; font-weight: 600; color: #222; margin-bottom: 6px; }
+.toggle-desc { font-size: 12px; color: #888; line-height: 1.6; }
+.toggle-desc code { background: #f0f2f5; padding: 1px 5px; border-radius: 4px; font-size: 11px; }
+.switch { position: relative; display: inline-block; width: 46px; height: 26px; flex-shrink: 0; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.slider { position: absolute; cursor: pointer; inset: 0; background: #ccc; transition: .2s; border-radius: 26px; }
+.slider:before { position: absolute; content: ""; height: 20px; width: 20px; left: 3px; bottom: 3px; background: #fff; transition: .2s; border-radius: 50%; }
+.switch input:checked + .slider { background: #4f6ef7; }
+.switch input:checked + .slider:before { transform: translateX(20px); }
+.toggle-status { margin-top: 14px; font-size: 12px; color: #888; }
 
 </style>
 </head>
@@ -133,6 +146,7 @@ tbody td { padding: 10px 14px; vertical-align: middle; }
     <div class="sidebar-nav active" id="navRecords" onclick="showView('records')">&#x1F4CB; Records</div>
     <div class="sidebar-nav" id="navDbInfo" onclick="showView('dbinfo')">&#x2139;&#xFE0F; DB Info</div>
     <div class="sidebar-nav" id="navSql" onclick="showView('sql')">&#x1F50D; SQL Query</div>
+    <div class="sidebar-nav" id="navSettings" onclick="showView('settings')">&#x2699;&#xFE0F; 設定</div>
     <div class="sidebar-section" style="margin-top:8px">Filter by Label</div>
     <div class="sidebar-all" onclick="filterByLabel(null)">&#x1F4CB; All records</div>
     <div id="labelList"></div>
@@ -192,6 +206,28 @@ tbody td { padding: 10px 14px; vertical-align: middle; }
         </div>
       </div>
     </div>
+    <!-- Settings View -->
+    <div id="viewSettings" style="display:none;flex:1;overflow:hidden;flex-direction:column">
+      <div class="toolbar">
+        <span style="font-weight:700;font-size:15px">&#x2699;&#xFE0F; 設定</span>
+      </div>
+      <div class="info-panel">
+        <div class="info-section-title">HTTPリクエスト (REST API)</div>
+        <div class="settings-card">
+          <div class="toggle-row">
+            <div>
+              <div class="toggle-label">HTTPリクエスト (GET/POST/PUT/DELETE) を受け付ける</div>
+              <div class="toggle-desc">既定では無効です。オンにすると <code>/records</code> <code>/labels</code> 系のREST APIが有効化され、大量テストデータ投入などHTTP経由の操作が行えます。オフの間、データのやり取りはSQL (<code>/sql</code>) のみになります（Records一覧の表示自体はSQL経由のため、この設定に関わらず利用できます）。</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="httpApiToggle" onchange="onHttpApiToggle()">
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="toggle-status" id="httpApiStatus"></div>
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 <div class="statusbar"><span id="statusText">Loading...</span></div>
@@ -234,30 +270,66 @@ tbody td { padding: 10px 14px; vertical-align: middle; }
 let allRecords=[], allLabels=[], activeLabel=null, deleteTarget=null;
 let currentView='records';
 
+async function checkOk(r){
+  if(!r.ok){
+    let msg = 'HTTP '+r.status;
+    try{ const body = await r.clone().json(); if(body && body.error) msg = body.error; }catch(_){}
+    const e = new Error(msg); e.status = r.status; throw e;
+  }
+  return r;
+}
+
 const api = {
-  async get(p){ return (await fetch(p)).json(); },
-  async post(p,b){ return (await fetch(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)})).json(); },
-  async put(p,b){ return (await fetch(p,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)})).json(); },
-  async delete(p){ return fetch(p,{method:'DELETE'}); },
+  async get(p){ return (await checkOk(await fetch(p))).json(); },
+  async post(p,b){ return (await checkOk(await fetch(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}))).json(); },
+  async put(p,b){ return (await checkOk(await fetch(p,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}))).json(); },
+  async delete(p){ return checkOk(await fetch(p,{method:'DELETE'})); },
 };
 
 function showView(name){
   currentView = name;
-  document.getElementById('viewRecords').style.display = name==='records' ? '' : 'none';
-  document.getElementById('viewDbInfo').style.display  = name==='dbinfo'  ? '' : 'none';
-  document.getElementById('viewSql').style.display     = name==='sql'     ? '' : 'none';
+  document.getElementById('viewRecords').style.display  = name==='records'  ? '' : 'none';
+  document.getElementById('viewDbInfo').style.display   = name==='dbinfo'   ? '' : 'none';
+  document.getElementById('viewSql').style.display      = name==='sql'      ? '' : 'none';
+  document.getElementById('viewSettings').style.display = name==='settings' ? '' : 'none';
   document.getElementById('navRecords').classList.toggle('active', name==='records');
   document.getElementById('navDbInfo').classList.toggle('active',  name==='dbinfo');
   document.getElementById('navSql').classList.toggle('active',     name==='sql');
+  document.getElementById('navSettings').classList.toggle('active',name==='settings');
   if(name==='dbinfo') loadDbInfo();
+  if(name==='settings') loadSettings();
 }
 
+// SQLクエリ結果 ({columns, rows}) を Records一覧が期待する {id, columns, labels} の形に変換する。
+// SELECT * は id 列を先頭、labels 列（カンマ区切り文字列）を末尾に含む。
+function sqlRowsToRecords(data){
+  const idIdx     = data.columns.indexOf('id');
+  const labelsIdx = data.columns.indexOf('labels');
+  return (data.rows||[]).map(row=>{
+    const columns = {};
+    data.columns.forEach((col,i)=>{
+      if(i===idIdx || i===labelsIdx) return;
+      columns[col] = row[i];
+    });
+    const rawLabels = labelsIdx>=0 ? row[labelsIdx] : '';
+    const labels = rawLabels ? String(rawLabels).split(',').filter(Boolean) : [];
+    return { id: idIdx>=0 ? row[idIdx] : 0, columns, labels };
+  });
+}
+
+// Records一覧はSQL(/sql)経由で取得する。HTTPリクエスト(/records /labels)は
+// 設定でオフにできるため、一覧表示自体はそれに依存させない。
 async function loadAll(){
   try{
-    const [records, labelsResp] = await Promise.all([api.get('/records'), api.get('/labels')]);
-    allRecords = records; allLabels = labelsResp.labels || [];
+    const resp = await fetch('/sql',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:'SELECT * FROM label.*'})});
+    const data = await resp.json();
+    if(!data.ok) throw new Error(data.error || 'query failed');
+    allRecords = sqlRowsToRecords(data);
+    const labelSet = new Set();
+    allRecords.forEach(r=>(r.labels||[]).forEach(l=>labelSet.add(l)));
+    allLabels = Array.from(labelSet).sort();
     renderSidebar(); renderTable(); updateHeader();
-    setStatus(allRecords.length+' records | '+allLabels.length+' labels');
+    setStatus(allRecords.length+' records | '+allLabels.length+' labels (via SQL)');
   } catch(e){ setStatus('Cannot connect to server'); showToast('Connection failed','error'); }
 }
 
@@ -278,7 +350,10 @@ function renderTable(){
   if(activeLabel) rows = rows.filter(r=>(r.labels||[]).includes(activeLabel));
   if(q) rows = rows.filter(r=>JSON.stringify(r.columns).toLowerCase().includes(q)||(r.labels||[]).join(' ').toLowerCase().includes(q)||String(r.id).includes(q));
   const body = document.getElementById('tableBody');
-  if(!rows.length){ body.innerHTML='<tr><td colspan="4" class="empty"><div style="font-size:48px">&#x1F4ED;</div><div style="margin-top:12px">'+(activeLabel?'No records with label: '+esc(activeLabel):'No records')+'</div></td></tr>'; return; }
+  if(!rows.length){
+    const msg = activeLabel?'No records with label: '+esc(activeLabel):'No records';
+    body.innerHTML='<tr><td colspan="4" class="empty"><div style="font-size:48px">&#x1F4ED;</div><div style="margin-top:12px">'+msg+'</div></td></tr>'; return;
+  }
   body.innerHTML = rows.map(r=>{
     const cols = Object.entries(r.columns||{}).map(([k,v])=>{
       // v は {type:"text", value:"太郎"} 形式のオブジェクト
@@ -345,6 +420,40 @@ function renderDbInfo(d){
     +'<div class="tag-list">'+colTags+'</div>';
 }
 
+// ---- Settings ----
+async function loadSettings(){
+  const statusEl = document.getElementById('httpApiStatus');
+  statusEl.textContent = '読み込み中...';
+  try{
+    const s = await api.get('/settings');
+    document.getElementById('httpApiToggle').checked = !!s.http_api_enabled;
+    statusEl.textContent = s.http_api_enabled
+      ? 'HTTPリクエストは現在有効です。'
+      : 'HTTPリクエストは現在無効です（SQLのみ利用可能）。';
+  }catch(e){
+    statusEl.textContent = '設定の読み込みに失敗しました';
+    showToast('設定の読み込みに失敗しました','error');
+  }
+}
+
+async function onHttpApiToggle(){
+  const checkbox = document.getElementById('httpApiToggle');
+  const statusEl = document.getElementById('httpApiStatus');
+  const enabled = checkbox.checked;
+  statusEl.textContent = '更新中...';
+  try{
+    const s = await api.put('/settings', {http_api_enabled: enabled});
+    statusEl.textContent = s.http_api_enabled
+      ? 'HTTPリクエストは現在有効です。'
+      : 'HTTPリクエストは現在無効です（SQLのみ利用可能）。';
+    showToast(s.http_api_enabled ? 'HTTPリクエストを有効化しました' : 'HTTPリクエストを無効化しました','success');
+  }catch(e){
+    checkbox.checked = !enabled;
+    statusEl.textContent = '更新に失敗しました';
+    showToast('設定の更新に失敗しました','error');
+  }
+}
+
 function openCreateModal(){
   document.getElementById('editId').value='';
   document.getElementById('modalTitle').textContent='New Record';
@@ -406,16 +515,18 @@ async function saveRecord(){
     if(id){ await api.put('/records/'+id,{columns,labels}); showToast('Updated #'+id,'success'); }
     else{ const r=await api.post('/records',{columns,labels}); showToast('Created #'+r.id,'success'); }
     closeModal(); await loadAll();
-  }catch(e){ showToast('Save failed','error'); }
+  }catch(e){ showToast(e.status===403 ? 'HTTPリクエストが無効化されています' : 'Save failed','error'); }
 }
 
 function openDeleteModal(id){ deleteTarget=id; document.getElementById('deleteTargetId').textContent=id; document.getElementById('deleteModal').classList.add('open'); }
 function closeDeleteModal(){ deleteTarget=null; document.getElementById('deleteModal').classList.remove('open'); }
 async function confirmDelete(){
   if(!deleteTarget)return;
-  await api.delete('/records/'+deleteTarget);
-  showToast('Deleted #'+deleteTarget,'success');
-  closeDeleteModal(); await loadAll();
+  try{
+    await api.delete('/records/'+deleteTarget);
+    showToast('Deleted #'+deleteTarget,'success');
+    closeDeleteModal(); await loadAll();
+  }catch(e){ showToast(e.status===403 ? 'HTTPリクエストが無効化されています' : 'Delete failed','error'); }
 }
 
 // ---- SQL Query ----

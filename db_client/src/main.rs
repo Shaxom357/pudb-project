@@ -12,6 +12,7 @@ mod handlers;
 mod info_handlers;
 mod label_handlers;
 mod models;
+mod settings_handlers;
 mod sql_handlers;
 mod ui;
 
@@ -52,6 +53,9 @@ async fn main() {
         mgr:     LabelManager::from_db(db),
         db_path: db_path.clone(),
         kdb:     kdb_file,
+        // 既定ではHTTPリクエスト(REST API)を無効化し、データのやり取りはSQL(/sql)を基本とする。
+        // 大量テストデータ投入など用途がある場合は設定画面(/settings)から有効化する。
+        http_api_enabled: false,
     }));
 
     let (router, _) = app::build_app_with_state(state);
@@ -61,7 +65,8 @@ async fn main() {
 
     println!("KAGURA DB listening on http://{}", addr);
     println!("Storage: {} ({})", db_path, if is_kdb { "KDB encrypted" } else { "JSON" });
-    println!("Endpoints: /records /labels /sql /db/info /ui");
+    println!("Endpoints: /records /labels /sql /db/info /settings /ui");
+    println!("HTTP API (REST /records /labels): disabled by default -- enable via PUT /settings or the 設定 view in /ui");
 
     axum::serve(listener, router).await.expect("Server failed");
 }

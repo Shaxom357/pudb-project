@@ -49,6 +49,27 @@ async fn test_inserted_record_is_selectable() {
 }
 
 #[tokio::test]
+async fn test_select_star_includes_id_and_labels_columns() {
+    let (base, db_path) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    post_sql(&client, &base,
+        "INSERT INTO (label.employee, label.manager) (employee_name) VALUE ('田中')"
+    ).await;
+
+    let (status, body) = post_sql(&client, &base, "SELECT * FROM label.*").await;
+
+    assert_eq!(status, 200);
+    assert_eq!(body["columns"], serde_json::json!(["id", "employee_name", "labels"]));
+    let row = body["rows"][0].as_array().unwrap();
+    assert_eq!(row[0], serde_json::json!(1));
+    assert_eq!(row[1], serde_json::json!("田中"));
+    assert_eq!(row[2], serde_json::json!("employee,manager"));
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
 async fn test_insert_multiple_labels() {
     let (base, db_path) = spawn_test_server().await;
     let client = reqwest::Client::new();

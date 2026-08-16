@@ -3,8 +3,12 @@
 // テストからも同じルーター定義を使えるようにする
 
 use axum::{
+    extract::{Request, State},
+    http::StatusCode,
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
     routing::{delete, get, post, put},
-    Router,
+    Json, Router,
 };
 use dynamic_label_management::LabelManager;
 use std::sync::Arc;
@@ -20,14 +24,34 @@ use crate::label_handlers::{
     list_all_labels, search_by_labels, rename_label,
 };
 use crate::info_handlers::get_db_info;
+use crate::models::ErrorResponse;
+use crate::settings_handlers::{get_settings, update_settings};
 use crate::sql_handlers::execute_sql;
 
 use crate::ui::ui_handler;
 
+/// /records, /labels 系のREST APIを設定でオフにしている場合に弾くミドルウェア。
+/// SQL経由(/sql)や /ui, /db/info, /settings はこのミドルウェアの対象外。
+async fn require_http_api_enabled(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let enabled = state.read().await.http_api_enabled;
+    if !enabled {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse::new(
+                "HTTPリクエスト(REST API)は設定で無効化されています。設定画面で有効化するか、SQL(/sql)経由で操作してください。",
+            )),
+        ).into_response();
+    }
+    next.run(req).await
+}
+
 fn build_router(state: AppState) -> Router {
-    Router::new()
-        .route("/ui", get(ui_handler))
-        .route("/", get(|| async { axum::response::Redirect::temporary("/ui") }))
+    // データ操作系のREST API。設定でオンオフできる。
+    let gated = Router::new()
         .route("/records", get(list_records).post(create_record))
         .route("/records/label/{label}", get(get_records_by_label))
         .route("/records/{id}", get(get_record).put(update_record).delete(delete_record))
@@ -36,14 +60,24 @@ fn build_router(state: AppState) -> Router {
         .route("/labels", get(list_all_labels))
         .route("/labels/search", post(search_by_labels))
         .route("/labels/rename", put(rename_label))
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_http_api_enabled));
+
+    Router::new()
+        .route("/ui", get(ui_handler))
+        .route("/", get(|| async { axum::response::Redirect::temporary("/ui") }))
         .route("/db/info", get(get_db_info))
         .route("/sql", post(execute_sql))
+        .route("/settings", get(get_settings).put(update_settings))
+        .merge(gated)
         .with_state(state)
 }
 
 /// テスト用: mgr と db_path から AppState を作って Router を返す
+/// 本番の既定値(無効)とは異なり、REST APIテストを直接書けるよう有効化しておく
 pub fn build_app(mgr: LabelManager, db_path: String) -> (Router, AppState) {
-    let state: AppState = Arc::new(RwLock::new(AppStateInner { mgr, db_path, kdb: None }));
+    let state: AppState = Arc::new(RwLock::new(AppStateInner {
+        mgr, db_path, kdb: None, http_api_enabled: true,
+    }));
     let router = build_router(state.clone());
     (router, state)
 }
