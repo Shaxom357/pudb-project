@@ -1,6 +1,6 @@
 [package]
 name = "db_client"
-version = "1.6.0"
+version = "1.7.0"
 edition = "2024"
 
 [dependencies]
@@ -12,3 +12,4 @@ db_engine = { path = "../db_engine" }
 dynamic_label_management = { path = "../dynamic_label_management" }
 sql_engine = { path = "../sql_engine" }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }

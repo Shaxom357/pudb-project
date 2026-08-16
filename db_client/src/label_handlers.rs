@@ -39,7 +39,9 @@ pub async fn list_record_labels(
             let labels = inner.mgr.list_labels(id).unwrap_or_default();
             if let Err(e) = inner.mgr.db().save(&inner.db_path) {
                 eprintln!("[WARN] Failed to save: {}", e);
+                inner.logger.db_warn(format!("label save failed: {}", e));
             }
+            inner.logger.db_info(format!("label '{}' added to id={}", payload.label, id));
             (StatusCode::OK, Json(serde_json::to_value(labels).unwrap()))
         }
         Err(e) => {
@@ -63,7 +65,9 @@ pub async fn remove_label(
         Ok(true) => {
             if let Err(e) = inner.mgr.db().save(&inner.db_path) {
                 eprintln!("[WARN] Failed to save: {}", e);
+                inner.logger.db_warn(format!("label save failed: {}", e));
             }
+            inner.logger.db_info(format!("label '{}' removed from id={}", label, id));
             StatusCode::NO_CONTENT.into_response()
         }
         Ok(false) => (StatusCode::NOT_FOUND,
@@ -123,8 +127,13 @@ pub async fn rename_label(
             if count > 0 {
                 if let Err(e) = inner.mgr.db().save(&inner.db_path) {
                     eprintln!("[WARN] Failed to save: {}", e);
+                    inner.logger.db_warn(format!("label save failed: {}", e));
                 }
             }
+            inner.logger.db_info(format!(
+                "label renamed '{}' -> '{}' ({} record(s))",
+                payload.old_label, payload.new_label, count
+            ));
             (StatusCode::OK, Json(serde_json::json!({
                 "old_label": payload.old_label,
                 "new_label": payload.new_label,
