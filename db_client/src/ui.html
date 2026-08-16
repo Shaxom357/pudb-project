@@ -22,6 +22,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; b
 .sidebar-item.active .count { background: #c7d2fe; color: #4f6ef7; }
 .sidebar-all { padding: 8px 16px; cursor: pointer; color: #4f6ef7; font-size: 13px; display: flex; align-items: center; gap: 6px; }
 .sidebar-all:hover { background: #f5f5f5; }
+.sidebar-nav { padding: 8px 16px; cursor: pointer; font-size: 13px; display: flex; align-items: center; gap: 8px; border-left: 3px solid transparent; transition: all .15s; }
+.sidebar-nav:hover { background: #f5f5f5; }
+.sidebar-nav.active { background: #eef2ff; border-left-color: #4f6ef7; color: #4f6ef7; font-weight: 600; }
 .main { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
 .toolbar { background: #fff; border-bottom: 1px solid #e0e0e0; padding: 10px 20px; display: flex; gap: 10px; align-items: center; }
 .toolbar input { border: 1px solid #ddd; border-radius: 6px; padding: 6px 12px; font-size: 13px; width: 260px; outline: none; transition: border .15s; }
@@ -70,7 +73,51 @@ tbody td { padding: 10px 14px; vertical-align: middle; }
 .toast.show { opacity: 1; }
 .toast.success { background: #2f9e44; }
 .toast.error { background: #e03131; }
-.statusbar { background: #1a1a2e; color: #aaa; font-size: 11px; padding: 3px 16px; }
+/* DB Info Panel */
+.info-panel { flex: 1; overflow-y: auto; padding: 24px; }
+.info-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 16px; margin-bottom: 24px; }
+.info-card { background: #fff; border-radius: 10px; padding: 18px 20px; box-shadow: 0 1px 4px rgba(0,0,0,.08); border-left: 4px solid #4f6ef7; }
+.info-card.green  { border-left-color: #2f9e44; }
+.info-card.orange { border-left-color: #f76707; }
+.info-card.red    { border-left-color: #e03131; }
+.info-card.purple { border-left-color: #7950f2; }
+.info-card-label { font-size: 11px; font-weight: 700; color: #888; text-transform: uppercase; letter-spacing: .7px; margin-bottom: 6px; }
+.info-card-value { font-size: 26px; font-weight: 700; color: #222; line-height: 1; }
+.info-card-sub { font-size: 12px; color: #888; margin-top: 4px; }
+.info-table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 10px; overflow: hidden; box-shadow: 0 1px 4px rgba(0,0,0,.08); margin-bottom: 24px; }
+.info-table th { background: #f8f9fa; padding: 10px 16px; text-align: left; font-size: 12px; font-weight: 700; color: #555; border-bottom: 2px solid #e0e0e0; }
+.info-table td { padding: 10px 16px; border-bottom: 1px solid #f0f0f0; font-size: 13px; }
+.info-table td:first-child { color: #888; width: 180px; font-weight: 600; }
+.info-table td:last-child { font-family: monospace; word-break: break-all; }
+.info-section-title { font-size: 13px; font-weight: 700; color: #555; margin-bottom: 10px; }
+.tag-list { display: flex; flex-wrap: wrap; gap: 6px; background: #fff; padding: 16px; border-radius: 10px; box-shadow: 0 1px 4px rgba(0,0,0,.08); margin-bottom: 24px; }
+.tag { background: #f0f2ff; color: #4f6ef7; border-radius: 6px; padding: 3px 10px; font-size: 12px; font-weight: 500; font-family: monospace; }
+.info-badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 700; }
+.info-badge.ok   { background: #d3f9d8; color: #2f9e44; }
+.info-badge.warn { background: #fff3cd; color: #e67700; }
+.info-badge.enc  { background: #e8f4fd; color: #1971c2; border: 1px solid #a5d8ff; }
+.info-badge.kdb  { background: #f3f0ff; color: #7048e8; border: 1px solid #d0bfff; }
+.info-badge.json-mode { background: #fff9db; color: #e67700; border: 1px solid #ffec99; }
+.ver-badge { display:inline-block; background: #1a1a2e; color: #4dabf7; font-family: monospace; font-size: 13px; font-weight: 700; padding: 2px 10px; border-radius: 6px; letter-spacing: .5px; }
+/* SQL Panel */
+.sql-panel { flex: 1; display: flex; flex-direction: column; overflow: hidden; height: calc(100% - 48px); }
+.sql-editor-wrap { padding: 16px; background: #1e1e2e; border-bottom: 2px solid #333; flex-shrink: 0; }
+.sql-editor { width: 100%; min-height: 100px; max-height: 200px; background: #12121c; color: #cdd6f4; border: 1px solid #444; border-radius: 8px; padding: 12px 14px; font-family: 'Fira Code', 'Consolas', 'Monaco', monospace; font-size: 14px; line-height: 1.6; resize: vertical; outline: none; }
+.sql-editor:focus { border-color: #4f6ef7; box-shadow: 0 0 0 2px rgba(79,110,247,.2); }
+.sql-actions { display: flex; align-items: center; margin-top: 10px; gap: 8px; }
+.sql-result-wrap { flex: 1; overflow: auto; background: #fff; }
+.sql-result { min-height: 100%; }
+.sql-result table { width: 100%; border-collapse: collapse; }
+.sql-result thead th { background: #1e1e2e; color: #cdd6f4; padding: 9px 14px; text-align: left; font-size: 12px; font-family: monospace; font-weight: 700; position: sticky; top: 0; z-index: 1; border-bottom: 2px solid #4f6ef7; }
+.sql-result tbody tr:nth-child(even) { background: #f8f9ff; }
+.sql-result tbody tr:hover { background: #eef2ff; }
+.sql-result tbody td { padding: 8px 14px; border-bottom: 1px solid #f0f0f0; font-size: 13px; font-family: monospace; }
+.sql-result tbody td.null-cell { color: #bbb; font-style: italic; }
+.sql-meta { padding: 10px 16px; background: #f8f9fa; border-bottom: 1px solid #e0e0e0; font-size: 12px; color: #666; display: flex; gap: 16px; flex-shrink: 0; }
+.sql-meta span.ok { color: #2f9e44; font-weight: 700; }
+.sql-meta span.err { color: #e03131; font-weight: 700; }
+.sql-error { padding: 20px; color: #e03131; font-family: monospace; font-size: 13px; background: #fff5f5; border-left: 4px solid #e03131; margin: 16px; border-radius: 6px; }
+
 </style>
 </head>
 <body>
@@ -82,28 +129,68 @@ tbody td { padding: 10px 14px; vertical-align: middle; }
 </div>
 <div class="layout">
   <div class="sidebar">
-    <div class="sidebar-section">Filter</div>
+    <div class="sidebar-section">Views</div>
+    <div class="sidebar-nav active" id="navRecords" onclick="showView('records')">&#x1F4CB; Records</div>
+    <div class="sidebar-nav" id="navDbInfo" onclick="showView('dbinfo')">&#x2139;&#xFE0F; DB Info</div>
+    <div class="sidebar-nav" id="navSql" onclick="showView('sql')">&#x1F50D; SQL Query</div>
+    <div class="sidebar-section" style="margin-top:8px">Filter by Label</div>
     <div class="sidebar-all" onclick="filterByLabel(null)">&#x1F4CB; All records</div>
-    <div class="sidebar-section" style="margin-top:8px">Labels</div>
     <div id="labelList"></div>
   </div>
   <div class="main">
-    <div class="toolbar">
-      <input type="text" id="searchInput" placeholder="Search columns / labels..." oninput="renderTable()">
-      <button class="btn btn-primary" onclick="openCreateModal()">+ New Record</button>
-      <span style="flex:1"></span>
-      <button class="btn btn-ghost" onclick="loadAll()">Refresh</button>
+    <!-- Records View -->
+    <div id="viewRecords">
+      <div class="toolbar">
+        <input type="text" id="searchInput" placeholder="Search columns / labels..." oninput="renderTable()">
+        <button class="btn btn-primary" onclick="openCreateModal()">+ New Record</button>
+        <span style="flex:1"></span>
+        <button class="btn btn-ghost" onclick="loadAll()">Refresh</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th class="id-cell">ID</th>
+            <th>Columns</th>
+            <th>Labels</th>
+            <th class="actions">Actions</th>
+          </tr></thead>
+          <tbody id="tableBody"></tbody>
+        </table>
+      </div>
     </div>
-    <div class="table-wrap">
-      <table>
-        <thead><tr>
-          <th class="id-cell">ID</th>
-          <th>Columns</th>
-          <th>Labels</th>
-          <th class="actions">Actions</th>
-        </tr></thead>
-        <tbody id="tableBody"></tbody>
-      </table>
+    <!-- DB Info View -->
+    <div id="viewDbInfo" style="display:none;flex:1;overflow:hidden;display:none;flex-direction:column">
+      <div class="toolbar">
+        <span style="font-weight:700;font-size:15px">&#x2139;&#xFE0F; DB Version &amp; Info</span>
+        <span style="flex:1"></span>
+        <button class="btn btn-ghost" onclick="loadDbInfo()">&#x21BA; Refresh</button>
+      </div>
+      <div class="info-panel" id="dbInfoContent">
+        <div class="empty"><div style="font-size:48px">&#x23F3;</div><div style="margin-top:12px">Loading...</div></div>
+      </div>
+    </div>
+    <!-- SQL Query View -->
+    <div id="viewSql" style="display:none;flex:1;overflow:hidden;flex-direction:column;display:none">
+      <div class="toolbar">
+        <span style="font-weight:700;font-size:15px">&#x1F50D; SQL Query</span>
+        <span style="flex:1"></span>
+        <button class="btn btn-ghost btn-sm" onclick="sqlInsertExample()">Example</button>
+      </div>
+      <div class="sql-panel">
+        <div class="sql-editor-wrap">
+          <textarea id="sqlInput" class="sql-editor" placeholder="SELECT * FROM label.employee WHERE age > 30 ORDER BY age DESC LIMIT 10" spellcheck="false"></textarea>
+          <div class="sql-actions">
+            <button class="btn btn-primary" onclick="runSql()">&#x25B6; Run</button>
+            <button class="btn btn-ghost" onclick="clearSql()">Clear</button>
+            <span id="sqlStatus" style="font-size:12px;color:#888;margin-left:10px"></span>
+          </div>
+        </div>
+        <div class="sql-result-wrap">
+          <div id="sqlResult" class="sql-result">
+            <div class="empty" style="padding:40px"><div style="font-size:36px">&#x1F4DD;</div><div style="margin-top:10px;font-size:13px">Enter a SQL SELECT query above and click Run</div></div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </div>
@@ -145,6 +232,7 @@ tbody td { padding: 10px 14px; vertical-align: middle; }
 
 <script>
 let allRecords=[], allLabels=[], activeLabel=null, deleteTarget=null;
+let currentView='records';
 
 const api = {
   async get(p){ return (await fetch(p)).json(); },
@@ -152,6 +240,17 @@ const api = {
   async put(p,b){ return (await fetch(p,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)})).json(); },
   async delete(p){ return fetch(p,{method:'DELETE'}); },
 };
+
+function showView(name){
+  currentView = name;
+  document.getElementById('viewRecords').style.display = name==='records' ? '' : 'none';
+  document.getElementById('viewDbInfo').style.display  = name==='dbinfo'  ? '' : 'none';
+  document.getElementById('viewSql').style.display     = name==='sql'     ? '' : 'none';
+  document.getElementById('navRecords').classList.toggle('active', name==='records');
+  document.getElementById('navDbInfo').classList.toggle('active',  name==='dbinfo');
+  document.getElementById('navSql').classList.toggle('active',     name==='sql');
+  if(name==='dbinfo') loadDbInfo();
+}
 
 async function loadAll(){
   try{
@@ -171,7 +270,7 @@ function renderSidebar(){
   ).join('');
 }
 
-function filterByLabel(l){ activeLabel=l; renderSidebar(); renderTable(); }
+function filterByLabel(l){ activeLabel=l; showView('records'); renderSidebar(); renderTable(); }
 
 function renderTable(){
   const q = document.getElementById('searchInput').value.toLowerCase();
@@ -193,6 +292,59 @@ function renderTable(){
 
 function updateHeader(){ document.getElementById('headerCount').textContent=allRecords.length+' records'; }
 
+// ---- DB Info ----
+async function loadDbInfo(){
+  const container = document.getElementById('dbInfoContent');
+  container.innerHTML = '<div class="empty"><div style="font-size:36px">&#x23F3;</div><div style="margin-top:10px">Loading...</div></div>';
+  try{
+    const info = await api.get('/db/info');
+    container.innerHTML = renderDbInfo(info);
+  }catch(e){
+    container.innerHTML = '<div class="empty"><div style="font-size:36px">&#x274C;</div><div style="margin-top:10px">Failed to load DB info</div></div>';
+    showToast('DB info load failed','error');
+  }
+}
+
+function renderDbInfo(d){
+  const fmtBytes = b => b==null?'N/A (not yet saved)':b<1024?b+' B':b<1048576?(b/1024).toFixed(1)+' KB':(b/1048576).toFixed(2)+' MB';
+  const deletedBadge = d.deleted_count>0
+    ?'<span class="info-badge warn">'+d.deleted_count+' deleted slots</span>'
+    :'<span class="info-badge ok">clean</span>';
+  const encBadge = d.encrypted
+    ?'<span class="info-badge enc">&#x1F512; Encrypted (XChaCha20-Poly1305)</span>'
+    :'<span class="info-badge warn">&#x26A0;&#xFE0F; Not encrypted</span>';
+  const modeBadge = d.storage_mode==='kdb'
+    ?'<span class="info-badge kdb">KDB Binary</span>'
+    :'<span class="info-badge json-mode">JSON</span>';
+
+  const statsCards=[
+    {label:'Records', value:d.record_count, sub:'active records',        color:''},
+    {label:'Labels',  value:d.label_count,  sub:'unique labels',          color:'green'},
+    {label:'Columns', value:d.column_count, sub:'unique column keys',     color:'purple'},
+    {label:'Next ID', value:d.next_id,      sub:'auto-increment counter', color:'orange'},
+  ].map(c=>'<div class="info-card '+c.color+'"><div class="info-card-label">'+c.label+'</div><div class="info-card-value">'+c.value+'</div><div class="info-card-sub">'+c.sub+'</div></div>').join('');
+
+  const infoRows=[
+    ['Engine',        esc(d.engine_name)],
+    ['Version',       '<span class="ver-badge">v'+esc(d.app_version)+'</span>'],
+    ['Storage Mode',  modeBadge+' '+encBadge],
+    ['Storage Detail',esc(d.storage_format)],
+    ['Data File',     '<code style="font-size:12px">'+esc(d.db_file_path)+'</code>'],
+    ['File Size',     '<strong>'+esc(fmtBytes(d.db_file_size_bytes))+'</strong>'],
+    ['Slots',         d.slot_count+' total (active: <strong>'+d.record_count+'</strong>, deleted: '+d.deleted_count+') '+deletedBadge],
+  ].map(([k,v])=>'<tr><td>'+k+'</td><td>'+v+'</td></tr>').join('');
+
+  const colTags=d.columns.length>0
+    ?d.columns.map(c=>'<span class="tag">'+esc(c)+'</span>').join('')
+    :'<span style="color:#bbb;font-size:13px">No columns yet</span>';
+
+  return '<div class="info-grid">'+statsCards+'</div>'
+    +'<div class="info-section-title">&#x1F4CB; System Information</div>'
+    +'<table class="info-table"><thead><tr><th>Item</th><th>Value</th></tr></thead><tbody>'+infoRows+'</tbody></table>'
+    +'<div class="info-section-title">&#x1F511; Column Keys in Use</div>'
+    +'<div class="tag-list">'+colTags+'</div>';
+}
+
 function openCreateModal(){
   document.getElementById('editId').value='';
   document.getElementById('modalTitle').textContent='New Record';
@@ -211,7 +363,6 @@ function openEditModal(id){
   const entries=Object.entries(r.columns||{});
   if(!entries.length) addColRow();
   else entries.forEach(([k,v])=>{
-    // v は {type:"text", value:"太郎"} 形式のオブジェクト
     const type  = (v && typeof v==='object' && v.type)  ? v.type  : guessType(v);
     const value = (v && typeof v==='object' && 'value' in v) ? v.value : v;
     addColRow(k, type, value);
@@ -220,7 +371,6 @@ function openEditModal(id){
 }
 
 function guessType(v){
-  // v は {type:"text", value:...} 形式のオブジェクト
   if(v && typeof v === 'object' && v.type) return v.type;
   if(typeof v==='boolean') return 'boolean';
   if(typeof v==='number') return Number.isInteger(v)?'integer':'float';
@@ -267,6 +417,77 @@ async function confirmDelete(){
   showToast('Deleted #'+deleteTarget,'success');
   closeDeleteModal(); await loadAll();
 }
+
+// ---- SQL Query ----
+const SQL_EXAMPLES = [
+  "SELECT * FROM label.*",
+  "SELECT * FROM label.employee",
+  "SELECT * FROM label.employee WHERE age > 30",
+  "SELECT * FROM label.employee AND label.manager",
+  "SELECT * FROM label.employee OR label.developer",
+  "SELECT name, age FROM label.employee WHERE age >= 25 ORDER BY age DESC",
+  "SELECT * FROM label.employee WHERE name LIKE 'Tana%'",
+  "SELECT * FROM label.* LIMIT 5",
+];
+let sqlExampleIdx = 0;
+
+function sqlInsertExample(){
+  document.getElementById('sqlInput').value = SQL_EXAMPLES[sqlExampleIdx % SQL_EXAMPLES.length];
+  sqlExampleIdx++;
+}
+
+function clearSql(){
+  document.getElementById('sqlInput').value='';
+  document.getElementById('sqlResult').innerHTML='<div class="empty" style="padding:40px"><div style="font-size:36px">&#x1F4DD;</div><div style="margin-top:10px;font-size:13px">Enter a SQL SELECT query above and click Run</div></div>';
+  document.getElementById('sqlStatus').textContent='';
+}
+
+async function runSql(){
+  const query = document.getElementById('sqlInput').value.trim();
+  if(!query){ showToast('Please enter a SQL query','error'); return; }
+  const statusEl = document.getElementById('sqlStatus');
+  const resultEl = document.getElementById('sqlResult');
+  statusEl.textContent = 'Running...';
+  resultEl.innerHTML = '<div class="empty" style="padding:40px"><div style="font-size:28px">&#x23F3;</div></div>';
+  try{
+    const resp = await fetch('/sql',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query})});
+    const data = await resp.json();
+    if(data.ok){
+      const total = data.total_matched ?? 0;
+      const ret   = data.returned    ?? 0;
+      statusEl.innerHTML = '<span class="ok">&#x2714; '+ret+' row(s) returned</span>'+(total!==ret?' ('+total+' matched, limited)':'');
+      resultEl.innerHTML = renderSqlResult(data);
+    } else {
+      statusEl.innerHTML = '<span class="err">&#x2718; Error</span>';
+      resultEl.innerHTML = '<div class="sql-error">&#x26A0;&#xFE0F; '+esc(data.error||'Unknown error')+'</div>';
+    }
+  }catch(e){
+    statusEl.innerHTML = '<span class="err">&#x2718; Network error</span>';
+    resultEl.innerHTML = '<div class="sql-error">Network error: '+esc(String(e))+'</div>';
+  }
+}
+
+function renderSqlResult(data){
+  if(!data.columns||data.columns.length===0) return '<div class="empty" style="padding:40px">No columns returned</div>';
+  if(!data.rows||data.rows.length===0){
+    return '<div class="sql-meta"><span class="ok">0 rows</span><span>Query executed successfully</span></div>'
+      +'<div class="empty" style="padding:40px"><div style="font-size:32px">&#x1F4ED;</div><div style="margin-top:10px">No records matched</div></div>';
+  }
+  const thead='<thead><tr>'+data.columns.map(c=>'<th>'+esc(c)+'</th>').join('')+'</tr></thead>';
+  const tbody='<tbody>'+data.rows.map(row=>'<tr>'+row.map(cell=>{
+    if(cell===null||cell===undefined) return '<td class="null-cell">NULL</td>';
+    return '<td>'+esc(String(cell))+'</td>';
+  }).join('')+'</tr>').join('')+'</tbody>';
+  return '<div class="sql-meta"><span class="ok">'+data.rows.length+' row(s)</span><span>total matched: '+data.total_matched+'</span></div>'
+    +'<table>'+thead+tbody+'</table>';
+}
+
+// Ctrl+Enter でSQL実行
+document.addEventListener('keydown', e=>{
+  if((e.ctrlKey||e.metaKey) && e.key==='Enter' && currentView==='sql'){
+    e.preventDefault(); runSql();
+  }
+});
 
 function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 function setStatus(m){ document.getElementById('statusText').textContent=m; }

@@ -142,6 +142,43 @@ pub struct LabelSearchResponse {
     pub records: Vec<RecordResponse>,
 }
 
+// ---------------------------------------------------------------------------
+// DB情報 API 用 DTO
+// ---------------------------------------------------------------------------
+
+/// GET /db/info レスポンス
+#[derive(Debug, Serialize)]
+pub struct DbInfoResponse {
+    /// エンジン名
+    pub engine_name: String,
+    /// アプリバージョン（A.B.C 形式）
+    pub app_version: String,
+    /// ストレージモード: "kdb" | "json"
+    pub storage_mode: String,
+    /// ストレージ形式の詳細説明
+    pub storage_format: String,
+    /// 暗号化されているか
+    pub encrypted: bool,
+    /// データファイルパス
+    pub db_file_path: String,
+    /// データファイルサイズ（bytes）。ファイルが存在しない場合は None
+    pub db_file_size_bytes: Option<u64>,
+    /// 有効なレコード数
+    pub record_count: usize,
+    /// 論理削除済みレコード数
+    pub deleted_count: usize,
+    /// アロケート済みスロット数
+    pub slot_count: usize,
+    /// ユニークラベル数
+    pub label_count: usize,
+    /// ユニークカラム数
+    pub column_count: usize,
+    /// カラム名一覧
+    pub columns: Vec<String>,
+    /// 次の自動採番ID
+    pub next_id: u64,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ErrorResponse {
     pub error: String,

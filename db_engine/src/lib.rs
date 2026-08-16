@@ -4,6 +4,10 @@
 use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
+pub mod codec;
+pub mod crypto;
+pub mod kdb_store;
+
 /// カラムに格納できる値の型
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum DataType {
@@ -302,6 +306,28 @@ impl Database {
         labels.sort();
         labels
     }
+
+    /// DB全体で使われているカラム名の一覧（重複なし・ソート済み）
+    pub fn list_all_columns(&self) -> Vec<String> {
+        let mut cols: Vec<String> = self.store.columns.keys().cloned().collect();
+        cols.sort();
+        cols
+    }
+
+    /// 論理削除済みを含む全スロット数（アロケート済み行数）
+    pub fn slot_count(&self) -> usize {
+        self.records.len()
+    }
+
+    /// 次に採番されるID
+    pub fn next_id(&self) -> u64 {
+        self.next_id
+    }
+
+    /// 論理削除されたレコード数
+    pub fn deleted_count(&self) -> usize {
+        self.records.iter().filter(|r| r.is_none()).count()
+    }
 }
 
 impl Default for Database {
@@ -419,6 +445,109 @@ impl Database {
         } else {
             Ok(Self::new())
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// .kdb バイナリ暗号化フォーマットの永続化
+// ---------------------------------------------------------------------------
+
+/// .kdb 永続化エラー
+#[derive(Debug)]
+pub enum KdbPersistError {
+    Kdb(kdb_store::KdbError),
+}
+impl std::fmt::Display for KdbPersistError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self { KdbPersistError::Kdb(e) => write!(f, "KDB: {}", e) }
+    }
+}
+impl std::error::Error for KdbPersistError {}
+impl From<kdb_store::KdbError> for KdbPersistError {
+    fn from(e: kdb_store::KdbError) -> Self { KdbPersistError::Kdb(e) }
+}
+
+impl Database {
+    /// .kdb ファイルへ保存（コンパクション: 全レコード書き直し）
+    /// UPDATE/DELETE 後に呼ぶ
+    pub fn save_kdb(&self, path: &str) -> Result<(), KdbPersistError> {
+        let mut kdb = kdb_store::KdbFile::open_or_create(path)?;
+        let records: Vec<Record> = self.records.iter().filter_map(|r| r.clone()).collect();
+        kdb.compact(&records, self.next_id)?;
+        Ok(())
+    }
+
+    /// .kdb ファイルからロード
+    pub fn load_kdb(path: &str) -> Result<Self, KdbPersistError> {
+        let mut kdb = kdb_store::KdbFile::open(path)?;
+        let records = kdb.read_all_records()?;
+        let mut db  = Database::new();
+        db.next_id  = kdb.next_id();
+        for record in records {
+            let id      = record.id;
+            let row_idx = db.records.len();
+            let cur     = db.store.row_count();
+            for (col, val) in &record.columns {
+                let column = db.store.columns.entry(col.clone()).or_insert_with(|| vec![None; cur]);
+                column.push(Some(val.clone()));
+            }
+            let rcols: Vec<String> = record.columns.keys().cloned().collect();
+            for (col, column) in db.store.columns.iter_mut() {
+                if !rcols.contains(col) { column.push(None); }
+            }
+            for label in &record.labels {
+                db.store.label_index.entry(label.clone()).or_default().push(row_idx);
+            }
+            db.id_to_index.insert(id, row_idx);
+            db.records.push(Some(record));
+        }
+        Ok(db)
+    }
+
+    /// .kdb ファイルが存在すればロード、なければ新規DB
+    pub fn load_or_new_kdb(path: &str) -> Result<Self, KdbPersistError> {
+        if std::path::Path::new(path).exists() { Self::load_kdb(path) }
+        else { Ok(Self::new()) }
+    }
+
+    /// INSERT を WAL 追記で高速に行う（O(1)書き込み）
+    /// kdb が None の場合は通常 insert としてメモリのみ更新
+    pub fn insert_fast(
+        &mut self,
+        mut record: Record,
+        kdb: Option<&mut kdb_store::KdbFile>,
+    ) -> Result<u64, DatabaseError> {
+        // ID採番
+        if record.id == 0 {
+            record.id = self.next_id;
+            self.next_id += 1;
+        } else if self.id_to_index.contains_key(&record.id) {
+            return Err(DatabaseError::DuplicateId(record.id));
+        } else if record.id >= self.next_id {
+            self.next_id = record.id + 1;
+        }
+        let id      = record.id;
+        let row_idx = self.records.len();
+        let cur     = self.store.row_count();
+        for (col, val) in &record.columns {
+            let col_vec = self.store.columns.entry(col.clone()).or_insert_with(|| vec![None; cur]);
+            col_vec.push(Some(val.clone()));
+        }
+        let rcols: Vec<String> = record.columns.keys().cloned().collect();
+        for (col, col_vec) in self.store.columns.iter_mut() {
+            if !rcols.contains(col) { col_vec.push(None); }
+        }
+        for label in &record.labels {
+            self.store.label_index.entry(label.clone()).or_default().push(row_idx);
+        }
+        self.id_to_index.insert(id, row_idx);
+        self.records.push(Some(record.clone()));
+        // WAL追記（kdb モードなら高速保存）
+        if let Some(kdb) = kdb {
+            let _ = kdb.update_next_id(self.next_id);
+            let _ = kdb.append_record(&record);
+        }
+        Ok(id)
     }
 }
 

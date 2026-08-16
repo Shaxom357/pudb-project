@@ -19,32 +19,37 @@ use crate::label_handlers::{
     add_label, list_record_labels, remove_label,
     list_all_labels, search_by_labels, rename_label,
 };
+use crate::info_handlers::get_db_info;
+use crate::sql_handlers::execute_sql;
 
 use crate::ui::ui_handler;
 
-/// テスト・本番共通のルーター組み立て関数
-pub fn build_app(mgr: LabelManager, db_path: String) -> (Router, AppState) {
-    let state: AppState = Arc::new(RwLock::new(AppStateInner { mgr, db_path }));
-
-    let app = Router::new()
-        // --- 管理UI ---
+fn build_router(state: AppState) -> Router {
+    Router::new()
         .route("/ui", get(ui_handler))
         .route("/", get(|| async { axum::response::Redirect::temporary("/ui") }))
-        // --- レコード操作 ---
         .route("/records", get(list_records).post(create_record))
         .route("/records/label/{label}", get(get_records_by_label))
-        .route(
-            "/records/{id}",
-            get(get_record).put(update_record).delete(delete_record),
-        )
-        // --- ラベル操作（レコード単位） ---
+        .route("/records/{id}", get(get_record).put(update_record).delete(delete_record))
         .route("/records/{id}/labels", get(list_record_labels).post(add_label))
         .route("/records/{id}/labels/{label}", delete(remove_label))
-        // --- ラベル操作（DB全体） ---
         .route("/labels", get(list_all_labels))
         .route("/labels/search", post(search_by_labels))
         .route("/labels/rename", put(rename_label))
-        .with_state(state.clone());
+        .route("/db/info", get(get_db_info))
+        .route("/sql", post(execute_sql))
+        .with_state(state)
+}
 
-    (app, state)
+/// テスト用: mgr と db_path から AppState を作って Router を返す
+pub fn build_app(mgr: LabelManager, db_path: String) -> (Router, AppState) {
+    let state: AppState = Arc::new(RwLock::new(AppStateInner { mgr, db_path, kdb: None }));
+    let router = build_router(state.clone());
+    (router, state)
+}
+
+/// 本番用: 外から組み立てた AppState を受け取って Router を返す
+pub fn build_app_with_state(state: AppState) -> (Router, AppState) {
+    let router = build_router(state.clone());
+    (router, state)
 }
