@@ -63,12 +63,19 @@ pub fn execute_select(db: &Database, stmt: &SelectStatement) -> QueryResult {
     if let Some(limit) = stmt.limit { records.truncate(limit as usize); }
 
     // SELECT するカラムを決定
+    // SELECT * の場合は id 列を先頭、labels 列（カンマ区切り）を末尾に付与する
     let (display_cols, internal_cols): (Vec<String>, Vec<String>) = match &stmt.columns {
         SelectColumns::All => {
             let mut cols = db.list_all_columns();
             cols.sort();
-            let internal = std::iter::once("__id".to_string()).chain(cols.iter().cloned()).collect();
-            let display  = std::iter::once("id".to_string()).chain(cols.into_iter()).collect();
+            let internal = std::iter::once("__id".to_string())
+                .chain(cols.iter().cloned())
+                .chain(std::iter::once("__labels".to_string()))
+                .collect();
+            let display = std::iter::once("id".to_string())
+                .chain(cols.into_iter())
+                .chain(std::iter::once("labels".to_string()))
+                .collect();
             (display, internal)
         }
         SelectColumns::Named(names) => (names.clone(), names.clone()),
@@ -77,6 +84,7 @@ pub fn execute_select(db: &Database, stmt: &SelectStatement) -> QueryResult {
     let rows: Vec<Vec<CellValue>> = records.iter().map(|r| {
         internal_cols.iter().map(|col| {
             if col == "__id" { CellValue::Integer(r.id as i64) }
+            else if col == "__labels" { CellValue::Text(r.labels.join(",")) }
             else { r.columns.get(col).map(CellValue::from_data_type).unwrap_or(CellValue::Null) }
         }).collect()
     }).collect();

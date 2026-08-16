@@ -20,6 +20,9 @@ pub struct AppStateInner {
     pub mgr:     LabelManager,
     pub db_path: String,
     pub kdb:     Option<KdbFile>,
+    /// HTTPリクエスト（/records, /labels 系のREST API）を受け付けるかどうか。
+    /// false の場合、データ操作はSQL経由(/sql)のみ許可される。
+    pub http_api_enabled: bool,
 }
 
 pub type AppState = Arc<RwLock<AppStateInner>>;
