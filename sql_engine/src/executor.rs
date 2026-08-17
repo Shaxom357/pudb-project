@@ -267,7 +267,8 @@ fn literal_to_data_type(v: &LiteralValue) -> DataType {
     }
 }
 
-pub fn execute_insert(db: &mut Database, stmt: &InsertStatement) -> Result<InsertResult, InsertExecError> {
+/// INSERT文からカラム順を確定し、Recordを組み立てる（db.insert/insert_fast共通の下ごしらえ）
+fn build_insert_record(db: &Database, stmt: &InsertStatement) -> Result<(Record, Vec<String>), InsertExecError> {
     // カラム順が明示されていなければ、DB内の既存カラムをソート順で採用する
     // （SELECT * の列順と同じ規則）
     let columns: Vec<String> = match &stmt.columns {
@@ -293,7 +294,23 @@ pub fn execute_insert(db: &mut Database, stmt: &InsertStatement) -> Result<Inser
         record.add_label(label.clone());
     }
 
+    Ok((record, columns))
+}
+
+pub fn execute_insert(db: &mut Database, stmt: &InsertStatement) -> Result<InsertResult, InsertExecError> {
+    let (record, columns) = build_insert_record(db, stmt)?;
     let id = db.insert(record)?;
+    Ok(InsertResult { id, columns, labels: stmt.labels.clone() })
+}
+
+/// WAL追記(insert_fast)でINSERTを実行する。.kdbモード用の高速パス（O(1)書き込み）。
+pub fn execute_insert_fast(
+    db: &mut Database,
+    kdb: Option<&mut db_engine::kdb_store::KdbFile>,
+    stmt: &InsertStatement,
+) -> Result<InsertResult, InsertExecError> {
+    let (record, columns) = build_insert_record(db, stmt)?;
+    let id = db.insert_fast(record, kdb)?;
     Ok(InsertResult { id, columns, labels: stmt.labels.clone() })
 }
 
