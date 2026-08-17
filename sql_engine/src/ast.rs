@@ -115,3 +115,41 @@ pub struct InsertStatement {
     /// None の場合は DB内の既存カラムをソート順で対応付ける。
     pub columns: Option<Vec<String>>,
 }
+
+/// UPDATE文全体（データ更新 or ラベルのリネーム）
+/// 例: UPDATE label.employee SET employee_name='木村' WHERE employee_name='木邑'
+///     UPDATE LABEL label.employee SET label.staff
+#[derive(Debug, Clone, PartialEq)]
+pub enum UpdateStatement {
+    /// UPDATE label.name SET col=val, ... [WHERE ...]
+    Data(UpdateDataStatement),
+    /// UPDATE LABEL label.old SET label.new
+    Label(UpdateLabelStatement),
+}
+
+/// データ更新: UPDATE label.name SET col=val, ... [WHERE ...]
+#[derive(Debug, Clone, PartialEq)]
+pub struct UpdateDataStatement {
+    /// 更新対象ラベル
+    pub target: LabelTarget,
+    /// SET句のカラム=値の割り当て（1つ以上）
+    pub assignments: Vec<Assignment>,
+    /// WHERE句（省略時は対象ラベルの全レコードが更新される）
+    pub where_clause: Option<WhereExpr>,
+}
+
+/// SET句の1項目: column = value
+#[derive(Debug, Clone, PartialEq)]
+pub struct Assignment {
+    pub column: String,
+    pub value: LiteralValue,
+}
+
+/// ラベルのリネーム: UPDATE LABEL label.old SET label.new [WHERE ...]
+#[derive(Debug, Clone, PartialEq)]
+pub struct UpdateLabelStatement {
+    pub old_label: String,
+    pub new_label: String,
+    /// WHERE句（省略時は old_label が付いた全レコードが対象）
+    pub where_clause: Option<WhereExpr>,
+}

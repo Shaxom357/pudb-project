@@ -152,20 +152,29 @@ impl LabelManager {
         let count = target_ids.len();
         for id in target_ids {
             self.db.detach_label(id, old_label).map_err(LabelError::from)?;
-            self.db.attach_label(id, new_label).map_err(LabelError::from)?;
+            // 対象レコードが元々 new_label も併せ持っていた場合は付与済みなので付け直さない
+            // （attach_label は重複付与をエラーにするため）
+            let already_has_new = self.db.get(id).map_err(LabelError::from)?
+                .labels.contains(&new_label.to_string());
+            if !already_has_new {
+                self.db.attach_label(id, new_label).map_err(LabelError::from)?;
+            }
         }
         Ok(count)
     }
 
     // -- ラベルのコピー --
 
-    /// src_id のラベルを dst_id にすべてコピーする。戻り値: コピー数
+    /// src_id のラベルを dst_id にすべてコピーする。dst_id が既に持っているラベルはスキップする
+    /// （attach_label は重複付与をエラーにするため）。戻り値: 新たにコピーした数
     pub fn copy_labels(&mut self, src_id: u64, dst_id: u64) -> Result<usize, LabelError> {
         let src_labels: Vec<String> = self.db
             .get(src_id).map_err(LabelError::from)?.labels.clone();
-        self.db.get(dst_id).map_err(LabelError::from)?;
+        let dst_labels: HashSet<String> = self.db
+            .get(dst_id).map_err(LabelError::from)?.labels.iter().cloned().collect();
         let mut copied = 0;
         for label in src_labels {
+            if dst_labels.contains(&label) { continue; }
             self.db.attach_label(dst_id, &label).map_err(LabelError::from)?;
             copied += 1;
         }

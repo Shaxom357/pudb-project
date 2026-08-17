@@ -47,6 +47,8 @@ pub async fn list_record_labels(
         Err(e) => {
             let status = if e.to_string().contains("not found") {
                 StatusCode::NOT_FOUND
+            } else if e.to_string().contains("already attached") {
+                StatusCode::CONFLICT
             } else {
                 StatusCode::UNPROCESSABLE_ENTITY
             };

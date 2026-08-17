@@ -29,7 +29,7 @@ async fn test_add_label_to_record() {
 }
 
 #[tokio::test]
-async fn test_add_label_idempotent() {
+async fn test_add_label_duplicate_returns_409_and_does_not_change() {
     let (base, db_path) = spawn_test_server().await;
     let client = reqwest::Client::new();
     let r: serde_json::Value = post_record(&client, &base, serde_json::json!({"columns":{},"labels":[]})).await;
@@ -37,7 +37,10 @@ async fn test_add_label_idempotent() {
     let url = format!("{}/records/{}/labels", base, id);
     let payload = serde_json::json!({"label": "dup"});
     client.post(&url).json(&payload).send().await.unwrap();
-    let labels: Vec<String> = client.post(&url).json(&payload).send().await.unwrap().json().await.unwrap();
+    let res = client.post(&url).json(&payload).send().await.unwrap();
+    assert_eq!(res.status().as_u16(), 409);
+
+    let labels: Vec<String> = client.get(&url).send().await.unwrap().json().await.unwrap();
     assert_eq!(labels.iter().filter(|l| l.as_str() == "dup").count(), 1);
     let _ = std::fs::remove_file(db_path);
 }

@@ -157,3 +157,152 @@ async fn test_insert_uses_existing_column_order_when_omitted() {
 
     let _ = std::fs::remove_file(db_path);
 }
+
+#[tokio::test]
+async fn test_update_data_sets_matching_row_and_keeps_others() {
+    let (base, db_path) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    post_sql(&client, &base,
+        "INSERT INTO (label.employee) (employee_name, employee_age) VALUE ('木邑', 24)"
+    ).await;
+
+    let (status, body) = post_sql(&client, &base,
+        "UPDATE label.employee SET employee_name='木村' WHERE employee_name='木邑'"
+    ).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["ok"], true);
+    assert_eq!(body["updated_count"], 1);
+
+    let (status, sel) = post_sql(&client, &base, "SELECT * FROM label.employee").await;
+    assert_eq!(status, 200);
+    let row = sel["rows"][0].as_array().unwrap();
+    let cols: Vec<&str> = sel["columns"].as_array().unwrap().iter().map(|c| c.as_str().unwrap()).collect();
+    let name_idx = cols.iter().position(|&c| c == "employee_name").unwrap();
+    let age_idx = cols.iter().position(|&c| c == "employee_age").unwrap();
+    assert_eq!(row[name_idx], serde_json::json!("木村"));
+    // SET対象でないカラムは維持される
+    assert_eq!(row[age_idx], serde_json::json!(24));
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn test_update_data_no_match_returns_zero_count() {
+    let (base, db_path) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    post_sql(&client, &base,
+        "INSERT INTO (label.employee) (employee_name) VALUE ('田中')"
+    ).await;
+
+    let (status, body) = post_sql(&client, &base,
+        "UPDATE label.employee SET employee_name='X' WHERE employee_name='存在しない'"
+    ).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["updated_count"], 0);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn test_update_label_rename_moves_records() {
+    let (base, db_path) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    post_sql(&client, &base,
+        "INSERT INTO (label.employee) (name) VALUE ('田中')"
+    ).await;
+
+    let (status, body) = post_sql(&client, &base,
+        "UPDATE LABEL label.employee SET label.staff"
+    ).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["updated_count"], 1);
+
+    let (status, old_sel) = post_sql(&client, &base, "SELECT * FROM label.employee").await;
+    assert_eq!(status, 200);
+    assert_eq!(old_sel["returned"], 0);
+
+    let (status, new_sel) = post_sql(&client, &base, "SELECT * FROM label.staff").await;
+    assert_eq!(status, 200);
+    assert_eq!(new_sel["returned"], 1);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn test_update_label_rename_with_where_only_renames_matching_records() {
+    let (base, db_path) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    post_sql(&client, &base,
+        "INSERT INTO (label.employee) (name, department) VALUE ('田中', 'sales')"
+    ).await;
+    post_sql(&client, &base,
+        "INSERT INTO (label.employee) (name, department) VALUE ('鈴木', 'dev')"
+    ).await;
+
+    let (status, body) = post_sql(&client, &base,
+        "UPDATE LABEL label.employee SET label.sales_staff WHERE department='sales'"
+    ).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["updated_count"], 1);
+
+    let (_, employee_sel) = post_sql(&client, &base, "SELECT * FROM label.employee").await;
+    assert_eq!(employee_sel["returned"], 1);
+    let (_, sales_sel) = post_sql(&client, &base, "SELECT * FROM label.sales_staff").await;
+    assert_eq!(sales_sel["returned"], 1);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn test_update_label_rename_rejects_duplicate_target() {
+    let (base, db_path) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    post_sql(&client, &base, "INSERT INTO (label.employee) (name) VALUE ('田中')").await;
+    post_sql(&client, &base, "INSERT INTO (label.staff) (name) VALUE ('鈴木')").await;
+
+    let (status, body) = post_sql(&client, &base, "UPDATE LABEL label.employee SET label.staff").await;
+    assert_eq!(status, 400);
+    assert_eq!(body["ok"], false);
+    assert!(body["error"].as_str().unwrap().len() > 0);
+
+    // 何も変更されていないこと
+    let (_, employee_sel) = post_sql(&client, &base, "SELECT * FROM label.employee").await;
+    assert_eq!(employee_sel["returned"], 1);
+    let (_, staff_sel) = post_sql(&client, &base, "SELECT * FROM label.staff").await;
+    assert_eq!(staff_sel["returned"], 1);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn test_insert_rejects_duplicate_label_in_same_statement() {
+    let (base, db_path) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let (status, body) = post_sql(&client, &base,
+        "INSERT INTO (label.employee, label.employee) (name) VALUE ('田中')"
+    ).await;
+    assert_eq!(status, 400);
+    assert_eq!(body["ok"], false);
+    assert!(body["error"].as_str().unwrap().len() > 0);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn test_update_rejects_malformed_syntax() {
+    let (base, db_path) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let (status, body) = post_sql(&client, &base, "UPDATE label.employee SET").await;
+    assert_eq!(status, 400);
+    assert_eq!(body["ok"], false);
+    assert!(body["error"].as_str().unwrap().len() > 0);
+
+    let _ = std::fs::remove_file(db_path);
+}

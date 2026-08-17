@@ -4,9 +4,12 @@ pub mod ast;
 pub mod executor;
 pub mod parser;
 
-pub use executor::{execute_select, execute_insert, execute_insert_fast, CellValue, QueryResult, InsertResult, InsertExecError};
-pub use parser::{parse_select, parse_insert, ParseError};
-pub use ast::{SelectStatement, InsertStatement};
+pub use executor::{
+    execute_select, execute_insert, execute_insert_fast, execute_update,
+    CellValue, QueryResult, InsertResult, InsertExecError, UpdateResult, UpdateExecError,
+};
+pub use parser::{parse_select, parse_insert, parse_update, ParseError};
+pub use ast::{SelectStatement, InsertStatement, UpdateStatement};
 
 /// SQL文字列を受け取り、クエリを実行して結果を返す（SELECT専用）
 pub fn run_select(db: &db_engine::Database, sql: &str) -> Result<QueryResult, ParseError> {
@@ -46,4 +49,28 @@ pub fn run_insert_fast(
 ) -> Result<InsertResult, InsertError> {
     let stmt = parse_insert(sql)?;
     Ok(execute_insert_fast(db, kdb, &stmt)?)
+}
+
+/// UPDATE実行時の統合エラー（パースエラー or 実行エラー）
+#[derive(Debug, PartialEq)]
+pub enum UpdateError {
+    Parse(ParseError),
+    Exec(UpdateExecError),
+}
+
+impl std::fmt::Display for UpdateError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UpdateError::Parse(e) => write!(f, "{}", e),
+            UpdateError::Exec(e)  => write!(f, "{}", e),
+        }
+    }
+}
+impl From<ParseError> for UpdateError { fn from(e: ParseError) -> Self { UpdateError::Parse(e) } }
+impl From<UpdateExecError> for UpdateError { fn from(e: UpdateExecError) -> Self { UpdateError::Exec(e) } }
+
+/// SQL文字列を受け取り、UPDATEを実行する
+pub fn run_update(db: &mut db_engine::Database, sql: &str) -> Result<UpdateResult, UpdateError> {
+    let stmt = parse_update(sql)?;
+    Ok(execute_update(db, &stmt)?)
 }
