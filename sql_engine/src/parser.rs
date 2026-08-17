@@ -14,6 +14,7 @@ pub enum Token {
     OrderBy, // ORDER BY は2語だが1トークンとして扱う
     Limit, Like, Asc, Desc, Null, True, False,
     Insert, Into, Value,
+    Update, Set,
     // 記号
     Star, Comma, Dot,
     Eq, Ne, Lt, Le, Gt, Ge,
@@ -150,6 +151,8 @@ impl<'a> Lexer<'a> {
             "INSERT" => Token::Insert,
             "INTO"   => Token::Into,
             "VALUE" | "VALUES" => Token::Value,
+            "UPDATE" => Token::Update,
+            "SET"    => Token::Set,
             _        => Token::Ident(s),
         }
     }
@@ -220,6 +223,7 @@ pub struct Parser { tokens: Vec<Token>, pos: usize }
 impl Parser {
     pub fn new(tokens: Vec<Token>) -> Self { Parser { tokens, pos: 0 } }
     fn peek(&self) -> &Token { self.tokens.get(self.pos).unwrap_or(&Token::Eof) }
+    fn peek_at(&self, offset: usize) -> &Token { self.tokens.get(self.pos + offset).unwrap_or(&Token::Eof) }
     fn advance(&mut self) -> Token {
         let t = self.tokens.get(self.pos).cloned().unwrap_or(Token::Eof);
         self.pos += 1; t
@@ -458,6 +462,75 @@ impl Parser {
         }
         Ok(items)
     }
+
+    // -----------------------------------------------------------------
+    // UPDATE
+    // -----------------------------------------------------------------
+
+    /// UPDATE label.name SET col=val, ... [WHERE ...]
+    /// UPDATE LABEL label.old SET label.new [WHERE ...]
+    ///
+    /// 先頭が `label.` に続けてすぐ `.` が来ない `LABEL` トークン
+    /// （= `UPDATE LABEL ...` の `LABEL` キーワード）かどうかで両構文を判別する。
+    pub fn parse_update(&mut self) -> Result<UpdateStatement, ParseError> {
+        self.expect(Token::Update)?;
+
+        let is_label_rename = matches!(self.peek(), Token::Ident(s) if s.to_lowercase() == "label")
+            && self.peek_at(1) != &Token::Dot;
+
+        if is_label_rename {
+            self.advance(); // "LABEL" キーワードを消費
+            let old_label = self.parse_label_ref()?;
+            self.expect(Token::Set)?;
+            let new_label = self.parse_label_ref()?;
+            let where_clause = if self.peek() == &Token::Where {
+                self.advance(); Some(self.parse_where_expr()?)
+            } else { None };
+            return Ok(UpdateStatement::Label(UpdateLabelStatement { old_label, new_label, where_clause }));
+        }
+
+        let target = self.parse_label_target()?;
+        self.expect(Token::Set)?;
+        let assignments = self.parse_assignment_list()?;
+        let where_clause = if self.peek() == &Token::Where {
+            self.advance(); Some(self.parse_where_expr()?)
+        } else { None };
+        Ok(UpdateStatement::Data(UpdateDataStatement { target, assignments, where_clause }))
+    }
+
+    /// `label.<name>` 形式の単一ラベル参照をパースする（`label.*` は不可）。
+    /// UPDATE LABEL 文の旧ラベル名・新ラベル名の指定に使う。
+    fn parse_label_ref(&mut self) -> Result<String, ParseError> {
+        match self.advance() {
+            Token::Ident(s) if s.to_lowercase() == "label" => {}
+            o => return Err(ParseError::UnexpectedToken {
+                got: format!("{:?}", o), expected: "'label'".into() }),
+        }
+        self.expect(Token::Dot)?;
+        match self.advance() {
+            Token::Star => Err(ParseError::UnsupportedSyntax(
+                "UPDATE LABEL name cannot be '*'".into())),
+            Token::Ident(name) => Ok(name),
+            o => Err(ParseError::UnexpectedToken {
+                got: format!("{:?}", o), expected: "label name".into() }),
+        }
+    }
+
+    fn parse_assignment_list(&mut self) -> Result<Vec<Assignment>, ParseError> {
+        let mut items = vec![self.parse_assignment()?];
+        while self.peek() == &Token::Comma {
+            self.advance();
+            items.push(self.parse_assignment()?);
+        }
+        Ok(items)
+    }
+
+    fn parse_assignment(&mut self) -> Result<Assignment, ParseError> {
+        let column = self.expect_ident()?;
+        self.expect(Token::Eq)?;
+        let value = self.parse_literal()?;
+        Ok(Assignment { column, value })
+    }
 }
 
 fn validate_insert_label_name(name: &str) -> Result<String, ParseError> {
@@ -484,6 +557,16 @@ pub fn parse_insert(sql: &str) -> Result<InsertStatement, ParseError> {
     let tokens = Lexer::new(sql).tokenize()?;
     let mut parser = Parser::new(tokens);
     let stmt = parser.parse_insert()?;
+    parser.expect_eof()?;
+    Ok(stmt)
+}
+
+/// UPDATE文をパースする公開エントリーポイント
+pub fn parse_update(sql: &str) -> Result<UpdateStatement, ParseError> {
+    if sql.trim().is_empty() { return Err(ParseError::EmptyQuery); }
+    let tokens = Lexer::new(sql).tokenize()?;
+    let mut parser = Parser::new(tokens);
+    let stmt = parser.parse_update()?;
     parser.expect_eof()?;
     Ok(stmt)
 }
@@ -650,6 +733,85 @@ mod tests {
     #[test]
     fn test_select_rejects_trailing_tokens() {
         assert!(parse_select("SELECT * FROM label.employee GARBAGE").is_err());
+    }
+
+    // -- UPDATE --
+
+    #[test]
+    fn test_update_data_with_where() {
+        let s = parse_update(
+            "UPDATE label.employee SET employee_name='木村' WHERE employee_name='木邑'"
+        ).unwrap();
+        match s {
+            UpdateStatement::Data(d) => {
+                assert_eq!(d.target, LabelTarget::LabelName("employee".into()));
+                assert_eq!(d.assignments, vec![Assignment {
+                    column: "employee_name".into(), value: LiteralValue::Text("木村".into()),
+                }]);
+                assert_eq!(d.where_clause, Some(WhereExpr::Comparison(Comparison {
+                    column: "employee_name".into(), op: CompareOp::Eq,
+                    value: LiteralValue::Text("木邑".into()),
+                })));
+            }
+            _ => panic!("expected UpdateStatement::Data"),
+        }
+    }
+
+    #[test]
+    fn test_update_data_multiple_assignments_without_where() {
+        let s = parse_update("UPDATE label.employee SET age=30, department='sales'").unwrap();
+        match s {
+            UpdateStatement::Data(d) => {
+                assert_eq!(d.assignments, vec![
+                    Assignment { column: "age".into(), value: LiteralValue::Integer(30) },
+                    Assignment { column: "department".into(), value: LiteralValue::Text("sales".into()) },
+                ]);
+                assert_eq!(d.where_clause, None);
+            }
+            _ => panic!("expected UpdateStatement::Data"),
+        }
+    }
+
+    #[test]
+    fn test_update_label_rename() {
+        let s = parse_update("UPDATE LABEL label.employee SET label.staff").unwrap();
+        match s {
+            UpdateStatement::Label(l) => {
+                assert_eq!(l.old_label, "employee");
+                assert_eq!(l.new_label, "staff");
+                assert_eq!(l.where_clause, None);
+            }
+            _ => panic!("expected UpdateStatement::Label"),
+        }
+    }
+
+    #[test]
+    fn test_update_label_rename_with_where() {
+        let s = parse_update(
+            "UPDATE LABEL label.employee SET label.staff WHERE department='sales'"
+        ).unwrap();
+        match s {
+            UpdateStatement::Label(l) => {
+                assert_eq!(l.old_label, "employee");
+                assert_eq!(l.new_label, "staff");
+                assert_eq!(l.where_clause, Some(WhereExpr::Comparison(Comparison {
+                    column: "department".into(), op: CompareOp::Eq,
+                    value: LiteralValue::Text("sales".into()),
+                })));
+            }
+            _ => panic!("expected UpdateStatement::Label"),
+        }
+    }
+
+    #[test]
+    fn test_update_label_rejects_star() {
+        assert!(parse_update("UPDATE LABEL label.* SET label.staff").is_err());
+        assert!(parse_update("UPDATE LABEL label.employee SET label.*").is_err());
+    }
+
+    #[test]
+    fn test_update_rejects_trailing_tokens() {
+        assert!(parse_update("UPDATE label.employee SET age=30 GARBAGE").is_err());
     }
 }
 

@@ -266,14 +266,26 @@ fn test_attach_label_adds_label() {
 }
 
 #[test]
-fn test_attach_label_dedup() {
+fn test_attach_label_duplicate_returns_error_and_does_not_change() {
     let mut db = Database::new();
     let id = db.insert(Record::new(0)).unwrap();
     db.attach_label(id, "tag").unwrap();
-    db.attach_label(id, "tag").unwrap(); // 重複追加しても一個
+    let err = db.attach_label(id, "tag").unwrap_err(); // 重複付与はエラー
+    assert_eq!(err, DatabaseError::DuplicateLabel("tag".to_string()));
     let r = db.get(id).unwrap();
     assert_eq!(r.labels.iter().filter(|l| l.as_str() == "tag").count(), 1);
     assert_eq!(db.get_by_label("tag").len(), 1);
+}
+
+#[test]
+fn test_insert_rejects_duplicate_labels_in_same_record() {
+    let mut db = Database::new();
+    let mut r = Record::new(0);
+    r.add_label("tag");
+    r.add_label("tag");
+    let err = db.insert(r).unwrap_err();
+    assert_eq!(err, DatabaseError::DuplicateLabel("tag".to_string()));
+    assert_eq!(db.count(), 0);
 }
 
 #[test]
