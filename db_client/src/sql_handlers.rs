@@ -123,6 +123,16 @@ pub async fn execute_sql(
     if trimmed.starts_with("INSERT") {
         let started = std::time::Instant::now();
         let mut inner = state.write().await;
+
+        if crate::handlers::memory_limit_exceeded(&inner) {
+            inner.logger.memory_alert("メモリ使用量が設定上限に達したため、新規レコード作成(SQL INSERT)を拒否しました".to_string());
+            inner.logger.sql_query(&query, false, started.elapsed().as_millis(), Some("memory limit exceeded"));
+            return (StatusCode::INSUFFICIENT_STORAGE, Json(SqlQueryResponse::error(
+                query,
+                "メモリ使用量が設定上限に達しているため、新規データの書き込みを拒否しました。設定画面でメモリ上限を確認してください。"
+            )));
+        }
+
         // kdb モード: WAL 追記(insert_fast, O(1)) / JSON モード: 通常insert
         // Rustの借用チェッカー対策: kdb と mgr を別々に取り出す（handlers::create_recordと同じパターン）
         let insert_result = {

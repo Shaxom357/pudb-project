@@ -19,6 +19,8 @@ use std::sync::Mutex;
 pub enum LogLevel {
     Info,
     Warn,
+    /// メモリ使用量が上限の80%(既定)を超えた場合など、Warnよりも重大な注意喚起
+    Alert,
     Error,
 }
 
@@ -35,6 +37,8 @@ pub enum LogCategory {
     Db,
     /// ディスクI/O等、ハードウェア/ストレージに起因すると見られる異常
     Hardware,
+    /// メモリ使用量の監視(設定上限に対する消費率のWarning/Alert)
+    Memory,
 }
 
 /// プロセス停止理由。
@@ -102,6 +106,7 @@ impl Logger {
         let prefix = match entry.level {
             LogLevel::Info => "[INFO]",
             LogLevel::Warn => "[WARN]",
+            LogLevel::Alert => "[ALERT]",
             LogLevel::Error => "[ERROR]",
         };
         println!("{} [{:?}] {}", prefix, entry.category, entry.message);
@@ -195,6 +200,23 @@ impl Logger {
 
     pub fn db_warn(&self, message: impl Into<String>) {
         self.log(LogLevel::Warn, LogCategory::Db, message, None, Some(false), None, None);
+    }
+
+    // ---- メモリ使用量監視 -------------------------------------------------
+
+    /// メモリ消費率が Warning しきい値(既定60%)を超えた際に呼ぶ。
+    pub fn memory_warn(&self, message: impl Into<String>) {
+        self.log(LogLevel::Warn, LogCategory::Memory, message, None, None, None, None);
+    }
+
+    /// メモリ消費率が Alert しきい値(既定80%)を超えた際に呼ぶ。
+    pub fn memory_alert(&self, message: impl Into<String>) {
+        self.log(LogLevel::Alert, LogCategory::Memory, message, None, None, None, None);
+    }
+
+    /// メモリ消費率が正常範囲に戻った際に呼ぶ。
+    pub fn memory_info(&self, message: impl Into<String>) {
+        self.log(LogLevel::Info, LogCategory::Memory, message, None, None, None, None);
     }
 
     /// I/Oエラーを検知した際に呼ぶ。HW起因と判定できる場合は Hardware カテゴリでも記録する。
@@ -293,6 +315,20 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].message, "event 4");
         assert_eq!(entries[1].message, "event 3");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_memory_warn_and_alert_write_expected_level_and_category() {
+        let path = temp_log_path("memalert");
+        let logger = Logger::init(&path);
+        logger.memory_warn("usage at 65%");
+        logger.memory_alert("usage at 85%");
+
+        let entries = logger.recent(10);
+        assert!(entries.iter().any(|e| e.category == LogCategory::Memory && e.level == LogLevel::Warn));
+        assert!(entries.iter().any(|e| e.category == LogCategory::Memory && e.level == LogLevel::Alert));
 
         let _ = std::fs::remove_file(&path);
     }

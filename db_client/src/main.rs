@@ -14,6 +14,7 @@ mod info_handlers;
 mod label_handlers;
 mod logging;
 mod logging_handlers;
+mod memory;
 mod models;
 mod settings_handlers;
 mod sql_handlers;
@@ -113,6 +114,16 @@ async fn main() {
 
     use tokio::sync::RwLock;
     use crate::handlers::AppStateInner;
+    use crate::memory::{self, MemoryAlertLevel, MemoryLimitConfig};
+
+    let memory_settings_path = format!("{}.memlimit.json", db_path);
+    let memory_limit = MemoryLimitConfig::load(&memory_settings_path).unwrap_or_default();
+    let os_total_memory_bytes = memory::os_total_memory_bytes();
+    if let Some(total) = os_total_memory_bytes {
+        println!("[INFO] OS搭載メモリ: {} bytes ({:.1} GB) / メモリ上限設定: {:?}", total, total as f64 / 1_073_741_824.0, memory_limit);
+    } else {
+        println!("[WARN] OS搭載メモリ量を取得できませんでした（/proc/meminfo 非対応環境）。割合(%)指定でのメモリ上限は無効になります");
+    }
 
     let state = Arc::new(RwLock::new(AppStateInner {
         mgr:     LabelManager::from_db(db),
@@ -122,7 +133,42 @@ async fn main() {
         // 大量テストデータ投入など用途がある場合は設定画面(/settings)から有効化する。
         http_api_enabled: false,
         logger: logger.clone(),
+        memory_limit,
+        os_total_memory_bytes,
+        memory_settings_path,
+        memory_alert_level: MemoryAlertLevel::Normal,
     }));
+
+    // メモリ使用量の定期監視タスク: 5秒間隔でRSSを確認し、設定上限に対する消費率が
+    // Warning(既定60%)/Alert(既定80%)のしきい値をまたいだときだけログへ記録する
+    // (毎回ログを出すとログが埋まってしまうため、段階が変化したときのみ出力する)。
+    {
+        let monitor_state = state.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                ticker.tick().await;
+                let mut inner = monitor_state.write().await;
+                let Some(limit) = inner.memory_limit.effective_limit_bytes(inner.os_total_memory_bytes) else { continue };
+                if limit == 0 { continue; }
+                let Some(rss) = memory::process_rss_bytes() else { continue };
+                let ratio = rss as f64 / limit as f64;
+                let level = MemoryAlertLevel::from_ratio(ratio);
+                if level != inner.memory_alert_level {
+                    let msg = format!(
+                        "メモリ使用量 {} / {} bytes ({:.1}%)",
+                        rss, limit, ratio * 100.0
+                    );
+                    match level {
+                        MemoryAlertLevel::Alert   => inner.logger.memory_alert(msg),
+                        MemoryAlertLevel::Warning => inner.logger.memory_warn(msg),
+                        MemoryAlertLevel::Normal  => inner.logger.memory_info(format!("メモリ使用量が正常範囲に戻りました: {}", msg)),
+                    }
+                    inner.memory_alert_level = level;
+                }
+            }
+        });
+    }
 
     let (router, _) = app::build_app_with_state(state);
 

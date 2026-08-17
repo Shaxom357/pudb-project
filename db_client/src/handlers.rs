@@ -13,6 +13,7 @@ use db_engine::PersistError;
 use dynamic_label_management::LabelManager;
 
 use crate::logging::Logger;
+use crate::memory::{self, MemoryAlertLevel, MemoryLimitConfig};
 use crate::models::{
     CreateRecordRequest, UpdateRecordRequest,
     RecordResponse, ErrorResponse,
@@ -26,6 +27,21 @@ pub struct AppStateInner {
     /// false の場合、データ操作はSQL経由(/sql)のみ許可される。
     pub http_api_enabled: bool,
     pub logger: Arc<Logger>,
+    /// メモリ使用量の上限設定(割合 or 絶対値)。既定は OS搭載メモリの60%。
+    pub memory_limit: MemoryLimitConfig,
+    /// OS搭載メモリ量(バイト)。起動時に一度だけ検出してキャッシュする。取得できない環境では None。
+    pub os_total_memory_bytes: Option<u64>,
+    /// メモリ上限設定の永続化先ファイルパス
+    pub memory_settings_path: String,
+    /// バックグラウンド監視タスクが直近に記録したアラート段階(ログの多重出力防止用)
+    pub memory_alert_level: MemoryAlertLevel,
+}
+
+/// 現在のメモリ使用量(RSS)が設定上限に達しているかどうかを判定する。
+/// 上限到達時は新規書き込み(レコード作成)を拒否するためのゲートとして使う。
+pub(crate) fn memory_limit_exceeded(state: &AppStateInner) -> bool {
+    let limit = state.memory_limit.effective_limit_bytes(state.os_total_memory_bytes);
+    memory::is_over_limit(limit, memory::process_rss_bytes())
 }
 
 pub type AppState = Arc<RwLock<AppStateInner>>;
@@ -88,6 +104,15 @@ pub async fn create_record(
     for (col, val) in payload.columns { record.set(col, DataType::from(val)); }
     for label in payload.labels { record.add_label(label); }
     let mut inner = state.write().await;
+
+    if memory_limit_exceeded(&inner) {
+        inner.logger.memory_alert("メモリ使用量が設定上限に達したため、新規レコード作成(POST /records)を拒否しました".to_string());
+        return (StatusCode::INSUFFICIENT_STORAGE,
+            Json(serde_json::to_value(ErrorResponse::new(
+                "メモリ使用量が設定上限に達しているため、新規データの書き込みを拒否しました。設定画面でメモリ上限を確認してください。"
+            )).unwrap()));
+    }
+
     // kdb モード: WAL 追記（高速 O(1)）/ JSON モード: 通常保存
     // Rustの借用チェッカー対策: kdb と mgr を別々に取り出す
     let id_result = {

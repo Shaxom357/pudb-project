@@ -27,8 +27,9 @@ use crate::label_handlers::{
 use crate::info_handlers::get_db_info;
 use crate::logging::Logger;
 use crate::logging_handlers::get_logs;
+use crate::memory::{self, MemoryAlertLevel, MemoryLimitConfig};
 use crate::models::ErrorResponse;
-use crate::settings_handlers::{get_settings, update_settings};
+use crate::settings_handlers::{get_settings, update_memory_limit, update_settings};
 use crate::sql_handlers::execute_sql;
 
 use crate::ui::ui_handler;
@@ -88,6 +89,7 @@ fn build_router(state: AppState) -> Router {
         .route("/db/info", get(get_db_info))
         .route("/sql", post(execute_sql))
         .route("/settings", get(get_settings).put(update_settings))
+        .route("/settings/memory", put(update_memory_limit))
         .route("/logs", get(get_logs))
         .merge(gated)
         .route_layer(middleware::from_fn_with_state(state.clone(), request_logging_middleware))
@@ -98,8 +100,14 @@ fn build_router(state: AppState) -> Router {
 /// 本番の既定値(無効)とは異なり、REST APIテストを直接書けるよう有効化しておく
 pub fn build_app(mgr: LabelManager, db_path: String) -> (Router, AppState) {
     let logger = Arc::new(Logger::init(&format!("{}.log", db_path)));
+    let memory_settings_path = format!("{}.memlimit.json", db_path);
+    let memory_limit = MemoryLimitConfig::load(&memory_settings_path).unwrap_or_default();
     let state: AppState = Arc::new(RwLock::new(AppStateInner {
         mgr, db_path, kdb: None, http_api_enabled: true, logger,
+        memory_limit,
+        os_total_memory_bytes: memory::os_total_memory_bytes(),
+        memory_settings_path,
+        memory_alert_level: MemoryAlertLevel::Normal,
     }));
     let router = build_router(state.clone());
     (router, state)

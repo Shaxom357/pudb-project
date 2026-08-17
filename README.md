@@ -7,13 +7,13 @@
 > ・メジャーバージョンが異なると互換性は無くなります。  
 > ・メジャーバージョンが一致し、マイナーバージョンだけが異なる場合問題なく移行ができ互換性を保ちます。
 
-**バージョン: `2.1.0`**
+**バージョン: `2.2.0`**
 
 | 区分 | 説明 |
 |------|------|
 | **A = 2** (メジャー) | ラベルの重複付与を禁止する破壊的変更。既存レコードへの同一ラベル再付与は従来「冪等（サイレント成功）」だったが、変更せずエラーを返す仕様に変更（`POST /records/{id}/labels` は既存クライアントの再送処理などに影響しうる） |
-| **B = 1** (マイナー) | SQL `UPDATE LABEL` に `WHERE` 句対応を追加（1機能追加） |
-| **C = 0** (ビルド) | 2.1系での修正なし |
+| **B = 2** (マイナー) | メモリ使用量の上限設定・監視機能を追加（1機能追加） |
+| **C = 0** (ビルド) | 2.2系での修正なし |
 
 ---
 
@@ -26,6 +26,7 @@
 - [クイックスタート](#クイックスタート)
 - [KDB ストレージフォーマット](#kdb-ストレージフォーマット)
 - [SQL 機能](#sql-機能)
+- [メモリ使用量の上限設定](#メモリ使用量の上限設定)
 - [ログ機能](#ログ機能)
 - [各クレートの詳細](#各クレートの詳細)
 - [API リファレンス](#api-リファレンス)
@@ -111,7 +112,7 @@ KAGURA DB は Rust で一から実装したデータベースエンジンです�
 - ✅ `KAGURA_MASTER_KEY` 環境変数によるカスタムマスターキー設定
 
 ### db_client（REST API サーバー）
-- ✅ 18 本のエンドポイント（レコード CRUD・ラベル管理・DB 情報・SQL・設定・ログ・Web UI）
+- ✅ 19 本のエンドポイント（レコード CRUD・ラベル管理・DB 情報・SQL・設定・ログ・Web UI）
 - ✅ KDB モード（`.kdb`）と JSON モードの自動判別・後方互换
 - ✅ 起動時自動ロード・書き込み時自動セーブ
 - ✅ 環境変数による設定（`DB_FILE` / `DB_ADDR` / `KAGURA_MASTER_KEY`）
@@ -120,7 +121,8 @@ KAGURA DB は Rust で一から実装したデータベースエンジンです�
 - ✅ `POST /sql` で SQL SELECT / INSERT / UPDATE クエリを実行
 - ✅ `GET /settings` / `PUT /settings` で HTTPリクエスト（`/records` `/labels` 系 REST API）受付のオンオフを切替可能（**既定は無効**。データ操作は基本 SQL 経由とし、REST API は大量テストデータ投入など用途に応じて有効化する）
 - ✅ Web UI の Records 一覧は `POST /sql`（`SELECT * FROM label.*`）経由で取得するため、REST API が無効でも常に閲覧可能
-- ✅ **ログ出力保管機能**: 起動/停止時刻、停止理由（正常 / エラー / HW・ストレージ障害）、SQL・HTTPリクエストの成功/失敗、Webクライアントの応答時間、DB保存・レコード/ラベル操作などを JSON Lines 形式でファイルへ永続保存（詳細は [ログ機能](#ログ機能) を参照）。`GET /logs` および Web UI の「ログ」ビューから閲覧可能
+- ✅ **メモリ使用量の上限設定・監視機能**: `db_engine` は全レコードをオンメモリで保持するため、データ量の増加に応じてプロセスメモリ(RSS)も増加する。`GET /settings` / `PUT /settings/memory` で上限を「OS搭載メモリに対する割合(%, 1%刻み、**既定はOS搭載メモリの60%**)」または「絶対値（バイト数、例: 1GB）」で設定でき、設定はファイルへ永続化されプロセス再起動後も引き継がれる。バックグラウンドで5秒間隔でRSSを監視し、上限に対する消費率が **60%でWarningログ・80%でAlertログ** を記録し、**上限(100%)到達時は新規レコード作成（`POST /records` および SQL `INSERT`）を `507 Insufficient Storage` で拒否**する（詳細は [ログ機能](#ログ機能) を参照）
+- ✅ **ログ出力保管機能**: 起動/停止時刻、停止理由（正常 / エラー / HW・ストレージ障害）、SQL・HTTPリクエストの成功/失敗、Webクライアントの応答時間、DB保存・レコード/ラベル操作、メモリ使用量のWarning/Alertなどを JSON Lines 形式でファイルへ永続保存（詳細は [ログ機能](#ログ機能) を参照）。`GET /logs` および Web UI の「ログ」ビューから閲覧可能
 
 ### sql_engine（SQL SELECT/INSERT/UPDATE エンジン）
 - ✅ 独自拡張 SQL `SELECT ... FROM label.xxx` 構文
@@ -178,7 +180,8 @@ pudb-project/
 │   │   ├── label_handlers.rs           # ラベル管理ハンドラー
 │   │   ├── info_handlers.rs            # DB 情報 API ハンドラー
 │   │   ├── sql_handlers.rs             # SQL 実行ハンドラー（SELECT / INSERT / UPDATE）
-│   │   ├── settings_handlers.rs        # 設定 API ハンドラー（HTTPリクエスト受付オンオフ）
+│   │   ├── settings_handlers.rs        # 設定 API ハンドラー（HTTPリクエスト受付オンオフ・メモリ上限設定）
+│   │   ├── memory.rs                   # メモリ使用量監視（OS/プロセスメモリ取得・上限計算・設定永続化）
 │   │   ├── models.rs                   # JSON DTO
 │   │   └── ui.html                     # 管理画面（HTML/CSS/JS）
 │   └── tests/
@@ -186,7 +189,7 @@ pudb-project/
 │       ├── test_labels.rs              # ラベル API テスト（12件）
 │       ├── test_persistence.rs         # 永続化テスト（4件）
 │       ├── test_sql.rs                 # SQL API テスト（16件）
-│       └── test_settings.rs            # 設定 API テスト（4件）
+│       └── test_settings.rs            # 設定 API テスト（9件、メモリ上限設定・書き込み拒否を含む）
 ├── sql_engine/                         # SQL SELECT/INSERT/UPDATE エンジン (v1.6.0)
 │   └── src/
 │       ├── ast.rs / parser.rs / executor.rs
@@ -405,6 +408,55 @@ curl -X POST http://localhost:3000/sql \
 
 ---
 
+## メモリ使用量の上限設定
+
+`db_engine` はレコードをすべてオンメモリ（`Vec` / `HashMap`）で保持するため、データ量が増えるほどプロセスのメモリ使用量（RSS）も増加する。
+無制限に増加してOOMに至ることを避けるため、Web UI の「設定」ビューまたは API からメモリ使用量の上限を設定できる。
+
+### 上限の指定方式
+
+| 方式 | 説明 |
+|------|------|
+| 割合（`percent`） | OS搭載メモリに対する割合を **1%刻み（1〜100）** で指定。**既定は 60%** |
+| 絶対値（`absolute`） | バイト数で直接指定（例: `1073741824` = 1GB） |
+
+設定は `<DB_FILE>.memlimit.json` へ永続化され、プロセス再起動後も引き継がれる。
+
+### 監視・警告・書き込み拒否
+
+バックグラウンドタスクが **5秒間隔** でプロセスの実メモリ使用量（RSS, `/proc/self/status` の `VmRSS`）を取得し、設定した上限に対する消費率を監視する。
+
+| 消費率 | 挙動 |
+|--------|------|
+| 60% 以上 | `category: "memory"` `level: "warn"` でログ記録 |
+| 80% 以上 | `category: "memory"` `level: "alert"` でログ記録 |
+| 100% 以上（上限到達） | 上記Alertログに加え、新規レコード作成（`POST /records` および SQL `INSERT`）を `507 Insufficient Storage` で拒否する。既存データの参照・更新・削除やSQL `SELECT`/`UPDATE` は上限到達時も引き続き利用可能 |
+
+ログは消費率の段階（正常 → Warning → Alert）が変化したタイミングでのみ記録され、同じ段階に留まっている間は毎回のポーリングではログを出力しない（ログの埋没防止）。
+
+### API
+
+```bash
+# 現在の設定・使用量を取得
+curl http://localhost:3000/settings
+
+# 割合で指定（OS搭載メモリの40%を上限にする）
+curl -X PUT http://localhost:3000/settings/memory \
+  -H 'Content-Type: application/json' -d '{"mode": "percent", "percent": 40}'
+
+# 絶対値で指定（1GBを上限にする）
+curl -X PUT http://localhost:3000/settings/memory \
+  -H 'Content-Type: application/json' -d '{"mode": "absolute", "absolute_bytes": 1073741824}'
+```
+
+`GET /settings` のレスポンスには、OS搭載メモリ量（`os_total_memory_bytes`）・現在の上限設定（`memory_limit_mode` / `memory_limit_percent` / `memory_limit_absolute_bytes`）・実効上限（`memory_limit_effective_bytes`）・現在の使用量（`memory_usage_bytes`）・消費率（`memory_usage_ratio`）が含まれる。
+
+### 動作環境について
+
+OS搭載メモリ量・プロセスメモリ使用量は `/proc/meminfo` / `/proc/self/status` を読み取って取得するため、**Linux環境が前提**。取得できない環境では該当する値は `null` になり、割合（`percent`）指定の上限計算・監視は無効化される（絶対値指定は OS搭載メモリ量に依存しないため引き続き機能する）。
+
+---
+
 ## ログ機能
 
 KAGURA DB の稼働ログを JSON Lines（1行1JSONオブジェクト）形式でファイルへ永続保存する。
@@ -418,10 +470,11 @@ KAGURA DB の稼働ログを JSON Lines（1行1JSONオブジェクト）形式�
 | 停止理由 | `stop_reason` フィールドで `normal`（SIGINT/SIGTERM による正常終了）・`error`（設定不備やバインド失敗などアプリケーション上のエラー）・`hardware`（ディスクI/Oエラー等、HW/ストレージ起因と判定できる異常）を区別 |
 | SQLクエリ実行 | `category: "sql"` で成功/失敗（`success`）・実行時間（`duration_ms`）・エラー内容を記録 |
 | HTTPリクエスト | `category: "http"` で全リクエストのメソッド・パス・ステータスコード・応答時間（`duration_ms`）を記録 |
-| DB操作 | `category: "db"` でレコード/ラベルの作成・更新・削除、KDB/JSON保存の成功・失敗を記録 |
+| DB操作 | `category: "db"` でレコード/ラベルの作成・更新・削除、KDB/JSON保存の成功・失敗、メモリ上限設定の更新を記録 |
 | HW/ストレージ異常 | `category: "hardware"` でディスクI/Oエラー（`EIO` `ENOSPC` `EROFS` `ENODEV` 等）を検知した際に記録 |
+| メモリ使用量監視 | `category: "memory"` でプロセスメモリ使用量(RSS)の設定上限に対する消費率を5秒間隔で監視し、消費率が **60%を超えたら `level: "warn"`**、**80%を超えたら `level: "alert"`** で記録（正常範囲に戻った際は `level: "info"`）。段階が変化したときのみ記録し、変化がない間は毎回のポーリングではログを出さない |
 
-各エントリは共通で `timestamp`（RFC3339）・`level`（`info`/`warn`/`error`）・`category`・`message` を持つ。
+各エントリは共通で `timestamp`（RFC3339）・`level`（`info`/`warn`/`alert`/`error`）・`category`・`message` を持つ。
 
 ### ログの閲覧
 
@@ -464,17 +517,20 @@ HTTPリクエスト欄が「要HTTP API」の行は、既定では無効な `/re
 | `POST`   | `/labels/search` | AND/OR ラベル検索 | ✅ |
 | `PUT`    | `/labels/rename` | ラベルリネーム | ✅ |
 | `GET`    | `/db/info` | DB バージョン・統計情報 | - |
-| `POST`   | `/sql` | SQL SELECT / INSERT / UPDATE 実行 | - |
-| `GET`    | `/settings` | 現在の設定取得 | - |
+| `POST`   | `/sql` | SQL SELECT / INSERT / UPDATE 実行（メモリ上限到達時、INSERTは `507`） | - |
+| `GET`    | `/settings` | 現在の設定取得（HTTPリクエスト受付・メモリ上限設定/使用量を含む） | - |
 | `PUT`    | `/settings` | 設定更新（HTTPリクエスト受付オンオフ） | - |
+| `PUT`    | `/settings/memory` | メモリ使用量の上限設定を更新（[メモリ使用量の上限設定](#メモリ使用量の上限設定) を参照） | - |
 | `GET`    | `/logs` | 保管されたログを新しい順に取得（`?lines=` で件数指定、既定200・上限2000） | - |
+
+`POST /records` はメモリ使用量が設定上限に達している場合 `507 Insufficient Storage` を返す（詳細は [メモリ使用量の上限設定](#メモリ使用量の上限設定) を参照）。
 
 ### GET /db/info レスポンス例
 
 ```json
 {
   "engine_name":    "KAGURA DB Engine",
-  "app_version":    "2.1.0",
+  "app_version":    "2.2.0",
   "storage_mode":   "kdb",
   "storage_format": "KDB Binary (WAL + XChaCha20-Poly1305 encrypted)",
   "encrypted":      true,
@@ -497,7 +553,7 @@ HTTPリクエスト欄が「要HTTP API」の行は、既定では無効な `/re
 | **📋 Records** | レコード一覧（`POST /sql` の `SELECT * FROM label.*` 経由で取得。HTTPリクエストが無効でも閲覧可能）・検索・ラベルフィルター・自動更新（10秒）。作成・編集・削除は REST API（`/records`）を使うため、これらの操作には設定で HTTPリクエストを有効化する必要がある |
 | **ℹ️ DB Info** | バージョン・ストレージモード・暗号化状態・統計カード・カラム一覧 |
 | **🔍 SQL Query** | SQL SELECT / INSERT / UPDATE 実行・テーブル形式結果表示・ Ctrl+Enter 対応 |
-| **⚙️ 設定** | HTTPリクエスト（`/records` `/labels` 系 REST API）受付のオンオフを切替（既定は無効）。大量テストデータ投入など HTTP 経由の操作が必要なときに有効化する |
+| **⚙️ 設定** | HTTPリクエスト（`/records` `/labels` 系 REST API）受付のオンオフを切替（既定は無効）。大量テストデータ投入など HTTP 経由の操作が必要なときに有効化する。加えて、メモリ使用量の上限（割合 or 絶対値、既定はOS搭載メモリの60%）を設定でき、現在のメモリ使用量・消費率もリアルタイムに表示する（[メモリ使用量の上限設定](#メモリ使用量の上限設定) を参照） |
 | **📜 ログ** | 保管されたログ（起動/停止・SQL・HTTP・DB操作・HW異常）をカテゴリで絞り込みながら一覧表示・自動更新（10秒） |
 
 ---
@@ -544,10 +600,10 @@ cargo test --workspace
 | `db_engine` | 39 | CRUD・ラベル操作（重複付与エラーを含む）・KDB暗号化・バイナリコーデック |
 | `dynamic_label_management` | 24 | AND/OR 検索・リネーム・差分・ラベル重複付与エラー |
 | `db_ffi` | 10 | FFI 関数・メモリ管理 |
-| `db_client`（ユニットテスト） | 5 | ログ出力保管機能（JSON Lines 書き込み/読み出し・HW起因エラー判定） |
-| `db_client`（統合テスト） | 52 | HTTP API・ラベル操作（重複付与エラーを含む）・永続化・SQL SELECT/INSERT/UPDATE（ラベル重複エラー・UPDATE LABELのWHERE絞り込みを含む）・設定（HTTPリクエスト受付オンオフ）・ログ（`GET /logs`） |
+| `db_client`（ユニットテスト） | 14 | ログ出力保管機能（JSON Lines 書き込み/読み出し・HW起因エラー判定・メモリWarning/Alertログ）、メモリ使用量監視（OS/プロセスメモリ量パース・上限計算・アラート段階判定・設定の保存/読込） |
+| `db_client`（統合テスト） | 57 | HTTP API・ラベル操作（重複付与エラーを含む）・永続化・SQL SELECT/INSERT/UPDATE（ラベル重複エラー・UPDATE LABELのWHERE絞り込みを含む）・設定（HTTPリクエスト受付オンオフ・メモリ上限設定の取得/更新・上限到達時の書き込み拒否）・ログ（`GET /logs`） |
 | `sql_engine` | 45 | パーサー・実行エンジン（SELECT・INSERT・UPDATE・WHERE・ORDER BY・LIKE・ラベル重複エラー・UPDATE LABELのWHERE絞り込み） |
-| **合計** | **175** | |
+| **合計** | **189** | |
 
 ---
 
@@ -581,6 +637,7 @@ cargo test --workspace
 
 | バージョン | 主な変更内容 |
 |-----------|-------------|
+| **2.2.0** | Web UI「設定」ビューにメモリ使用量の上限設定を追加。`db_engine` は全レコードをオンメモリで保持するため、データ量の増加に応じてプロセスメモリ(RSS)が際限なく増加しうる問題への対策。上限は OS搭載メモリに対する割合（%, 1%刻み、**既定はOS搭載メモリの60%**）または絶対値（バイト数、例: 1GB）で指定でき、設定はファイル（`<DB_FILE>.memlimit.json`）へ永続化されプロセス再起動後も引き継がれる。バックグラウンドで5秒間隔でRSSを監視し、上限に対する消費率が60%を超えたら`category: "memory"` `level: "warn"`、80%を超えたら`level: "alert"`でログ記録（段階が変化したときのみ記録し、ログの埋没を防止）。上限(100%)に到達した場合は新規レコード作成（`POST /records` / SQL `INSERT`）を `507 Insufficient Storage` で拒否する（参照・更新・削除・SELECT/UPDATEは引き続き利用可能）。新規エンドポイント `PUT /settings/memory` を追加し、`GET /settings` のレスポンスにOS搭載メモリ量・上限設定・現在の使用量/消費率を追加 |
 | **2.1.0** | SQL `UPDATE LABEL label.old SET label.new` に `WHERE` 句対応を追加。従来は `old` ラベルが付いた全レコードが常に一括でリネームされていたが、`WHERE` で条件を指定すると一致したレコードだけを対象にでき、一括変更を避けられるようになった（`WHERE` 省略時は従来通り全レコードが対象） |
 | **2.0.0** | **【破壊的変更】** ラベルの重複付与を禁止。従来 `db_engine::Database::attach_label`（および `dynamic_label_management::LabelManager::add_label`）は既に付与済みのラベルを再付与しても何もせず成功していた（冪等）が、変更せず `DuplicateLabel` エラーを返す仕様に変更。影響範囲: (1) `POST /records/{id}/labels` は重複時に `409 Conflict` を返すようになる（以前は `200 OK`）。(2) SQL `INSERT INTO (label.a, label.a) ...` のように同一文内で同じラベルを複数指定した場合はエラーになる。(3) SQL `UPDATE LABEL label.old SET label.new` はリネーム先 `new` が既にDB内の他レコードで使われている場合エラーとし、何も変更しない（自己リネームも同様）。副作用として `dynamic_label_management` の `copy_labels`／`rename_label` は、コピー先／対象レコードが既に同名ラベルを持つ場合は重複エラーを避けるためスキップするよう防御的に修正 |
 | **1.8.0** | SQL `UPDATE` 機能追加。`UPDATE label.xxx SET col=val, ... WHERE ...` によるデータ更新（SET対象外のカラム・ラベルは維持）と、`UPDATE LABEL label.old SET label.new` によるラベル名リネーム（DB全体一括）の2構文に対応。`POST /sql` が UPDATE 文を受け付けるようになり、レスポンスに更新件数 `updated_count` を追加 |
