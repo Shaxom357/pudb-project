@@ -9,7 +9,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use crate::handlers::{auto_save, AppState};
-use sql_engine::{run_select, run_insert, CellValue};
+use sql_engine::{run_select, run_insert_fast, CellValue};
 
 // ---------------------------------------------------------------------------
 // リクエスト / レスポンス DTO
@@ -119,11 +119,19 @@ pub async fn execute_sql(
     if trimmed.starts_with("INSERT") {
         let started = std::time::Instant::now();
         let mut inner = state.write().await;
-        let insert_result = run_insert(inner.mgr.db_mut(), &query);
+        // kdb モード: WAL 追記(insert_fast, O(1)) / JSON モード: 通常insert
+        // Rustの借用チェッカー対策: kdb と mgr を別々に取り出す（handlers::create_recordと同じパターン）
+        let insert_result = {
+            let mut kdb_taken = inner.kdb.take();
+            let result = run_insert_fast(inner.mgr.db_mut(), kdb_taken.as_mut(), &query);
+            inner.kdb = kdb_taken;
+            result
+        };
 
         return match insert_result {
             Ok(result) => {
-                auto_save(&mut inner);
+                // kdb モードは insert_fast が WAL 追記済みなのでコンパクション不要。JSON モードのみ保存する。
+                if inner.kdb.is_none() { auto_save(&mut inner); }
                 inner.logger.sql_query(&query, true, started.elapsed().as_millis(), None);
                 // 挿入後のレコードを読み直し、使用したカラム順に値を並べて返す
                 let record = inner.mgr.db().get(result.id).unwrap();

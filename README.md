@@ -7,7 +7,7 @@
 > ・メジャーバージョンが異なると互換性は無くなります。  
 > ・メジャーバージョンが一致し、マイナーバージョンだけが異なる場合問題なく移行ができ互換性を保ちます。
 
-**バージョン: `1.7.0`**
+**バージョン: `1.7.1`**
 
 | 区分 | 説明 |
 |------|------|
@@ -439,7 +439,7 @@ HTTPリクエスト欄が「要HTTP API」の行は、既定では無効な `/re
 ```json
 {
   "engine_name":    "KAGURA DB Engine",
-  "app_version":    "1.7.0",
+  "app_version":    "1.7.1",
   "storage_mode":   "kdb",
   "storage_format": "KDB Binary (WAL + XChaCha20-Poly1305 encrypted)",
   "encrypted":      true,
@@ -546,6 +546,7 @@ cargo test --workspace
 
 | バージョン | 主な変更内容 |
 |-----------|-------------|
+| **1.7.1** | SQL `INSERT` のパフォーマンス改善。従来は書き込みのたびに全レコードを読み直して再暗号化・全件書き直す方式（コンパクション）だったため件数に比例して遅くなっていたが、REST `/records` と同じ WAL 追記方式（`insert_fast`）に統一し O(1) 化。検証では約32,000件時点で 189ms → 0.4ms（約470倍）高速化 |
 | **1.7.0** | ログ出力保管機能を追加。起動/停止時刻・停止理由（正常/エラー/HW異常）・SQL/HTTPリクエストの成功失敗・Webクライアントの応答時間・DB操作を JSON Lines 形式でファイルへ永続保存。`GET /logs` エンドポイントと Web UI「ログ」ビューを追加 |
 | **1.6.0** | Web UI に「設定」ビューを追加し `GET`/`PUT /settings` で HTTPリクエスト（`/records` `/labels` 系 REST API）受付のオンオフを切替可能に（**既定を無効化**）。Web UI の Records 一覧を REST から SQL（`SELECT * FROM label.*`）経由の取得に変更し、REST API 無効時も閲覧可能に。`SELECT *` の結果に `labels` 列（カンマ区切り）を追加 |
 | **1.5.0** | SQL INSERT 機能追加（`INSERT INTO (label.xxx) (col, ...) VALUE (...)`、複数ラベル同時付与、ラベル自動作成）、`POST /sql` の INSERT 対応 |

@@ -4,7 +4,7 @@ pub mod ast;
 pub mod executor;
 pub mod parser;
 
-pub use executor::{execute_select, execute_insert, CellValue, QueryResult, InsertResult, InsertExecError};
+pub use executor::{execute_select, execute_insert, execute_insert_fast, CellValue, QueryResult, InsertResult, InsertExecError};
 pub use parser::{parse_select, parse_insert, ParseError};
 pub use ast::{SelectStatement, InsertStatement};
 
@@ -36,4 +36,14 @@ impl From<InsertExecError> for InsertError { fn from(e: InsertExecError) -> Self
 pub fn run_insert(db: &mut db_engine::Database, sql: &str) -> Result<InsertResult, InsertError> {
     let stmt = parse_insert(sql)?;
     Ok(execute_insert(db, &stmt)?)
+}
+
+/// SQL文字列を受け取り、INSERTをWAL追記(insert_fast)で実行する。.kdbモード用の高速パス。
+pub fn run_insert_fast(
+    db: &mut db_engine::Database,
+    kdb: Option<&mut db_engine::kdb_store::KdbFile>,
+    sql: &str,
+) -> Result<InsertResult, InsertError> {
+    let stmt = parse_insert(sql)?;
+    Ok(execute_insert_fast(db, kdb, &stmt)?)
 }
