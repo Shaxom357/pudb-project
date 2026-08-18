@@ -402,6 +402,74 @@ fn execute_update_label(db: &mut Database, stmt: &UpdateLabelStatement) -> Resul
     Ok(UpdateResult { updated_count })
 }
 
+// ---------------------------------------------------------------------------
+// DELETE 実行
+// ---------------------------------------------------------------------------
+
+/// DELETE実行結果
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeleteResult {
+    /// 削除されたレコード数（ラベルのみ除去の場合はラベルを外したレコード数）
+    pub deleted_count: usize,
+}
+
+/// DELETE実行エラー
+#[derive(Debug, PartialEq)]
+pub enum DeleteExecError {
+    /// db_engine 側のエラー
+    Database(db_engine::DatabaseError),
+}
+
+impl std::fmt::Display for DeleteExecError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DeleteExecError::Database(e) => write!(f, "{}", e),
+        }
+    }
+}
+
+impl From<db_engine::DatabaseError> for DeleteExecError { fn from(e: db_engine::DatabaseError) -> Self { DeleteExecError::Database(e) } }
+
+pub fn execute_delete(db: &mut Database, stmt: &DeleteStatement) -> Result<DeleteResult, DeleteExecError> {
+    match stmt {
+        DeleteStatement::Data(d)  => execute_delete_data(db, d),
+        DeleteStatement::Label(l) => execute_delete_label(db, l),
+    }
+}
+
+/// DELETE FROM label.name [WHERE ...]  |  DELETE FROM label.* [WHERE ...]
+/// 対象ラベル（`label.*` なら全レコード）のうち WHERE に一致するレコードを完全に削除する
+/// （WHERE省略時は対象ラベルの全レコードが一括削除される）。
+fn execute_delete_data(db: &mut Database, stmt: &DeleteDataStatement) -> Result<DeleteResult, DeleteExecError> {
+    let ids: Vec<u64> = filter_by_target(db, &stmt.target).iter()
+        .filter(|r| stmt.where_clause.as_ref().map_or(true, |w| eval_where(r, w)))
+        .map(|r| r.id)
+        .collect();
+
+    let mut deleted_count = 0;
+    for id in ids {
+        db.delete(id)?;
+        deleted_count += 1;
+    }
+    Ok(DeleteResult { deleted_count })
+}
+
+/// DELETE LABEL FROM label.name [WHERE ...]
+/// label が付いているレコードのうち WHERE に一致するものだけ label を外す。
+/// レコード自体・他のラベル・カラムデータは変更しない（WHERE省略時は label が付いた全レコードが対象）。
+fn execute_delete_label(db: &mut Database, stmt: &DeleteLabelStatement) -> Result<DeleteResult, DeleteExecError> {
+    let ids: Vec<u64> = db.get_by_label(&stmt.label).iter()
+        .filter(|r| stmt.where_clause.as_ref().map_or(true, |w| eval_where(r, w)))
+        .map(|r| r.id)
+        .collect();
+
+    let mut deleted_count = 0;
+    for id in ids {
+        if db.detach_label(id, &stmt.label)? { deleted_count += 1; }
+    }
+    Ok(DeleteResult { deleted_count })
+}
+
 fn cmp_dt(a: Option<&DataType>, b: Option<&DataType>) -> std::cmp::Ordering {
     use std::cmp::Ordering::*;
     match (a, b) {
@@ -641,6 +709,113 @@ mod update_tests {
         let err = update(&mut db, "UPDATE LABEL label.employee SET label.employee").unwrap_err();
         assert_eq!(err, UpdateExecError::DuplicateLabel("employee".to_string()));
         assert_eq!(db.get_by_label("employee").len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod delete_tests {
+    use super::*;
+    use crate::parser::{parse_insert, parse_delete};
+
+    fn insert(db: &mut Database, sql: &str) -> InsertResult {
+        execute_insert(db, &parse_insert(sql).expect("parse should succeed")).unwrap()
+    }
+    fn delete(db: &mut Database, sql: &str) -> Result<DeleteResult, DeleteExecError> {
+        execute_delete(db, &parse_delete(sql).expect("parse should succeed"))
+    }
+
+    #[test]
+    fn test_delete_data_removes_matching_row_and_keeps_others() {
+        let mut db = Database::new();
+        insert(&mut db, "INSERT INTO (label.employee) (employee_name) VALUE ('田中')");
+        insert(&mut db, "INSERT INTO (label.employee) (employee_name) VALUE ('鈴木')");
+
+        let result = delete(&mut db, "DELETE FROM label.employee WHERE employee_name='田中'").unwrap();
+        assert_eq!(result.deleted_count, 1);
+
+        assert!(db.get(1).is_err());
+        assert_eq!(db.get(2).unwrap().columns.get("employee_name"), Some(&DataType::Text("鈴木".into())));
+        assert_eq!(db.get_by_label("employee").len(), 1);
+    }
+
+    #[test]
+    fn test_delete_data_without_where_removes_all_in_label() {
+        let mut db = Database::new();
+        insert(&mut db, "INSERT INTO (label.employee) (name) VALUE ('田中')");
+        insert(&mut db, "INSERT INTO (label.employee) (name) VALUE ('鈴木')");
+        insert(&mut db, "INSERT INTO (label.manager) (name) VALUE ('佐藤')");
+
+        let result = delete(&mut db, "DELETE FROM label.employee").unwrap();
+        assert_eq!(result.deleted_count, 2);
+
+        assert_eq!(db.get_by_label("employee").len(), 0);
+        // 別ラベルのレコードは影響を受けない
+        assert_eq!(db.get_by_label("manager").len(), 1);
+        assert_eq!(db.count(), 1);
+    }
+
+    #[test]
+    fn test_delete_from_label_star_removes_everything() {
+        let mut db = Database::new();
+        insert(&mut db, "INSERT INTO (label.employee) (name) VALUE ('田中')");
+        insert(&mut db, "INSERT INTO (label.manager) (name) VALUE ('佐藤')");
+
+        let result = delete(&mut db, "DELETE FROM label.*").unwrap();
+        assert_eq!(result.deleted_count, 2);
+        assert_eq!(db.count(), 0);
+    }
+
+    #[test]
+    fn test_delete_no_match_returns_zero_count() {
+        let mut db = Database::new();
+        insert(&mut db, "INSERT INTO (label.employee) (name) VALUE ('田中')");
+
+        let result = delete(&mut db, "DELETE FROM label.employee WHERE name='存在しない'").unwrap();
+        assert_eq!(result.deleted_count, 0);
+        assert_eq!(db.count(), 1);
+    }
+
+    #[test]
+    fn test_delete_label_only_detaches_label_and_keeps_data() {
+        let mut db = Database::new();
+        insert(&mut db, "INSERT INTO (label.employee, label.manager) (name) VALUE ('田中')");
+
+        let result = delete(&mut db, "DELETE LABEL FROM label.employee").unwrap();
+        assert_eq!(result.deleted_count, 1);
+
+        // レコード自体は残っており、他のラベル・データも維持される
+        let record = db.get(1).unwrap();
+        assert!(!record.labels.contains(&"employee".to_string()));
+        assert!(record.labels.contains(&"manager".to_string()));
+        assert_eq!(record.columns.get("name"), Some(&DataType::Text("田中".into())));
+        assert_eq!(db.get_by_label("employee").len(), 0);
+    }
+
+    #[test]
+    fn test_delete_label_with_where_only_affects_matching_records() {
+        let mut db = Database::new();
+        insert(&mut db, "INSERT INTO (label.employee) (name, department) VALUE ('田中', 'sales')");
+        insert(&mut db, "INSERT INTO (label.employee) (name, department) VALUE ('鈴木', 'dev')");
+
+        let result = delete(&mut db,
+            "DELETE LABEL FROM label.employee WHERE department='sales'"
+        ).unwrap();
+        assert_eq!(result.deleted_count, 1);
+
+        assert_eq!(db.get_by_label("employee").len(), 1);
+        assert_eq!(db.get_by_label("employee")[0].columns.get("name"), Some(&DataType::Text("鈴木".into())));
+        // データ自体は削除されず残っている
+        assert_eq!(db.count(), 2);
+    }
+
+    #[test]
+    fn test_delete_label_no_match_returns_zero_count() {
+        let mut db = Database::new();
+        insert(&mut db, "INSERT INTO (label.employee) (name) VALUE ('田中')");
+
+        let result = delete(&mut db, "DELETE LABEL FROM label.nonexistent").unwrap();
+        assert_eq!(result.deleted_count, 0);
+        assert_eq!(db.count(), 1);
     }
 }
 

@@ -5,11 +5,12 @@ pub mod executor;
 pub mod parser;
 
 pub use executor::{
-    execute_select, execute_insert, execute_insert_fast, execute_update,
+    execute_select, execute_insert, execute_insert_fast, execute_update, execute_delete,
     CellValue, QueryResult, InsertResult, InsertExecError, UpdateResult, UpdateExecError,
+    DeleteResult, DeleteExecError,
 };
-pub use parser::{parse_select, parse_insert, parse_update, ParseError};
-pub use ast::{SelectStatement, InsertStatement, UpdateStatement};
+pub use parser::{parse_select, parse_insert, parse_update, parse_delete, ParseError};
+pub use ast::{SelectStatement, InsertStatement, UpdateStatement, DeleteStatement};
 
 /// SQL文字列を受け取り、クエリを実行して結果を返す（SELECT専用）
 pub fn run_select(db: &db_engine::Database, sql: &str) -> Result<QueryResult, ParseError> {
@@ -73,4 +74,28 @@ impl From<UpdateExecError> for UpdateError { fn from(e: UpdateExecError) -> Self
 pub fn run_update(db: &mut db_engine::Database, sql: &str) -> Result<UpdateResult, UpdateError> {
     let stmt = parse_update(sql)?;
     Ok(execute_update(db, &stmt)?)
+}
+
+/// DELETE実行時の統合エラー（パースエラー or 実行エラー）
+#[derive(Debug, PartialEq)]
+pub enum DeleteError {
+    Parse(ParseError),
+    Exec(DeleteExecError),
+}
+
+impl std::fmt::Display for DeleteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DeleteError::Parse(e) => write!(f, "{}", e),
+            DeleteError::Exec(e)  => write!(f, "{}", e),
+        }
+    }
+}
+impl From<ParseError> for DeleteError { fn from(e: ParseError) -> Self { DeleteError::Parse(e) } }
+impl From<DeleteExecError> for DeleteError { fn from(e: DeleteExecError) -> Self { DeleteError::Exec(e) } }
+
+/// SQL文字列を受け取り、DELETEを実行する
+pub fn run_delete(db: &mut db_engine::Database, sql: &str) -> Result<DeleteResult, DeleteError> {
+    let stmt = parse_delete(sql)?;
+    Ok(execute_delete(db, &stmt)?)
 }
