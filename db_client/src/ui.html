@@ -614,6 +614,9 @@ const SQL_EXAMPLES = [
   "SELECT * FROM label.* LIMIT 5",
   "INSERT INTO (label.employee) (employee_name, employee_age, employee_department) VALUE ('田中', 24, 'developer')",
   "INSERT INTO (label.employee, label.manager) (employee_name, employee_age, employee_department) VALUE ('鈴木', 41, 'lead')",
+  "DELETE FROM label.employee WHERE employee_name = '田中'",
+  "DELETE FROM label.employee",
+  "DELETE LABEL FROM label.employee WHERE employee_department = 'sales'",
 ];
 let sqlExampleIdx = 0;
 

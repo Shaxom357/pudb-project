@@ -9,7 +9,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use crate::handlers::{auto_save, AppState};
-use sql_engine::{run_select, run_insert_fast, run_update, CellValue};
+use sql_engine::{run_select, run_insert_fast, run_update, run_delete, CellValue};
 
 // ---------------------------------------------------------------------------
 // リクエスト / レスポンス DTO
@@ -46,6 +46,9 @@ pub struct SqlQueryResponse {
     /// UPDATEで更新されたレコード数（成功時）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_count: Option<usize>,
+    /// DELETEで削除されたレコード数（`DELETE LABEL`の場合はラベルを外したレコード数、成功時）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deleted_count: Option<usize>,
     /// エラーメッセージ（失敗時）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -57,7 +60,8 @@ impl SqlQueryResponse {
     fn error(query: String, message: impl Into<String>) -> Self {
         SqlQueryResponse {
             ok: false, columns: vec![], rows: vec![], total_matched: None, returned: None,
-            inserted_id: None, labels: vec![], updated_count: None, error: Some(message.into()), query,
+            inserted_id: None, labels: vec![], updated_count: None, deleted_count: None,
+            error: Some(message.into()), query,
         }
     }
 }
@@ -109,6 +113,7 @@ pub async fn execute_sql(
                     inserted_id: None,
                     labels: vec![],
                     updated_count: None,
+                    deleted_count: None,
                     error: None,
                     query,
                 }))
@@ -154,6 +159,7 @@ pub async fn execute_sql(
                     inserted_id: Some(result.id),
                     labels: result.labels,
                     updated_count: None,
+                    deleted_count: None,
                     error: None,
                     query,
                 }))
@@ -184,6 +190,38 @@ pub async fn execute_sql(
                     inserted_id: None,
                     labels: vec![],
                     updated_count: Some(result.updated_count),
+                    deleted_count: None,
+                    error: None,
+                    query,
+                }))
+            }
+            Err(e) => {
+                inner.logger.sql_query(&query, false, started.elapsed().as_millis(), Some(&e.to_string()));
+                (StatusCode::BAD_REQUEST, Json(SqlQueryResponse::error(query, e.to_string())))
+            }
+        };
+    }
+
+    if trimmed.starts_with("DELETE") {
+        let started = std::time::Instant::now();
+        let mut inner = state.write().await;
+        let delete_result = run_delete(inner.mgr.db_mut(), &query);
+
+        return match delete_result {
+            Ok(result) => {
+                // UPDATE/DELETE後はコンパクションが必要（kdbモードは全件書き直し、JSONモードは通常保存）
+                auto_save(&mut inner);
+                inner.logger.sql_query(&query, true, started.elapsed().as_millis(), None);
+                (StatusCode::OK, Json(SqlQueryResponse {
+                    ok: true,
+                    columns: vec![],
+                    rows: vec![],
+                    total_matched: None,
+                    returned: None,
+                    inserted_id: None,
+                    labels: vec![],
+                    updated_count: None,
+                    deleted_count: Some(result.deleted_count),
                     error: None,
                     query,
                 }))
@@ -200,6 +238,6 @@ pub async fn execute_sql(
         inner.logger.sql_query(&query, false, 0, Some("unsupported statement"));
     }
     (StatusCode::BAD_REQUEST, Json(SqlQueryResponse::error(
-        query, "Only SELECT, INSERT, and UPDATE statements are supported in this version.",
+        query, "Only SELECT, INSERT, UPDATE, and DELETE statements are supported in this version.",
     )))
 }

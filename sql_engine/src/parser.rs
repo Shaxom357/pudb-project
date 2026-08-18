@@ -15,6 +15,7 @@ pub enum Token {
     Limit, Like, Asc, Desc, Null, True, False,
     Insert, Into, Value,
     Update, Set,
+    Delete,
     // 記号
     Star, Comma, Dot,
     Eq, Ne, Lt, Le, Gt, Ge,
@@ -153,6 +154,7 @@ impl<'a> Lexer<'a> {
             "VALUE" | "VALUES" => Token::Value,
             "UPDATE" => Token::Update,
             "SET"    => Token::Set,
+            "DELETE" => Token::Delete,
             _        => Token::Ident(s),
         }
     }
@@ -531,6 +533,39 @@ impl Parser {
         let value = self.parse_literal()?;
         Ok(Assignment { column, value })
     }
+
+    // -----------------------------------------------------------------
+    // DELETE
+    // -----------------------------------------------------------------
+
+    /// DELETE FROM label.name [WHERE ...]  |  DELETE FROM label.* [WHERE ...]
+    /// DELETE LABEL FROM label.name [WHERE ...]
+    ///
+    /// UPDATE LABEL と同様、`DELETE` の直後が `.` を伴わない `LABEL` トークンかどうかで
+    /// 両構文を判別する。
+    pub fn parse_delete(&mut self) -> Result<DeleteStatement, ParseError> {
+        self.expect(Token::Delete)?;
+
+        let is_label_delete = matches!(self.peek(), Token::Ident(s) if s.to_lowercase() == "label")
+            && self.peek_at(1) != &Token::Dot;
+
+        if is_label_delete {
+            self.advance(); // "LABEL" キーワードを消費
+            self.expect(Token::From)?;
+            let label = self.parse_label_ref()?;
+            let where_clause = if self.peek() == &Token::Where {
+                self.advance(); Some(self.parse_where_expr()?)
+            } else { None };
+            return Ok(DeleteStatement::Label(DeleteLabelStatement { label, where_clause }));
+        }
+
+        self.expect(Token::From)?;
+        let target = self.parse_label_target()?;
+        let where_clause = if self.peek() == &Token::Where {
+            self.advance(); Some(self.parse_where_expr()?)
+        } else { None };
+        Ok(DeleteStatement::Data(DeleteDataStatement { target, where_clause }))
+    }
 }
 
 fn validate_insert_label_name(name: &str) -> Result<String, ParseError> {
@@ -567,6 +602,16 @@ pub fn parse_update(sql: &str) -> Result<UpdateStatement, ParseError> {
     let tokens = Lexer::new(sql).tokenize()?;
     let mut parser = Parser::new(tokens);
     let stmt = parser.parse_update()?;
+    parser.expect_eof()?;
+    Ok(stmt)
+}
+
+/// DELETE文をパースする公開エントリーポイント
+pub fn parse_delete(sql: &str) -> Result<DeleteStatement, ParseError> {
+    if sql.trim().is_empty() { return Err(ParseError::EmptyQuery); }
+    let tokens = Lexer::new(sql).tokenize()?;
+    let mut parser = Parser::new(tokens);
+    let stmt = parser.parse_delete()?;
     parser.expect_eof()?;
     Ok(stmt)
 }
@@ -812,6 +857,90 @@ mod tests {
     #[test]
     fn test_update_rejects_trailing_tokens() {
         assert!(parse_update("UPDATE label.employee SET age=30 GARBAGE").is_err());
+    }
+
+    // -- DELETE --
+
+    #[test]
+    fn test_delete_data_with_where() {
+        let s = parse_delete("DELETE FROM label.employee WHERE employee_name='田中'").unwrap();
+        match s {
+            DeleteStatement::Data(d) => {
+                assert_eq!(d.target, LabelTarget::LabelName("employee".into()));
+                assert_eq!(d.where_clause, Some(WhereExpr::Comparison(Comparison {
+                    column: "employee_name".into(), op: CompareOp::Eq,
+                    value: LiteralValue::Text("田中".into()),
+                })));
+            }
+            _ => panic!("expected DeleteStatement::Data"),
+        }
+    }
+
+    #[test]
+    fn test_delete_data_without_where_targets_whole_label() {
+        let s = parse_delete("DELETE FROM label.employee").unwrap();
+        match s {
+            DeleteStatement::Data(d) => {
+                assert_eq!(d.target, LabelTarget::LabelName("employee".into()));
+                assert_eq!(d.where_clause, None);
+            }
+            _ => panic!("expected DeleteStatement::Data"),
+        }
+    }
+
+    #[test]
+    fn test_delete_data_from_label_star_targets_all_records() {
+        let s = parse_delete("DELETE FROM label.*").unwrap();
+        match s {
+            DeleteStatement::Data(d) => {
+                assert_eq!(d.target, LabelTarget::All);
+                assert_eq!(d.where_clause, None);
+            }
+            _ => panic!("expected DeleteStatement::Data"),
+        }
+    }
+
+    #[test]
+    fn test_delete_label_only_removes_label() {
+        let s = parse_delete("DELETE LABEL FROM label.employee WHERE department='sales'").unwrap();
+        match s {
+            DeleteStatement::Label(l) => {
+                assert_eq!(l.label, "employee");
+                assert_eq!(l.where_clause, Some(WhereExpr::Comparison(Comparison {
+                    column: "department".into(), op: CompareOp::Eq,
+                    value: LiteralValue::Text("sales".into()),
+                })));
+            }
+            _ => panic!("expected DeleteStatement::Label"),
+        }
+    }
+
+    #[test]
+    fn test_delete_label_without_where() {
+        let s = parse_delete("DELETE LABEL FROM label.employee").unwrap();
+        match s {
+            DeleteStatement::Label(l) => {
+                assert_eq!(l.label, "employee");
+                assert_eq!(l.where_clause, None);
+            }
+            _ => panic!("expected DeleteStatement::Label"),
+        }
+    }
+
+    #[test]
+    fn test_delete_label_rejects_star() {
+        assert!(parse_delete("DELETE LABEL FROM label.*").is_err());
+    }
+
+    #[test]
+    fn test_delete_rejects_trailing_tokens() {
+        assert!(parse_delete("DELETE FROM label.employee GARBAGE").is_err());
+    }
+
+    #[test]
+    fn test_delete_case_insensitive() {
+        let s = parse_delete("delete from label.employee where name = 'Alice'").unwrap();
+        assert!(matches!(s, DeleteStatement::Data(_)));
     }
 }
 

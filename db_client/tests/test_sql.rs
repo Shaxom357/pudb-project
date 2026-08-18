@@ -306,3 +306,144 @@ async fn test_update_rejects_malformed_syntax() {
 
     let _ = std::fs::remove_file(db_path);
 }
+
+#[tokio::test]
+async fn test_delete_data_with_where_removes_matching_row_and_keeps_others() {
+    let (base, db_path) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    post_sql(&client, &base, "INSERT INTO (label.employee) (employee_name) VALUE ('田中')").await;
+    post_sql(&client, &base, "INSERT INTO (label.employee) (employee_name) VALUE ('鈴木')").await;
+
+    let (status, body) = post_sql(&client, &base,
+        "DELETE FROM label.employee WHERE employee_name='田中'"
+    ).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["ok"], true);
+    assert_eq!(body["deleted_count"], 1);
+
+    let (status, sel) = post_sql(&client, &base, "SELECT * FROM label.employee").await;
+    assert_eq!(status, 200);
+    assert_eq!(sel["returned"], 1);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn test_delete_data_without_where_removes_all_records_in_label() {
+    let (base, db_path) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    post_sql(&client, &base, "INSERT INTO (label.employee) (name) VALUE ('田中')").await;
+    post_sql(&client, &base, "INSERT INTO (label.employee) (name) VALUE ('鈴木')").await;
+    post_sql(&client, &base, "INSERT INTO (label.manager) (name) VALUE ('佐藤')").await;
+
+    let (status, body) = post_sql(&client, &base, "DELETE FROM label.employee").await;
+    assert_eq!(status, 200);
+    assert_eq!(body["deleted_count"], 2);
+
+    let (_, employee_sel) = post_sql(&client, &base, "SELECT * FROM label.employee").await;
+    assert_eq!(employee_sel["returned"], 0);
+    // 別ラベルのレコードは影響を受けない
+    let (_, manager_sel) = post_sql(&client, &base, "SELECT * FROM label.manager").await;
+    assert_eq!(manager_sel["returned"], 1);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn test_delete_from_label_star_removes_all_data() {
+    let (base, db_path) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    post_sql(&client, &base, "INSERT INTO (label.employee) (name) VALUE ('田中')").await;
+    post_sql(&client, &base, "INSERT INTO (label.manager) (name) VALUE ('佐藤')").await;
+
+    let (status, body) = post_sql(&client, &base, "DELETE FROM label.*").await;
+    assert_eq!(status, 200);
+    assert_eq!(body["deleted_count"], 2);
+
+    let (_, sel) = post_sql(&client, &base, "SELECT * FROM label.*").await;
+    assert_eq!(sel["returned"], 0);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn test_delete_label_only_detaches_label_and_keeps_data() {
+    let (base, db_path) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    post_sql(&client, &base,
+        "INSERT INTO (label.employee, label.manager) (name) VALUE ('田中')"
+    ).await;
+
+    let (status, body) = post_sql(&client, &base, "DELETE LABEL FROM label.employee").await;
+    assert_eq!(status, 200);
+    assert_eq!(body["deleted_count"], 1);
+
+    // employeeラベルからは検索できなくなるが、レコード自体はmanagerラベル経由で残っている
+    let (_, employee_sel) = post_sql(&client, &base, "SELECT * FROM label.employee").await;
+    assert_eq!(employee_sel["returned"], 0);
+    let (_, manager_sel) = post_sql(&client, &base, "SELECT * FROM label.manager").await;
+    assert_eq!(manager_sel["returned"], 1);
+    assert_eq!(manager_sel["rows"][0][1], serde_json::json!("田中"));
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn test_delete_label_with_where_only_affects_matching_records() {
+    let (base, db_path) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    post_sql(&client, &base,
+        "INSERT INTO (label.employee) (name, department) VALUE ('田中', 'sales')"
+    ).await;
+    post_sql(&client, &base,
+        "INSERT INTO (label.employee) (name, department) VALUE ('鈴木', 'dev')"
+    ).await;
+
+    let (status, body) = post_sql(&client, &base,
+        "DELETE LABEL FROM label.employee WHERE department='sales'"
+    ).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["deleted_count"], 1);
+
+    let (_, employee_sel) = post_sql(&client, &base, "SELECT * FROM label.employee").await;
+    assert_eq!(employee_sel["returned"], 1);
+    // データ自体は削除されていない（全レコード数は2のまま）
+    let (_, all_sel) = post_sql(&client, &base, "SELECT * FROM label.*").await;
+    assert_eq!(all_sel["returned"], 2);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn test_delete_no_match_returns_zero_count() {
+    let (base, db_path) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    post_sql(&client, &base, "INSERT INTO (label.employee) (name) VALUE ('田中')").await;
+
+    let (status, body) = post_sql(&client, &base,
+        "DELETE FROM label.employee WHERE name='存在しない'"
+    ).await;
+    assert_eq!(status, 200);
+    assert_eq!(body["deleted_count"], 0);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn test_delete_rejects_malformed_syntax() {
+    let (base, db_path) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let (status, body) = post_sql(&client, &base, "DELETE label.employee").await;
+    assert_eq!(status, 400);
+    assert_eq!(body["ok"], false);
+    assert!(body["error"].as_str().unwrap().len() > 0);
+
+    let _ = std::fs::remove_file(db_path);
+}

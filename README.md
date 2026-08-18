@@ -1,19 +1,19 @@
 # 🗄️ KAGURA DB
 
 > Rust で一から実装したオリジナルのデータベースエンジン。  
-> 列指向ストレージ・ラベル検索・KDB暗号化バイナリ形式・SQL SELECT/INSERT/UPDATE・REST API・Web管理UI を備えたフルスタックな DB システムです。  
+> 列指向ストレージ・ラベル検索・KDB暗号化バイナリ形式・SQL SELECT/INSERT/UPDATE/DELETE・REST API・Web管理UI を備えたフルスタックな DB システムです。  
 > バージョンの情報については以下の補足を確認ください。  
 > 補足  
 > ・メジャーバージョンが異なると互換性は無くなります。  
 > ・メジャーバージョンが一致し、マイナーバージョンだけが異なる場合問題なく移行ができ互換性を保ちます。
 
-**バージョン: `2.1.0`**
+**バージョン: `2.2.0`**
 
 | 区分 | 説明 |
 |------|------|
 | **A = 2** (メジャー) | ラベルの重複付与を禁止する破壊的変更。既存レコードへの同一ラベル再付与は従来「冪等（サイレント成功）」だったが、変更せずエラーを返す仕様に変更（`POST /records/{id}/labels` は既存クライアントの再送処理などに影響しうる） |
-| **B = 1** (マイナー) | SQL `UPDATE LABEL` に `WHERE` 句対応を追加（1機能追加） |
-| **C = 0** (ビルド) | 2.1系での修正なし |
+| **B = 2** (マイナー) | SQL `DELETE` 文を新規追加（1機能追加） |
+| **C = 0** (ビルド) | 2.2系での修正なし |
 
 ---
 
@@ -50,7 +50,7 @@ KAGURA DB は Rust で一から実装したデータベースエンジンです�
 | **スキーマレス** | レコードごとに任意のカラムを持てる |
 | **KDB 暗号化ストレージ** | XChaCha20-Poly1305 AEAD による暗号化バイナリ形式（`.kdb`） |
 | **WAL 高速挿入** | Write-Ahead Log 追記方式で INSERT が O(1)（ファイル全体の再書き込みなし） |
-| **SQL SELECT/INSERT/UPDATE** | `FROM label.xxx` / `INTO (label.xxx)` / `UPDATE label.xxx SET ...` 構文による独自拡張 SQL クエリ |
+| **SQL SELECT/INSERT/UPDATE/DELETE** | `FROM label.xxx` / `INTO (label.xxx)` / `UPDATE label.xxx SET ...` / `DELETE FROM label.xxx` 構文による独自拡張 SQL クエリ |
 | **多言語対応** | REST API と C FFI（Python 向け）の 2 種インターフェース |
 
 ---
@@ -86,7 +86,8 @@ KAGURA DB は Rust で一から実装したデータベースエンジンです�
     +----------------------------------------------------------+
 
     +----------------------------------------------------------+
-    |          sql_engine  (SQL SELECT/INSERT/UPDATE エンジン)  |
+    |       sql_engine  (SQL SELECT/INSERT/UPDATE/DELETE       |
+    |                     エンジン)                            |
     |   ast / parser / executor                               |
     |   手書き再帰下降パーサー（外部ライブラリ不使用）         |
     +----------------------------------------------------------+
@@ -117,12 +118,12 @@ KAGURA DB は Rust で一から実装したデータベースエンジンです�
 - ✅ 環境変数による設定（`DB_FILE` / `DB_ADDR` / `KAGURA_MASTER_KEY`）
 - ✅ ブラウザ Web 管理 UI（Records / DB Info / SQL Query / 設定 の 4 ビュー）
 - ✅ `GET /db/info` でバージョン・ストレージ状態・統計を取得
-- ✅ `POST /sql` で SQL SELECT / INSERT / UPDATE クエリを実行
+- ✅ `POST /sql` で SQL SELECT / INSERT / UPDATE / DELETE クエリを実行
 - ✅ `GET /settings` / `PUT /settings` で HTTPリクエスト（`/records` `/labels` 系 REST API）受付のオンオフを切替可能（**既定は無効**。データ操作は基本 SQL 経由とし、REST API は大量テストデータ投入など用途に応じて有効化する）
 - ✅ Web UI の Records 一覧は `POST /sql`（`SELECT * FROM label.*`）経由で取得するため、REST API が無効でも常に閲覧可能
 - ✅ **ログ出力保管機能**: 起動/停止時刻、停止理由（正常 / エラー / HW・ストレージ障害）、SQL・HTTPリクエストの成功/失敗、Webクライアントの応答時間、DB保存・レコード/ラベル操作などを JSON Lines 形式でファイルへ永続保存（詳細は [ログ機能](#ログ機能) を参照）。`GET /logs` および Web UI の「ログ」ビューから閲覧可能
 
-### sql_engine（SQL SELECT/INSERT/UPDATE エンジン）
+### sql_engine（SQL SELECT/INSERT/UPDATE/DELETE エンジン）
 - ✅ 独自拡張 SQL `SELECT ... FROM label.xxx` 構文
 - ✅ `WHERE` 句（`=` `!=` `<` `<=` `>` `>=` `LIKE`）
 - ✅ `AND` / `OR` / `NOT` / 括弧による複合条件
@@ -142,6 +143,9 @@ KAGURA DB は Rust で一から実装したデータベースエンジンです�
 - ✅ SET句は複数カラムを同時指定可能。WHERE句は省略可（省略時は対象ラベル内の全レコードを更新）。SET対象外のカラム・ラベルは変更されない
 - ✅ `UPDATE LABEL label.old SET label.new`（ラベル名そのもののリネーム、対象レコードのデータは変更しない）。**リネーム先のラベル名が既にDB内に存在する場合はラベル名の重複となるため、何も変更せずエラーを返す**（自分自身への同名リネームも同様にエラー）
 - ✅ `UPDATE LABEL label.old SET label.new WHERE ...`（`WHERE`句で対象を絞り込み。省略時は`old`が付いた全レコードが一括で対象になる）
+- ✅ 独自拡張 SQL `DELETE FROM label.xxx WHERE ...` 構文（対象ラベルのレコードをデータごと完全に削除）。`WHERE`句は省略可（省略時は対象ラベル内の全レコードを一括削除）
+- ✅ `DELETE FROM label.*`（`WHERE`と組み合わせ可能。省略時はDB全体の全レコードを削除）
+- ✅ `DELETE LABEL FROM label.xxx WHERE ...`（レコードそのものは削除せず、指定ラベルのみを対象レコードから外す。`WHERE`省略時は`xxx`が付いた全レコードが一括で対象になる）
 
 ### dynamic_label_management
 - ✅ ラベルの AND / OR 検索
@@ -177,7 +181,7 @@ pudb-project/
 │   │   ├── handlers.rs                 # レコード CRUD ハンドラー
 │   │   ├── label_handlers.rs           # ラベル管理ハンドラー
 │   │   ├── info_handlers.rs            # DB 情報 API ハンドラー
-│   │   ├── sql_handlers.rs             # SQL 実行ハンドラー（SELECT / INSERT / UPDATE）
+│   │   ├── sql_handlers.rs             # SQL 実行ハンドラー（SELECT / INSERT / UPDATE / DELETE）
 │   │   ├── settings_handlers.rs        # 設定 API ハンドラー（HTTPリクエスト受付オンオフ）
 │   │   ├── models.rs                   # JSON DTO
 │   │   └── ui.html                     # 管理画面（HTML/CSS/JS）
@@ -185,12 +189,12 @@ pudb-project/
 │       ├── test_records.rs             # レコード API テスト（12件）
 │       ├── test_labels.rs              # ラベル API テスト（12件）
 │       ├── test_persistence.rs         # 永続化テスト（4件）
-│       ├── test_sql.rs                 # SQL API テスト（16件）
+│       ├── test_sql.rs                 # SQL API テスト（23件）
 │       └── test_settings.rs            # 設定 API テスト（4件）
-├── sql_engine/                         # SQL SELECT/INSERT/UPDATE エンジン (v1.6.0)
+├── sql_engine/                         # SQL SELECT/INSERT/UPDATE/DELETE エンジン (v1.6.0)
 │   └── src/
 │       ├── ast.rs / parser.rs / executor.rs
-│       └── lib.rs                      # 公開 API（run_select・run_insert・run_update）
+│       └── lib.rs                      # 公開 API（run_select・run_insert・run_update・run_delete）
 ├── dynamic_label_management/           # ラベル管理ライブラリ (v1.6.0)
 │   └── src/lib.rs + tests.rs           # ユニットテスト（24件）
 ├── db_ffi/                             # C FFI バインディング (v1.6.0)
@@ -308,7 +312,7 @@ KDB WAL 方式: O(1) → 10,000件目でも ~1,200 req/s（10,000件を 8.1秒�
 
 ## SQL 機能
 
-`POST /sql` エンドポイントで SQL SELECT / INSERT / UPDATE クエリを実行できます。
+`POST /sql` エンドポイントで SQL SELECT / INSERT / UPDATE / DELETE クエリを実行できます。
 通常の SQL とは異なり、テーブル名の代わりに `label.xxx` でラベルを指定する独自拡張構文です。
 
 ### SELECT 構文
@@ -372,6 +376,32 @@ UPDATE LABEL label.employee SET label.sales_staff WHERE department='sales'
 - 一致した行が無い場合もエラーにはならず、更新件数 0 として成功を返す。
 - `UPDATE LABEL` のリネーム先ラベル名（`new`）が既にDB内の他のレコードで使われている場合は、WHEREでの絞り込みに関わらずラベル名の重複としてエラーを返し、何も変更しない。
 
+### DELETE 構文
+
+```sql
+-- データ削除: 対象ラベルのレコードのうち WHERE に一致する行をデータごと完全に削除
+DELETE FROM label.employee WHERE employee_name = '田中'
+
+-- WHERE句を省略すると、対象ラベルが付いた全レコードが一括削除される
+DELETE FROM label.employee
+
+-- label.* を指定すると、DB全体の全レコードが対象になる（WHEREと組み合わせ可能）
+DELETE FROM label.*
+
+-- ラベルのみ削除: レコード自体・カラムデータ・他のラベルは削除せず、指定ラベルだけを対象レコードから外す
+DELETE LABEL FROM label.employee WHERE employee_department = 'sales'
+
+-- WHERE省略時は、そのラベルが付いた全レコードから一括でラベルを外す
+DELETE LABEL FROM label.employee
+```
+
+補足:
+- `DELETE FROM label.xxx [WHERE ...]` は対象ラベルのレコードを `WHERE` に一致する分だけデータごと完全に削除する（`WHERE` 省略時は対象ラベル内の全レコードを一括削除）。
+- `DELETE FROM label.*` は全ラベル横断で対象を絞り込む（`WHERE` 省略時は DB 内の全レコードを削除する）。
+- `DELETE LABEL FROM label.xxx [WHERE ...]` はレコードを削除せず、指定ラベルのみを対象レコードから外す（データ・他のラベルは変更しない）。`label.*` は指定できない。
+- いずれも一致した行が無い場合はエラーにはならず、削除件数 0 として成功を返す。
+- レスポンスの削除件数は `deleted_count` に格納される（`DELETE LABEL` の場合はラベルを外したレコード数）。
+
 ### リクエスト例
 
 ```bash
@@ -386,6 +416,10 @@ curl -X POST http://localhost:3000/sql \
 curl -X POST http://localhost:3000/sql \
   -H 'Content-Type: application/json' \
   -d "{\"query\": \"UPDATE label.employee SET employee_name='木村' WHERE employee_name='木邑'\"}"
+
+curl -X POST http://localhost:3000/sql \
+  -H 'Content-Type: application/json' \
+  -d "{\"query\": \"DELETE FROM label.employee WHERE employee_name='田中'\"}"
 ```
 
 ### 10,000件での性能測定
@@ -464,7 +498,7 @@ HTTPリクエスト欄が「要HTTP API」の行は、既定では無効な `/re
 | `POST`   | `/labels/search` | AND/OR ラベル検索 | ✅ |
 | `PUT`    | `/labels/rename` | ラベルリネーム | ✅ |
 | `GET`    | `/db/info` | DB バージョン・統計情報 | - |
-| `POST`   | `/sql` | SQL SELECT / INSERT / UPDATE 実行 | - |
+| `POST`   | `/sql` | SQL SELECT / INSERT / UPDATE / DELETE 実行 | - |
 | `GET`    | `/settings` | 現在の設定取得 | - |
 | `PUT`    | `/settings` | 設定更新（HTTPリクエスト受付オンオフ） | - |
 | `GET`    | `/logs` | 保管されたログを新しい順に取得（`?lines=` で件数指定、既定200・上限2000） | - |
@@ -474,7 +508,7 @@ HTTPリクエスト欄が「要HTTP API」の行は、既定では無効な `/re
 ```json
 {
   "engine_name":    "KAGURA DB Engine",
-  "app_version":    "2.1.0",
+  "app_version":    "2.2.0",
   "storage_mode":   "kdb",
   "storage_format": "KDB Binary (WAL + XChaCha20-Poly1305 encrypted)",
   "encrypted":      true,
@@ -496,7 +530,7 @@ HTTPリクエスト欄が「要HTTP API」の行は、既定では無効な `/re
 |--------|------|
 | **📋 Records** | レコード一覧（`POST /sql` の `SELECT * FROM label.*` 経由で取得。HTTPリクエストが無効でも閲覧可能）・検索・ラベルフィルター・自動更新（10秒）。作成・編集・削除は REST API（`/records`）を使うため、これらの操作には設定で HTTPリクエストを有効化する必要がある |
 | **ℹ️ DB Info** | バージョン・ストレージモード・暗号化状態・統計カード・カラム一覧 |
-| **🔍 SQL Query** | SQL SELECT / INSERT / UPDATE 実行・テーブル形式結果表示・ Ctrl+Enter 対応 |
+| **🔍 SQL Query** | SQL SELECT / INSERT / UPDATE / DELETE 実行・テーブル形式結果表示・ Ctrl+Enter 対応 |
 | **⚙️ 設定** | HTTPリクエスト（`/records` `/labels` 系 REST API）受付のオンオフを切替（既定は無効）。大量テストデータ投入など HTTP 経由の操作が必要なときに有効化する |
 | **📜 ログ** | 保管されたログ（起動/停止・SQL・HTTP・DB操作・HW異常）をカテゴリで絞り込みながら一覧表示・自動更新（10秒） |
 
@@ -545,9 +579,9 @@ cargo test --workspace
 | `dynamic_label_management` | 24 | AND/OR 検索・リネーム・差分・ラベル重複付与エラー |
 | `db_ffi` | 10 | FFI 関数・メモリ管理 |
 | `db_client`（ユニットテスト） | 5 | ログ出力保管機能（JSON Lines 書き込み/読み出し・HW起因エラー判定） |
-| `db_client`（統合テスト） | 52 | HTTP API・ラベル操作（重複付与エラーを含む）・永続化・SQL SELECT/INSERT/UPDATE（ラベル重複エラー・UPDATE LABELのWHERE絞り込みを含む）・設定（HTTPリクエスト受付オンオフ）・ログ（`GET /logs`） |
-| `sql_engine` | 45 | パーサー・実行エンジン（SELECT・INSERT・UPDATE・WHERE・ORDER BY・LIKE・ラベル重複エラー・UPDATE LABELのWHERE絞り込み） |
-| **合計** | **175** | |
+| `db_client`（統合テスト） | 59 | HTTP API・ラベル操作（重複付与エラーを含む）・永続化・SQL SELECT/INSERT/UPDATE/DELETE（ラベル重複エラー・UPDATE LABELのWHERE絞り込み・DELETE/DELETE LABELのWHERE絞り込みを含む）・設定（HTTPリクエスト受付オンオフ）・ログ（`GET /logs`） |
+| `sql_engine` | 60 | パーサー・実行エンジン（SELECT・INSERT・UPDATE・DELETE・WHERE・ORDER BY・LIKE・ラベル重複エラー・UPDATE LABEL/DELETE LABELのWHERE絞り込み） |
+| **合計** | **197** | |
 
 ---
 
@@ -581,6 +615,7 @@ cargo test --workspace
 
 | バージョン | 主な変更内容 |
 |-----------|-------------|
+| **2.2.0** | SQL `DELETE` 文を新規追加。`DELETE FROM label.xxx [WHERE ...]`（対象ラベルのレコードをデータごと完全に削除。`WHERE`省略時は対象ラベル内の全レコードを一括削除、`label.*`でDB全体を対象化可能）と、`DELETE LABEL FROM label.xxx [WHERE ...]`（レコード自体は削除せず指定ラベルのみを対象レコードから外す）の2構文に対応。`POST /sql` が DELETE 文を受け付けるようになり、レスポンスに削除件数 `deleted_count` を追加 |
 | **2.1.0** | SQL `UPDATE LABEL label.old SET label.new` に `WHERE` 句対応を追加。従来は `old` ラベルが付いた全レコードが常に一括でリネームされていたが、`WHERE` で条件を指定すると一致したレコードだけを対象にでき、一括変更を避けられるようになった（`WHERE` 省略時は従来通り全レコードが対象） |
 | **2.0.0** | **【破壊的変更】** ラベルの重複付与を禁止。従来 `db_engine::Database::attach_label`（および `dynamic_label_management::LabelManager::add_label`）は既に付与済みのラベルを再付与しても何もせず成功していた（冪等）が、変更せず `DuplicateLabel` エラーを返す仕様に変更。影響範囲: (1) `POST /records/{id}/labels` は重複時に `409 Conflict` を返すようになる（以前は `200 OK`）。(2) SQL `INSERT INTO (label.a, label.a) ...` のように同一文内で同じラベルを複数指定した場合はエラーになる。(3) SQL `UPDATE LABEL label.old SET label.new` はリネーム先 `new` が既にDB内の他レコードで使われている場合エラーとし、何も変更しない（自己リネームも同様）。副作用として `dynamic_label_management` の `copy_labels`／`rename_label` は、コピー先／対象レコードが既に同名ラベルを持つ場合は重複エラーを避けるためスキップするよう防御的に修正 |
 | **1.8.0** | SQL `UPDATE` 機能追加。`UPDATE label.xxx SET col=val, ... WHERE ...` によるデータ更新（SET対象外のカラム・ラベルは維持）と、`UPDATE LABEL label.old SET label.new` によるラベル名リネーム（DB全体一括）の2構文に対応。`POST /sql` が UPDATE 文を受け付けるようになり、レスポンスに更新件数 `updated_count` を追加 |

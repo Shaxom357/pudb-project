@@ -153,3 +153,34 @@ pub struct UpdateLabelStatement {
     /// WHERE句（省略時は old_label が付いた全レコードが対象）
     pub where_clause: Option<WhereExpr>,
 }
+
+/// DELETE文全体（データ削除 or ラベルのみ削除）
+/// 例: DELETE FROM label.employee WHERE employee_name='田中'
+///     DELETE FROM label.employee
+///     DELETE FROM label.*
+///     DELETE LABEL FROM label.employee WHERE department='sales'
+#[derive(Debug, Clone, PartialEq)]
+pub enum DeleteStatement {
+    /// DELETE FROM label.name [WHERE ...]  |  DELETE FROM label.* [WHERE ...]
+    Data(DeleteDataStatement),
+    /// DELETE LABEL FROM label.name [WHERE ...]
+    Label(DeleteLabelStatement),
+}
+
+/// データ削除: DELETE FROM label.name [WHERE ...]
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeleteDataStatement {
+    /// 削除対象ラベル（`label.*` なら全レコードが対象）
+    pub target: LabelTarget,
+    /// WHERE句（省略時は対象ラベルの全レコードが削除される）
+    pub where_clause: Option<WhereExpr>,
+}
+
+/// ラベルのみ削除: DELETE LABEL FROM label.name [WHERE ...]
+/// レコード自体・他のラベル・カラムデータは削除せず、指定ラベルだけを外す。
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeleteLabelStatement {
+    pub label: String,
+    /// WHERE句（省略時は label が付いた全レコードが対象）
+    pub where_clause: Option<WhereExpr>,
+}
