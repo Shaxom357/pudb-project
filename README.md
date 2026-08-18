@@ -7,13 +7,13 @@
 > ・メジャーバージョンが異なると互換性は無くなります。  
 > ・メジャーバージョンが一致し、マイナーバージョンだけが異なる場合問題なく移行ができ互換性を保ちます。
 
-**バージョン: `2.2.0`**
+**バージョン: `2.4.0`**
 
 | 区分 | 説明 |
 |------|------|
 | **A = 2** (メジャー) | ラベルの重複付与を禁止する破壊的変更。既存レコードへの同一ラベル再付与は従来「冪等（サイレント成功）」だったが、変更せずエラーを返す仕様に変更（`POST /records/{id}/labels` は既存クライアントの再送処理などに影響しうる） |
-| **B = 2** (マイナー) | SQL `DELETE` 文を新規追加（1機能追加） |
-| **C = 0** (ビルド) | 2.2系での修正なし |
+| **B = 4** (マイナー) | テストデータ生成スクリプトに `--dump-json`/`--load-json` を新規追加し、事前生成済み10,000件JSONを同梱（1機能追加） |
+| **C = 0** (ビルド) | 2.4系での修正なし |
 
 ---
 
@@ -24,6 +24,7 @@
 - [機能一覧](#機能一覧)
 - [プロジェクト構成](#プロジェクト構成)
 - [クイックスタート](#クイックスタート)
+- [Linux へのインストール（systemd連携）](#linux-へのインストールsystemd連携)
 - [KDB ストレージフォーマット](#kdb-ストレージフォーマット)
 - [SQL 機能](#sql-機能)
 - [ログ機能](#ログ機能)
@@ -258,6 +259,55 @@ curl -X POST http://localhost:3000/records \
 
 # Web UI（Records一覧はSQL経由のため、HTTPリクエストが無効でも閲覧可能）
 open http://localhost:3000/ui
+```
+
+---
+
+## Linux へのインストール（systemd連携）
+
+一般的な Linux パッケージ（nginx・PostgreSQL 等）と同様に、専用の非rootシステムユーザーで
+動作する systemd サービスとして導入できます。`systemctl start/stop/restart/enable` による
+プロセス管理、`journalctl` によるログ確認、FHS準拠のディレクトリ配置に対応しています。
+
+導入方法は3種類用意しています（詳細は [packaging/README.md](packaging/README.md)）。
+
+| 方法 | コマンド | 備考 |
+|------|---------|------|
+| インストールスクリプト（推奨） | `sudo ./packaging/scripts/install.sh` | 追加ツール不要。ソースから即ビルド＆導入 |
+| .deb パッケージ | `cargo deb -p db_client --no-build` → `dpkg -i` | Debian/Ubuntu系。要 `cargo-deb` |
+| .rpm パッケージ | `cargo generate-rpm -p db_client` → `rpm -i` | RHEL/Fedora/Amazon Linux系。要 `cargo-generate-rpm` |
+
+### 配置内容
+
+| 項目 | パス |
+|------|------|
+| バイナリ | `/usr/bin/kagura-db` |
+| systemdユニット | `kagura-db.service` |
+| 環境設定ファイル | `/etc/kagura-db/kagura.env`（`DB_ADDR` / `DB_FILE` / `KAGURA_MASTER_KEY` / `KAGURA_LOG_FILE`） |
+| データディレクトリ | `/var/lib/kagura-db` |
+| ログディレクトリ | `/var/log/kagura-db` |
+| 実行ユーザー | `kagura`（システムアカウント・ログインシェルなし） |
+
+`KAGURA_MASTER_KEY`（KDB暗号化マスターキー）はインストール時に自動でランダム生成され、
+`/etc/kagura-db/kagura.env` に `root:kagura` 640 権限で保存されます（既存ファイルがある場合は上書きしません）。
+
+### 運用コマンド
+
+```bash
+sudo systemctl start kagura-db      # 起動
+sudo systemctl stop kagura-db       # 停止
+sudo systemctl restart kagura-db    # 再起動
+sudo systemctl status kagura-db     # 状態確認
+sudo systemctl enable kagura-db     # OS起動時に自動起動
+journalctl -u kagura-db -f          # systemdログ（標準出力）を追跡
+tail -f /var/log/kagura-db/kagura.log  # アプリケーションログ（JSON Lines）
+```
+
+### アンインストール
+
+```bash
+sudo ./packaging/scripts/uninstall.sh          # サービス・バイナリのみ削除（データ/設定は保持）
+sudo ./packaging/scripts/uninstall.sh --purge   # データ・設定・専用ユーザーも含め完全削除
 ```
 
 ---
@@ -546,6 +596,25 @@ python3 examples/python/generate_testdata.py --bench
 python3 examples/python/generate_testdata.py --bench-only --repeat 5
 ```
 
+### 事前生成済みJSONの投入（再インストール後のデータ再投入など）
+
+`examples/testdata/kagura_testdata_10000.json` に、`POST /records` へそのまま投げられる
+形式（`{"columns": {...}, "labels": [...]}` の配列）で10,000件のテストデータを同梱しています。
+インストールし直した直後など、ランダム生成をやり直さずに同じデータを再投入したい場合に使えます。
+
+```bash
+# HTTPリクエスト(REST API)を有効化してから投入（既定で無効のため）
+curl -X PUT http://localhost:3000/settings -H 'Content-Type: application/json' -d '{"http_api_enabled": true}'
+
+# 同梱JSONを読み込んで投入
+python3 examples/python/generate_testdata.py \
+  --load-json examples/testdata/kagura_testdata_10000.json \
+  --url http://localhost:3000
+
+# 新しいJSONを作り直したい場合（サーバー接続不要）
+python3 examples/python/generate_testdata.py --dump-json testdata_10000.json --count 10000
+```
+
 **依存**: Python 3.6+ 標準ライブラリのみ（pip 不要）
 
 ---
@@ -615,6 +684,8 @@ cargo test --workspace
 
 | バージョン | 主な変更内容 |
 |-----------|-------------|
+| **2.4.0** | `examples/python/generate_testdata.py` に `--dump-json PATH`（サーバー接続不要でPOST /records用のJSON配列をファイルへ書き出し）と `--load-json PATH`（ランダム生成せずファイルから読み込んで投入）を追加。インストールし直した後などにランダム再生成せず同じテストデータを再投入できるように、事前生成済みの10,000件JSON配列 `examples/testdata/kagura_testdata_10000.json` を同梱（各要素は `{"columns": {...}, "labels": [...]}` の形式で `POST /records` にそのまま投入可能） |
+| **2.3.0** | Linux 向けインストール機能を新規追加。一般的な Linux パッケージ（nginx・PostgreSQL 等）と同様に、専用の非rootシステムユーザー（`kagura`）で動作する systemd サービスとして導入可能に。`systemctl start/stop/restart/enable` によるプロセス管理、`journalctl` によるログ確認、FHS準拠のディレクトリ配置（`/usr/bin`・`/etc/kagura-db`・`/var/lib/kagura-db`・`/var/log/kagura-db`）に対応。導入方法として (1) 追加ツール不要の `packaging/scripts/install.sh`／`uninstall.sh`、(2) `cargo-deb` による `.deb` パッケージ、(3) `cargo-generate-rpm` による `.rpm` パッケージの3種を用意。`KAGURA_MASTER_KEY`（KDB暗号化マスターキー）はインストール時にランダム生成し `/etc/kagura-db/kagura.env` に600番台権限で保存するようにし、既定の固定キーへのフォールバックに頼らない運用を可能にした |
 | **2.2.0** | SQL `DELETE` 文を新規追加。`DELETE FROM label.xxx [WHERE ...]`（対象ラベルのレコードをデータごと完全に削除。`WHERE`省略時は対象ラベル内の全レコードを一括削除、`label.*`でDB全体を対象化可能）と、`DELETE LABEL FROM label.xxx [WHERE ...]`（レコード自体は削除せず指定ラベルのみを対象レコードから外す）の2構文に対応。`POST /sql` が DELETE 文を受け付けるようになり、レスポンスに削除件数 `deleted_count` を追加 |
 | **2.1.0** | SQL `UPDATE LABEL label.old SET label.new` に `WHERE` 句対応を追加。従来は `old` ラベルが付いた全レコードが常に一括でリネームされていたが、`WHERE` で条件を指定すると一致したレコードだけを対象にでき、一括変更を避けられるようになった（`WHERE` 省略時は従来通り全レコードが対象） |
 | **2.0.0** | **【破壊的変更】** ラベルの重複付与を禁止。従来 `db_engine::Database::attach_label`（および `dynamic_label_management::LabelManager::add_label`）は既に付与済みのラベルを再付与しても何もせず成功していた（冪等）が、変更せず `DuplicateLabel` エラーを返す仕様に変更。影響範囲: (1) `POST /records/{id}/labels` は重複時に `409 Conflict` を返すようになる（以前は `200 OK`）。(2) SQL `INSERT INTO (label.a, label.a) ...` のように同一文内で同じラベルを複数指定した場合はエラーになる。(3) SQL `UPDATE LABEL label.old SET label.new` はリネーム先 `new` が既にDB内の他レコードで使われている場合エラーとし、何も変更しない（自己リネームも同様）。副作用として `dynamic_label_management` の `copy_labels`／`rename_label` は、コピー先／対象レコードが既に同名ラベルを持つ場合は重複エラーを避けるためスキップするよう防御的に修正 |

@@ -1,0 +1,32 @@
+[Unit]
+Description=KAGURA DB - Rust製データベースエンジン
+Documentation=https://github.com/Shaxom357/pudb-project
+After=network.target
+
+[Service]
+Type=simple
+User=kagura
+Group=kagura
+WorkingDirectory=/var/lib/kagura-db
+EnvironmentFile=-/etc/kagura-db/kagura.env
+ExecStart=/usr/bin/kagura-db
+
+Restart=on-failure
+RestartSec=5s
+
+# ---- セキュリティ強化 (サンドボックス化) ----
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+ReadWritePaths=/var/lib/kagura-db /var/log/kagura-db
+
+# データ/ログ書き込み用ディレクトリ以外は読み取り専用
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

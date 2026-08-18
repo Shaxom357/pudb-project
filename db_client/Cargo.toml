@@ -1,6 +1,6 @@
 [package]
 name = "db_client"
-version = "2.2.0"
+version = "2.4.0"
 edition = "2024"
 
 [dependencies]
@@ -13,3 +13,39 @@ dynamic_label_management = { path = "../dynamic_label_management" }
 sql_engine = { path = "../sql_engine" }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+# ---- Linuxパッケージング (packaging/README.md 参照) ----
+# `cargo install cargo-deb` の上で `cargo deb -p db_client --no-build` を実行して生成する。
+[package.metadata.deb]
+name = "kagura-db"
+maintainer = "Shaxom357 <ghostxxtask_force141xx@yahoo.co.jp>"
+copyright = "2026, Shaxom357"
+extended-description = """\
+KAGURA DB は Rust で一から実装したデータベースエンジンです。\
+列指向ストレージ・ラベル（タグ）ベース検索・KDB暗号化バイナリ形式・\
+SQL SELECT/INSERT/UPDATE/DELETE・REST API・Web管理UIを備えています。\
+systemdサービス kagura-db.service として動作します。"""
+depends = "$auto"
+section = "database"
+priority = "optional"
+maintainer-scripts = "../packaging/debian"
+assets = [
+    ["target/release/db_client", "usr/bin/kagura-db", "755"],
+    ["../packaging/systemd/kagura-db.service", "lib/systemd/system/kagura-db.service", "644"],
+    ["../packaging/env/kagura.env.example", "etc/kagura-db/kagura.env.example", "640"],
+]
+conf-files = ["/etc/kagura-db/kagura.env.example"]
+
+# `cargo install cargo-generate-rpm` の上で
+# `cargo build --release -p db_client` 後に `cargo generate-rpm -p db_client` を実行して生成する。
+[package.metadata.generate-rpm]
+name = "kagura-db"
+license = "Proprietary"
+assets = [
+    { source = "target/release/db_client", dest = "/usr/bin/kagura-db", mode = "755" },
+    { source = "../packaging/systemd/kagura-db.service", dest = "/usr/lib/systemd/system/kagura-db.service", mode = "644" },
+    { source = "../packaging/env/kagura.env.example", dest = "/etc/kagura-db/kagura.env.example", mode = "640", config = true },
+]
+post_install_script = "../packaging/rpm/post_install.sh"
+pre_uninstall_script = "../packaging/rpm/pre_uninstall.sh"
+post_uninstall_script = "../packaging/rpm/post_uninstall.sh"

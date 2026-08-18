@@ -1,0 +1,15 @@
+#!/bin/sh
+# KAGURA DB - dpkg prerm
+set -e
+
+SERVICE_NAME="kagura-db.service"
+
+case "$1" in
+    remove|deconfigure)
+        if [ -d /run/systemd/system ]; then
+            systemctl stop "$SERVICE_NAME" || true
+        fi
+        ;;
+esac
+
+exit 0

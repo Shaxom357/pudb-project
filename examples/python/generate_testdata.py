@@ -10,6 +10,13 @@ KAGURA DB  10,000件テストデータ自動生成スクリプト
   python3 generate_testdata.py --bench-only   # 性能テストのみ
   python3 generate_testdata.py --bench        # 生成後に性能テストも実行
 
+  # サーバーに接続せず、POST /records にそのまま投げられる形の
+  # JSON配列ファイルを生成するだけ（インストール後の再投入などに利用）
+  python3 generate_testdata.py --dump-json testdata_10000.json
+
+  # 生成済みのJSONファイルを読み込んで投入（ランダム再生成せず、同じデータを再投入したい場合）
+  python3 generate_testdata.py --load-json testdata_10000.json --url http://localhost:3000
+
 依存: Python 3.6+ 標準ライブラリのみ（pip不要）
 """
 
@@ -354,7 +361,23 @@ def _fmt_bytes(b):
     if b < 1024**3:   return f"{b/1024**2:.2f} MB"
     return f"{b/1024**3:.2f} GB"
 
-def generate(url, total, workers):
+def load_records_from_file(path):
+    """--dump-json で保存したJSON配列（POST /records にそのまま投げられる形）を読み込む"""
+    with open(path, "r", encoding="utf-8") as f:
+        records = json.load(f)
+    if not isinstance(records, list):
+        print(f"  X {path} はJSON配列ではありません。")
+        sys.exit(1)
+    return records
+
+
+def dump_records_to_file(records, path):
+    """POST /records にそのまま投げられる形のJSON配列としてファイルへ保存する"""
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(records, f, ensure_ascii=False, indent=2)
+
+
+def generate(url, total, workers, records=None):
     print(f"\n{chr(61)*60}")
     print(f"  KAGURA DB テストデータ生成")
     print(f"{chr(61)*60}")
@@ -371,10 +394,14 @@ def generate(url, total, workers):
     existing = info.get("record_count", 0)
     print(f"OK  (既存レコード: {existing:,} 件)")
 
-    print(f"\n  [2/3] レコードデータ生成中...", end=" ", flush=True)
-    t0 = time.perf_counter()
-    records = build_record_list(total)
-    print(f"完了 ({time.perf_counter() - t0:.2f}s)")
+    if records is None:
+        print(f"\n  [2/3] レコードデータ生成中...", end=" ", flush=True)
+        t0 = time.perf_counter()
+        records = build_record_list(total)
+        print(f"完了 ({time.perf_counter() - t0:.2f}s)")
+    else:
+        print(f"\n  [2/3] ファイルから読み込んだ {len(records):,} 件を使用します")
+        total = len(records)
 
     label_count = {}
     for r in records:
@@ -514,6 +541,10 @@ def parse_args():
     p.add_argument("--bench",     action="store_true")
     p.add_argument("--repeat",    type=int, default=3)
     p.add_argument("--seed",      type=int, default=RANDOM_SEED)
+    p.add_argument("--dump-json", metavar="PATH",
+                    help="サーバーに接続せず、POST /records用のJSON配列をPATHへ書き出して終了")
+    p.add_argument("--load-json", metavar="PATH",
+                    help="ランダム生成せず、PATHのJSON配列を読み込んで投入する")
     return p.parse_args()
 
 
@@ -521,11 +552,21 @@ def main():
     args = parse_args()
     random.seed(args.seed)
 
+    if args.dump_json:
+        print(f"  {args.count:,} 件のテストデータを生成中...", end=" ", flush=True)
+        records = build_record_list(args.count)
+        dump_records_to_file(records, args.dump_json)
+        print("完了")
+        print(f"  -> {args.dump_json} ({len(records):,} 件, POST /records にそのまま投入可能な配列)")
+        print(f"  投入例: python3 {sys.argv[0]} --load-json {args.dump_json} --url {DEFAULT_URL}")
+        return
+
     if args.bench_only:
         run_benchmark(args.url, repeat=args.repeat)
         return
 
-    stats = generate(url=args.url, total=args.count, workers=args.workers)
+    loaded = load_records_from_file(args.load_json) if args.load_json else None
+    stats = generate(url=args.url, total=args.count, workers=args.workers, records=loaded)
 
     if args.bench:
         run_benchmark(args.url, repeat=args.repeat)
