@@ -364,7 +364,11 @@ async function loadAll(){
     allLabels = Array.from(labelSet).sort();
     renderSidebar(); renderTable(); updateHeader();
     setStatus(allRecords.length+' records | '+allLabels.length+' labels (via SQL)');
-  } catch(e){ setStatus('Cannot connect to server'); showToast('Connection failed','error'); }
+  } catch(e){
+    const msg = e && e.message ? e.message : String(e);
+    setStatus('Error: '+msg);
+    showToast(msg,'error');
+  }
 }
 
 function renderSidebar(){
@@ -378,6 +382,11 @@ function renderSidebar(){
 
 function filterByLabel(l){ activeLabel=l; showView('records'); renderSidebar(); renderTable(); }
 
+// 一度に描画する行数の上限。大量データ(数万〜数十万件)を1つのHTML文字列に
+// まとめてinnerHTMLへ流し込むとJSの文字列長上限(RangeError: Invalid string length)
+// に達してレンダリングが例外で落ちるため、表示件数を区切って安全に描画する。
+const MAX_RENDER_ROWS = 1000;
+
 function renderTable(){
   const q = document.getElementById('searchInput').value.toLowerCase();
   let rows = allRecords;
@@ -388,7 +397,12 @@ function renderTable(){
     const msg = activeLabel?'No records with label: '+esc(activeLabel):'No records';
     body.innerHTML='<tr><td colspan="4" class="empty"><div style="font-size:48px">&#x1F4ED;</div><div style="margin-top:12px">'+msg+'</div></td></tr>'; return;
   }
-  body.innerHTML = rows.map(r=>{
+  const truncated = rows.length > MAX_RENDER_ROWS;
+  const shown = truncated ? rows.slice(0, MAX_RENDER_ROWS) : rows;
+  const noticeRow = truncated
+    ? '<tr><td colspan="4" style="padding:10px 12px;color:#8a6d00;background:#fff8e1">Showing first '+MAX_RENDER_ROWS.toLocaleString()+' of '+rows.length.toLocaleString()+' matching records. Narrow the results with a label filter or the search box to see the rest.</td></tr>'
+    : '';
+  const bodyRows = shown.map(r=>{
     const cols = Object.entries(r.columns||{}).map(([k,v])=>{
       // v は {type:"text", value:"太郎"} 形式のオブジェクト
       const display = (v && typeof v === 'object') ? (v.value ?? 'NULL') : (v ?? '');
@@ -397,6 +411,7 @@ function renderTable(){
     const labels = (r.labels||[]).map(l=>'<span class="label-tag" onclick="filterByLabel(\''+esc(l)+'\')">' + esc(l)+'</span>').join('')||'-';
     return '<tr><td class="id-cell">#'+r.id+'</td><td>'+cols+'</td><td>'+labels+'</td><td class="actions"><button class="btn btn-ghost btn-sm" onclick="openEditModal('+r.id+')">Edit</button> <button class="btn btn-danger btn-sm" onclick="openDeleteModal('+r.id+')">Del</button></td></tr>';
   }).join('');
+  body.innerHTML = noticeRow + bodyRows;
 }
 
 function updateHeader(){ document.getElementById('headerCount').textContent=allRecords.length+' records'; }

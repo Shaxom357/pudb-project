@@ -7,13 +7,13 @@
 > ・メジャーバージョンが異なると互換性は無くなります。  
 > ・メジャーバージョンが一致し、マイナーバージョンだけが異なる場合問題なく移行ができ互換性を保ちます。
 
-**バージョン: `2.5.0`**
+**バージョン: `2.5.1`**
 
 | 区分 | 説明 |
 |------|------|
 | **A = 2** (メジャー) | ラベルの重複付与を禁止する破壊的変更。既存レコードへの同一ラベル再付与は従来「冪等（サイレント成功）」だったが、変更せずエラーを返す仕様に変更（`POST /records/{id}/labels` は既存クライアントの再送処理などに影響しうる） |
 | **B = 5** (マイナー) | Windows へのインストール機能を新規追加。PowerShellスクリプト（`install.ps1`/`uninstall.ps1`）と、`.exe`インストーラー+自動生成アンインストーラーを作る Inno Setup スクリプト（`installer.iss`）を同梱（1機能追加） |
-| **C = 0** (ビルド) | 2.5系での修正なし |
+| **C = 1** (ビルド) | Web UI の Records 画面で、数万〜10万件規模のデータを開くと「Connection failed」と誤表示されクラッシュしたように見える不具合を修正 |
 
 ---
 
@@ -736,6 +736,7 @@ cargo test --workspace
 
 | バージョン | 主な変更内容 |
 |-----------|-------------|
+| **2.5.1** | Web UI「Records」画面の不具合修正。`SELECT * FROM label.*` で取得した全レコードを1つのHTML文字列に連結してから描画していたため、数万〜10万件規模のデータでは連結後の文字列がJavaScriptの文字列長上限を超え `RangeError: Invalid string length` が発生していた。この例外が `loadAll()` の汎用catchに捕捉され、実際はサーバーへの通信自体は成功しているにもかかわらず「Connection failed」と誤表示される（サーバーダウンしたかのように見える）事象があったため、Records一覧の描画件数に上限（1,000件）を設け、超過時は超過件数と絞り込み方法を通知する行を表示するよう変更。あわせて `loadAll()` の catch 側も、原因を問わず固定文言を出すのをやめ、実際のエラーメッセージを表示するように修正 |
 | **2.5.0** | Windows 向けインストール機能を新規追加。Windows のサービス制御マネージャーへの正規登録には実行ファイル側の対応が必要なため、代わりにタスクスケジューラ（PC起動時に自動実行、異常終了時は自動再起動）で常駐運用する方式を採用。導入方法として (1) 追加ツール不要の `packaging/windows/install.ps1`／`uninstall.ps1`（ソースビルド＋`%ProgramFiles%\KaguraDB`・`%ProgramData%\KaguraDB`への配置＋タスク登録）、(2) [Inno Setup](https://jrsoftware.org/isinfo.php) による `.exe` インストーラー（`packaging/windows/installer.iss`。アンインストーラーは自動生成され「プログラムと機能」に登録される）の2種を用意。`KAGURA_MASTER_KEY` はインストール時にランダム生成し `%ProgramData%\KaguraDB\config\kagura.env` へ保存する運用とし、Linux版と同様の挙動（既存ファイルは上書きしない）とした |
 | **2.4.0** | `examples/python/generate_testdata.py` に `--dump-json PATH`（サーバー接続不要でPOST /records用のJSON配列をファイルへ書き出し）と `--load-json PATH`（ランダム生成せずファイルから読み込んで投入）を追加。インストールし直した後などにランダム再生成せず同じテストデータを再投入できるように、事前生成済みの10,000件JSON配列 `examples/testdata/kagura_testdata_10000.json` を同梱（各要素は `{"columns": {...}, "labels": [...]}` の形式で `POST /records` にそのまま投入可能） |
 | **2.3.0** | Linux 向けインストール機能を新規追加。一般的な Linux パッケージ（nginx・PostgreSQL 等）と同様に、専用の非rootシステムユーザー（`kagura`）で動作する systemd サービスとして導入可能に。`systemctl start/stop/restart/enable` によるプロセス管理、`journalctl` によるログ確認、FHS準拠のディレクトリ配置（`/usr/bin`・`/etc/kagura-db`・`/var/lib/kagura-db`・`/var/log/kagura-db`）に対応。導入方法として (1) 追加ツール不要の `packaging/scripts/install.sh`／`uninstall.sh`、(2) `cargo-deb` による `.deb` パッケージ、(3) `cargo-generate-rpm` による `.rpm` パッケージの3種を用意。`KAGURA_MASTER_KEY`（KDB暗号化マスターキー）はインストール時にランダム生成し `/etc/kagura-db/kagura.env` に600番台権限で保存するようにし、既定の固定キーへのフォールバックに頼らない運用を可能にした |
