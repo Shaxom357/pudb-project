@@ -1,4 +1,4 @@
-# KAGURA DB - Windows インストールスクリプト
+﻿# KAGURA DB - Windows インストールスクリプト
 #
 # ソースからリリースビルドし、一般的な Windows アプリと同様に
 #   - Program Files 配下へのバイナリ配置

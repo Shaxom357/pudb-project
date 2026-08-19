@@ -1,4 +1,4 @@
-# KAGURA DB - タスクスケジューラ登録スクリプト
+﻿# KAGURA DB - タスクスケジューラ登録スクリプト
 #
 # 前提: kagura-db.exe と run-kagura.ps1 が既に $InstallDir に配置済みであること。
 # install.ps1 と installer.iss (Inno Setup) の両方から共通で呼び出される。

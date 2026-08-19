@@ -1,4 +1,4 @@
-# KAGURA DB - Windows アンインストールスクリプト
+﻿# KAGURA DB - Windows アンインストールスクリプト
 #
 # 使い方:
 #   powershell -ExecutionPolicy Bypass -File .\packaging\windows\uninstall.ps1          # タスク・バイナリのみ削除（データ/設定は残す）
