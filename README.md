@@ -313,7 +313,7 @@ sudo ./packaging/scripts/uninstall.sh --purge   # データ・設定・専用ユ
 
 ---
 
-## Windows へのインストール
+## Windows へのインストール（工事中）
 
 Windows では、PC 起動時に自動的に開始され異常終了時は自動再起動される常駐アプリとして
 導入できます（Windows のサービス制御マネージャーに正規登録するには実行ファイル側の対応が
