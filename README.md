@@ -7,13 +7,13 @@
 > ・メジャーバージョンが異なると互換性は無くなります。  
 > ・メジャーバージョンが一致し、マイナーバージョンだけが異なる場合問題なく移行ができ互換性を保ちます。
 
-**バージョン: `2.4.0`**
+**バージョン: `2.5.0`**
 
 | 区分 | 説明 |
 |------|------|
 | **A = 2** (メジャー) | ラベルの重複付与を禁止する破壊的変更。既存レコードへの同一ラベル再付与は従来「冪等（サイレント成功）」だったが、変更せずエラーを返す仕様に変更（`POST /records/{id}/labels` は既存クライアントの再送処理などに影響しうる） |
-| **B = 4** (マイナー) | テストデータ生成スクリプトに `--dump-json`/`--load-json` を新規追加し、事前生成済み10,000件JSONを同梱（1機能追加） |
-| **C = 0** (ビルド) | 2.4系での修正なし |
+| **B = 5** (マイナー) | Windows へのインストール機能を新規追加。PowerShellスクリプト（`install.ps1`/`uninstall.ps1`）と、`.exe`インストーラー+自動生成アンインストーラーを作る Inno Setup スクリプト（`installer.iss`）を同梱（1機能追加） |
+| **C = 0** (ビルド) | 2.5系での修正なし |
 
 ---
 
@@ -25,6 +25,7 @@
 - [プロジェクト構成](#プロジェクト構成)
 - [クイックスタート](#クイックスタート)
 - [Linux へのインストール（systemd連携）](#linux-へのインストールsystemd連携)
+- [Windows へのインストール](#windows-へのインストール)
 - [KDB ストレージフォーマット](#kdb-ストレージフォーマット)
 - [SQL 機能](#sql-機能)
 - [ログ機能](#ログ機能)
@@ -309,6 +310,57 @@ tail -f /var/log/kagura-db/kagura.log  # アプリケーションログ（JSON L
 sudo ./packaging/scripts/uninstall.sh          # サービス・バイナリのみ削除（データ/設定は保持）
 sudo ./packaging/scripts/uninstall.sh --purge   # データ・設定・専用ユーザーも含め完全削除
 ```
+
+---
+
+## Windows へのインストール
+
+Windows では、PC 起動時に自動的に開始され異常終了時は自動再起動される常駐アプリとして
+導入できます（Windows のサービス制御マネージャーに正規登録するには実行ファイル側の対応が
+必要なため、代わりに**タスクスケジューラ**で同等の常駐運用を実現しています）。
+
+導入方法は2種類用意しています（詳細は [packaging/README.md](packaging/README.md)）。
+
+| 方法 | コマンド | 備考 |
+|------|---------|------|
+| インストールスクリプト（推奨） | `powershell -ExecutionPolicy Bypass -File .\packaging\windows\install.ps1` | 追加ツール不要。ソースから即ビルド＆導入。管理者権限のPowerShellで実行 |
+| `.exe` インストーラー | `iscc packaging\windows\installer.iss` → 生成された `KaguraDB-Setup-*.exe` を実行 | GUIウィザード形式。要 [Inno Setup](https://jrsoftware.org/isinfo.php)。アンインストーラーは自動生成され「プログラムと機能」に登録される |
+
+### 配置内容
+
+| 項目 | パス |
+|------|------|
+| バイナリ | `%ProgramFiles%\KaguraDB\kagura-db.exe` |
+| 常駐方式 | タスクスケジューラ タスク `KaguraDB`（PC起動時に自動実行、異常終了時は自動再起動） |
+| 環境設定ファイル | `%ProgramData%\KaguraDB\config\kagura.env`（`DB_ADDR` / `DB_FILE` / `KAGURA_MASTER_KEY` / `KAGURA_LOG_FILE`） |
+| データディレクトリ | `%ProgramData%\KaguraDB\data` |
+| ログディレクトリ | `%ProgramData%\KaguraDB\logs` |
+
+`KAGURA_MASTER_KEY`（KDB暗号化マスターキー）はインストール時に自動でランダム生成され、
+`kagura.env` に保存されます（既存ファイルがある場合は上書きしません）。
+
+### 運用コマンド
+
+```powershell
+Start-ScheduledTask -TaskName KaguraDB                                    # 起動
+Stop-ScheduledTask -TaskName KaguraDB                                     # 停止
+Stop-ScheduledTask -TaskName KaguraDB; Start-ScheduledTask -TaskName KaguraDB   # 再起動
+Get-ScheduledTask -TaskName KaguraDB | Get-ScheduledTaskInfo              # 状態確認
+Get-Content -Tail 50 -Wait $env:ProgramData\KaguraDB\logs\kagura.log      # アプリログ追跡
+```
+
+### アンインストール
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\packaging\windows\uninstall.ps1          # タスク・バイナリのみ削除（データ/設定は保持）
+powershell -ExecutionPolicy Bypass -File .\packaging\windows\uninstall.ps1 -Purge   # データ・設定・ログも含め完全削除
+```
+
+`.exe` インストーラーで導入した場合は「プログラムと機能」からアンインストール（タスク登録解除のみ。
+データ/設定/ログは既定で保持されるので、完全削除する場合は `uninstall.ps1 -Purge` を利用してください）。
+
+> **要検証**: 本リポジトリのサンドボックス環境は Linux のため、これらのスクリプトの
+> Windows 実機での動作確認ができていません。導入前に検証環境で一度お試しください。
 
 ---
 
@@ -684,6 +736,7 @@ cargo test --workspace
 
 | バージョン | 主な変更内容 |
 |-----------|-------------|
+| **2.5.0** | Windows 向けインストール機能を新規追加。Windows のサービス制御マネージャーへの正規登録には実行ファイル側の対応が必要なため、代わりにタスクスケジューラ（PC起動時に自動実行、異常終了時は自動再起動）で常駐運用する方式を採用。導入方法として (1) 追加ツール不要の `packaging/windows/install.ps1`／`uninstall.ps1`（ソースビルド＋`%ProgramFiles%\KaguraDB`・`%ProgramData%\KaguraDB`への配置＋タスク登録）、(2) [Inno Setup](https://jrsoftware.org/isinfo.php) による `.exe` インストーラー（`packaging/windows/installer.iss`。アンインストーラーは自動生成され「プログラムと機能」に登録される）の2種を用意。`KAGURA_MASTER_KEY` はインストール時にランダム生成し `%ProgramData%\KaguraDB\config\kagura.env` へ保存する運用とし、Linux版と同様の挙動（既存ファイルは上書きしない）とした |
 | **2.4.0** | `examples/python/generate_testdata.py` に `--dump-json PATH`（サーバー接続不要でPOST /records用のJSON配列をファイルへ書き出し）と `--load-json PATH`（ランダム生成せずファイルから読み込んで投入）を追加。インストールし直した後などにランダム再生成せず同じテストデータを再投入できるように、事前生成済みの10,000件JSON配列 `examples/testdata/kagura_testdata_10000.json` を同梱（各要素は `{"columns": {...}, "labels": [...]}` の形式で `POST /records` にそのまま投入可能） |
 | **2.3.0** | Linux 向けインストール機能を新規追加。一般的な Linux パッケージ（nginx・PostgreSQL 等）と同様に、専用の非rootシステムユーザー（`kagura`）で動作する systemd サービスとして導入可能に。`systemctl start/stop/restart/enable` によるプロセス管理、`journalctl` によるログ確認、FHS準拠のディレクトリ配置（`/usr/bin`・`/etc/kagura-db`・`/var/lib/kagura-db`・`/var/log/kagura-db`）に対応。導入方法として (1) 追加ツール不要の `packaging/scripts/install.sh`／`uninstall.sh`、(2) `cargo-deb` による `.deb` パッケージ、(3) `cargo-generate-rpm` による `.rpm` パッケージの3種を用意。`KAGURA_MASTER_KEY`（KDB暗号化マスターキー）はインストール時にランダム生成し `/etc/kagura-db/kagura.env` に600番台権限で保存するようにし、既定の固定キーへのフォールバックに頼らない運用を可能にした |
 | **2.2.0** | SQL `DELETE` 文を新規追加。`DELETE FROM label.xxx [WHERE ...]`（対象ラベルのレコードをデータごと完全に削除。`WHERE`省略時は対象ラベル内の全レコードを一括削除、`label.*`でDB全体を対象化可能）と、`DELETE LABEL FROM label.xxx [WHERE ...]`（レコード自体は削除せず指定ラベルのみを対象レコードから外す）の2構文に対応。`POST /sql` が DELETE 文を受け付けるようになり、レスポンスに削除件数 `deleted_count` を追加 |
