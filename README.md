@@ -7,12 +7,12 @@
 > ・メジャーバージョンが異なると互換性は無くなります。  
 > ・メジャーバージョンが一致し、マイナーバージョンだけが異なる場合問題なく移行ができ互換性を保ちます。
 
-**バージョン: `3.1.0`**
+**バージョン: `3.3.0`**
 
 | 区分 | 説明 |
 |------|------|
 | **A = 3** (メジャー) | 認証機能を新規追加した際の破壊的変更（3.0.0 で導入。既定で全エンドポイント（`/ui` と `POST /auth/login` を除く）がログイン必須） |
-| **B = 1** (マイナー) | ログ出力保管機能に新しいカテゴリ `category: "auth"` を追加。ログインの成功/失敗・ログアウト・パスワード変更・アカウントロックを専用カテゴリで記録するようになり、`GET /logs` と Web UI のログビューで `auth` として絞り込めるようになった（1機能追加。従来 `db` カテゴリに混在していた認証イベントが分離されるのみで、既存の `db` カテゴリのログ内容には影響しない） |
+| **B = 3** (マイナー) | `kdb shell-init bash`/`zsh` と `kdb prompt` を新規追加。シェルの設定ファイル（`~/.bashrc`/`~/.zshrc`）に `eval "$(kdb shell-init bash)"` を1行追加するだけで、`kdb login` 中は既存のシェルプロンプトの先頭に `(kdb:ユーザー名@接続先)` タグが自動表示され、`kdb logout` すると自動的に消えるようになった（1機能追加。既存の REST API・Web UI・認証・`login`/`logout`/`whoami` の挙動には影響しない） |
 | **C = 0** (ビルド) | 今回のビルド更新はなし |
 
 ---
@@ -23,6 +23,7 @@
 - [アーキテクチャ](#アーキテクチャ)
 - [機能一覧](#機能一覧)
 - [認証機能](#認証機能)
+- [kdb コマンドラインクライアント](#kdb-コマンドラインクライアント)
 - [プロジェクト構成](#プロジェクト構成)
 - [クイックスタート](#クイックスタート)
 - [Linux へのインストール（systemd連携）](#linux-へのインストールsystemd連携)
@@ -164,6 +165,16 @@ KAGURA DB は Rust で一から実装したデータベースエンジンです�
 - ✅ Python `ctypes` ラッパークラス（`DbEngine`）
 - ✅ JSON 文字列による全データ型対応
 
+### kdb_cli（コマンドラインクライアント）
+- ✅ KAGURA DB インストール後に使える専用コマンド `kdb`（詳細は [kdb コマンドラインクライアント](#kdb-コマンドラインクライアント) を参照）
+- ✅ `kdb login -u <ユーザー名> -p <パスワード> -a <接続先>` によるログイン。`-p` 省略時は非表示入力で対話的にプロンプト
+- ✅ `-u` / `-p` / `-a` は環境変数 `KDB_USER` / `KDB_PASSWORD` / `KDB_ADDR` でも指定可能
+- ✅ 接続先はスキーム省略（`host:port`）・`http://`・`https://` のいずれの形式でも指定可能
+- ✅ ログイン成功時にセッション（トークン・ユーザー名・接続先）を `~/.config/kdb/session.json`（パーミッション600）へ保存し、`kdb logout` / `kdb whoami` から利用
+- ✅ `kdb logout` でサーバー側のトークン失効とローカルセッションの削除
+- ✅ `kdb whoami` で現在のログインユーザー・接続先・セッションの有効性を確認
+- ✅ `-k` / `--insecure` で自己署名証明書など TLS 証明書検証のスキップに対応
+
 ---
 
 ## 認証機能
@@ -213,6 +224,117 @@ Web UI（`/ui`）はトークンを持たない状態でアクセスするとロ
 
 ---
 
+## kdb コマンドラインクライアント
+
+KAGURA DB インストール後に使える専用の Linux コマンド `kdb`（クレート: `kdb_cli`）。
+`curl` で毎回 `Authorization: Bearer <token>` ヘッダーを組み立てなくても、一般的な DB クライアント
+（`mysql` / `psql` / `redis-cli` 等）と同様の感覚でログイン・セッション管理ができる。
+
+### 入手方法
+
+[Linux へのインストール](#linux-へのインストールsystemd連携)（`install.sh` / `.deb` / `.rpm` の
+いずれか）を行うと、`db_client` 本体とあわせて `/usr/bin/kdb` に自動配置され、そのまま
+`kdb login ...` を実行できる（`sudo ./packaging/scripts/install.sh` の完了メッセージにコマンド例が出力される）。
+
+ソースからビルドしただけ（`cargo build` のみ）の場合は `/usr/bin` 等の `PATH` に配置されて
+いないため `kdb: command not found` になる。以下のいずれかで実行する。
+
+```bash
+# (a) target/release から直接実行する
+cargo build --release -p kdb_cli
+./target/release/kdb login -u kagura -p root -a localhost:3000
+
+# (b) ~/.cargo/bin にインストールする（通常rustupの設定で$PATHに含まれる）
+cargo install --path kdb_cli
+kdb login -u kagura -p root -a localhost:3000
+```
+
+### サブコマンド
+
+| コマンド | 内容 |
+|---------|------|
+| `kdb login -u <ユーザー名> -p <パスワード> -a <接続先>` | `POST /auth/login` でログインし、成功したらセッションを保存する |
+| `kdb logout` | `POST /auth/logout` でサーバー側のトークンを失効させ、ローカルのセッションファイルを削除する |
+| `kdb whoami` | 保存済みセッションのユーザー名・接続先を表示し、`GET /db/info` でトークンがまだ有効か確認する |
+| `kdb shell-init bash` \| `zsh` | シェルプロンプトにログイン状態を表示する連携スクリプトを出力する（詳細は下記「シェルプロンプトへのログイン状態表示」参照） |
+| `kdb prompt` | 現在のログイン状態を短いタグ文字列として出力する。`shell-init` が生成するプロンプトフックが毎回のプロンプト描画時に内部的に呼び出すためのもので、通常は直接使わない |
+
+### login オプション
+
+| オプション | 環境変数 | 内容 |
+|-----------|---------|------|
+| `-u`, `--user <ユーザー名>` | `KDB_USER` | ログインユーザー名（必須） |
+| `-p`, `--password <パスワード>` | `KDB_PASSWORD` | パスワード。**省略した場合は非表示入力（エコーバックなし）で対話的にプロンプトする**（シェル履歴・`ps`コマンドへの平文パスワード漏えいを避けるため） |
+| `-a`, `--address <接続先>` | `KDB_ADDR` | 接続先（必須）。`127.0.0.1:3000` のようにスキームを省略した場合は `http://` を補完する。`https://host` も指定可能 |
+| `-k`, `--insecure` | - | TLS証明書の検証をスキップする（自己署名証明書向け。信頼できる接続先のみで使用すること） |
+
+### 使用例
+
+```bash
+# パスワードを対話的に入力してログイン（推奨）
+kdb login -u kagura -a 127.0.0.1:3000
+Password: ********
+# -> ログインしました: user='kagura' server='http://127.0.0.1:3000'
+# -> 接続先: KAGURA DB Engine v3.3.0 (storage: kdb)
+
+# 環境変数からも指定可能（CI等での非対話実行向け）
+KDB_USER=kagura KDB_PASSWORD=your-password KDB_ADDR=127.0.0.1:3000 kdb login
+
+# 現在のログイン状態を確認
+kdb whoami
+
+# ログアウト（ローカルセッションを削除し、サーバー側トークンも失効させる）
+kdb logout
+```
+
+セッションは `~/.config/kdb/session.json`（トークンを含むためパーミッション600）に保存される。
+現バージョンでは `login` / `logout` / `whoami` / `shell-init` / `prompt` のみを提供し、SQL実行など
+他のサブコマンドは今後追加予定。
+
+### シェルプロンプトへのログイン状態表示
+
+`kdb login` はあくまで別プロセス（子プロセス）としてサーバーへログインするだけなので、
+それ自体はターミナルのシェルプロンプト（`PS1`）を書き換えられない。そこで `kdb` は
+`kdb shell-init bash`（`zsh` も同様）で、シェル側にプロンプトフックを仕込むための
+連携スクリプトを出力する。
+
+シェルの設定ファイルに1行追加するだけで、以後すべての新しいターミナルで自動的に
+現在のログイン状態がプロンプトへ反映される（`kube-ps1` 等と同様の、既存プロンプトへの
+タグ付加方式）。
+
+```bash
+# ~/.bashrc （bashの場合）
+eval "$(kdb shell-init bash)"
+
+# ~/.zshrc （zshの場合）
+eval "$(kdb shell-init zsh)"
+```
+
+設定後、ターミナルを開き直すか `source ~/.bashrc`（zshなら `source ~/.zshrc`）すると、
+ログイン中は既存のプロンプトの先頭にタグが付加される。
+
+```
+$ kdb login -u kagura -p root -a localhost:3000
+ログインしました: user='kagura' server='http://localhost:3000'
+(kdb:kagura@localhost:3000) [ec2-user@ip-10-0-0-5 scripts]$ kdb logout
+ログアウトしました: user='kagura' server='http://localhost:3000'
+[ec2-user@ip-10-0-0-5 scripts]$
+```
+
+仕組みは、プロンプト文字列（`PS1`/`PROMPT`）に `$(__kdb_ps1)` というコマンド置換を
+埋め込んでおき、プロンプトが描画されるたびに `kdb prompt`（＝ローカルのセッションファイルの
+有無を見るだけの軽量チェック）が呼ばれてタグの表示/非表示が切り替わる、というもの。
+`shell-init` の出力は既に同じフックが仕込まれている場合は再度追加しない（`.bashrc` を
+何度 `source` しても、または `install.sh`/deb/rpm で再インストールしても多重化しない）。
+
+> **注意**: このタグはローカルのセッションファイルの有無のみで判定しており、サーバーへの
+> 通信は行わない（毎回のプロンプト描画でサーバーに問い合わせるのは実用的でないため）。
+> そのため、トークンの期限切れ（発行から24時間）やサーバー側での失効後も、`kdb logout`を
+> 実行するかセッションファイルが削除されるまではタグが表示され続ける。正確なログイン有効性は
+> `kdb whoami` で確認すること。
+
+---
+
 ## プロジェクト構成
 
 ```
@@ -254,6 +376,11 @@ pudb-project/
 │   └── src/lib.rs + tests.rs           # ユニットテスト（24件）
 ├── db_ffi/                             # C FFI バインディング (v1.6.0)
 │   └── src/lib.rs                      # FFI 関数（13本）＋テスト（10件）
+├── kdb_cli/                             # コマンドラインクライアント (v3.3.0, バイナリ名: kdb)
+│   └── src/
+│       ├── main.rs                      # CLI定義（login/logout/whoami）とエントリーポイント
+│       ├── client.rs                    # REST API クライアント（/auth/login /auth/logout /db/info）
+│       └── session.rs                   # セッション永続化（~/.config/kdb/session.json）
 └── examples/python/
     ├── db_engine.py                    # Python ctypes ラッパー
     ├── demo.py                         # デモスクリプト
@@ -347,6 +474,7 @@ open http://localhost:3000/ui
 | 項目 | パス |
 |------|------|
 | バイナリ | `/usr/bin/kagura-db` |
+| CLIクライアント | `/usr/bin/kdb`（`kdb login` 等。3種類の導入方法すべてで自動配置される。詳細は [kdb コマンドラインクライアント](#kdb-コマンドラインクライアント) を参照） |
 | systemdユニット | `kagura-db.service` |
 | 環境設定ファイル | `/etc/kagura-db/kagura.env`（`DB_ADDR` / `DB_FILE` / `KAGURA_MASTER_KEY` / `KAGURA_LOG_FILE` / `KAGURA_AUTH_FILE`） |
 | データディレクトリ | `/var/lib/kagura-db` |
@@ -358,8 +486,11 @@ open http://localhost:3000/ui
 
 管理者ログイン用の認証情報（`KAGURA_AUTH_FILE`、既定 `/var/lib/kagura-db/auth.json`）は
 初回起動時にサーバー自身が自動作成します（username=`kagura` / 初期パスワード=`root`）。
-起動後は必ず `PUT /auth/password` またはWeb UIの設定画面からパスワードを変更してください
-（詳細は [認証機能](#認証機能) を参照）。
+起動後は必ず `kdb login` の後 `curl -X PUT .../auth/password` またはWeb UIの設定画面から
+パスワードを変更してください（詳細は [認証機能](#認証機能) を参照）。
+
+インストール後は `kdb login -u kagura -p root -a localhost:3000` でログインを確認できます
+（`sudo ./packaging/scripts/install.sh` は完了メッセージにもこのコマンド例を表示します）。
 
 ### 運用コマンド
 
@@ -825,6 +956,9 @@ cargo test --workspace
 
 | バージョン | 主な変更内容 |
 |-----------|-------------|
+| **3.3.0** | `kdb shell-init bash`/`zsh`（シェル連携スクリプト出力）と `kdb prompt`（ログイン状態タグ出力。`shell-init`が内部的に利用）を新規追加。ログインしたことがOSのシェルプロンプト上からは分からず、`kdb login` を打ったあとも `[ec2-user@ip-10-0-0-5 scripts]$` のまま変化しないのが分かりにくいという指摘を受けて対応。`kdb login` 自体は子プロセスのため親シェルの `PS1`/`PROMPT` を直接書き換えることはできないので、`kube-ps1` 等と同様に「シェル設定ファイルに1行追加 → プロンプト描画のたびに `$(__kdb_ps1)` が `kdb prompt` を呼び出し、ローカルのセッションファイル（`~/.config/kdb/session.json`）の有無に応じてタグの表示/非表示を切り替える」方式を採用。ホスト名・カレントディレクトリ等の既存プロンプト情報は保持したまま、先頭に `(kdb:ユーザー名@接続先) ` タグを付加する。サーバーへの通信は行わずローカルのセッションファイルの有無のみで判定するため、トークンの期限切れ・サーバー側失効は反映されない（正確な有効性確認は `kdb whoami` を使う） |
+| **3.2.1** | `kdb` バイナリのパッケージング不備を修正。`packaging/scripts/install.sh` を `cargo build --release -p db_client -p kdb_cli` でビルドし `/usr/bin/kdb` にも配置するよう変更（`uninstall.sh` も対応して削除）。`db_client/Cargo.toml` の `[package.metadata.deb]` / `[package.metadata.generate-rpm]` の `assets` に `target/release/kdb` → `/usr/bin/kdb` を追加し、`.deb`/`.rpm` パッケージにも同梱されるようにした。3.2.0時点ではworkspaceにクレートを追加しただけでいずれのインストール手順にも組み込んでおらず、`cargo build -p kdb_cli` を手動実行しない限り `kdb` コマンドが `PATH` 上に存在せず `command not found` になっていたため |
+| **3.2.0** | KAGURA DB インストール後に使える専用コマンドラインクライアント `kdb`（新規クレート `kdb_cli`、バイナリ名 `kdb`。workspace members に追加）を新規追加。`kdb login -u <ユーザー名> -p <パスワード> -a <接続先>` で `POST /auth/login` を叩き、成功したらセッション（トークン・ユーザー名・接続先）を `~/.config/kdb/session.json`（パーミッション600）へ保存する。`-u` / `-p` / `-a` は `KDB_USER` / `KDB_PASSWORD` / `KDB_ADDR` 環境変数でも指定可能。`-p` を省略した場合は `rpassword` クレートによる非表示入力（シェル履歴・`ps`への平文パスワード漏えい回避）で対話的にプロンプトする一般的なDBクライアント（mysql/psql等）の慣習に合わせた。`-a` はスキーム省略時（`host:port`）に `http://` を自動補完し、`https://` も指定可能（`-k`/`--insecure` で自己署名証明書向けにTLS証明書検証をスキップ可能）。`kdb logout`（`POST /auth/logout` でサーバー側トークンを失効させローカルセッションを削除）、`kdb whoami`（保存済みセッションのユーザー名・接続先表示と `GET /db/info` によるトークン有効性確認）を追加。既存の REST API・Web UI・認証の挙動には影響しない |
 | **3.1.0** | ログ出力保管機能に認証専用の `category: "auth"` を追加。従来ログイン成功/失敗・ログアウト・パスワード変更は `category: "db"` のログに `auth: ...` という接頭辞付きメッセージとして混在させて記録していたが、他のサブシステム（`sql` `http` `hardware`）と同様に独立したカテゴリへ分離し、`GET /logs` の絞り込みや Web UI ログビューのカテゴリセレクトから `auth` を選んで認証イベントだけを追えるようにした。`Logger` に `auth_info` / `auth_warn` を追加し、`auth_handlers.rs` のログイン・ログアウト・パスワード変更ハンドラーをこれらへ切り替え |
 | **3.0.0** | **【破壊的変更】** 認証機能を新規追加。管理者（マスター）ユーザー `kagura`（初期パスワード `root`）による Bearer トークン認証を実装し、`/ui`（Web UI のHTMLシェル）と `POST /auth/login` を除く全エンドポイント（`/db/info` `/sql` `/settings` `/logs` `/records` `/labels` 系すべて）が既定でログイン必須になった。認証情報（ユーザー名・Argon2idハッシュ化されたパスワード）は環境変数 `KAGURA_AUTH_FILE`（既定 `auth.json`）に永続化し、ファイルが存在しない初回起動時のみ初期管理者を自動作成する。追加した認証 API は `POST /auth/login`（ログイン・トークン発行）、`POST /auth/logout`（トークン失効）、`PUT /auth/password`（パスワード変更。成功すると全セッションを失効させ再ログインを必須化）の3本。セッショントークンはメモリ上でのみ管理し有効期限は24時間、同一ユーザー名で5回連続ログイン失敗すると15分間ロックする（`423 Locked`）。Web UI にログイン画面・ログアウトボタン・パスワード変更フォームを追加。影響範囲: (1) 認証を追加する前提で書かれていない既存クライアント（curlスクリプト・`examples/python/generate_testdata.py` 等）は事前ログインが必要になる（`generate_testdata.py` は自動でログインするよう追随済み）。(2) 全クレートの `Cargo.toml` バージョンをこのREADMEと同期させた |
 | **2.5.1** | Web UI「Records」画面の不具合修正。`SELECT * FROM label.*` で取得した全レコードを1つのHTML文字列に連結してから描画していたため、数万〜10万件規模のデータでは連結後の文字列がJavaScriptの文字列長上限を超え `RangeError: Invalid string length` が発生していた。この例外が `loadAll()` の汎用catchに捕捉され、実際はサーバーへの通信自体は成功しているにもかかわらず「Connection failed」と誤表示される（サーバーダウンしたかのように見える）事象があったため、Records一覧の描画件数に上限（1,000件）を設け、超過時は超過件数と絞り込み方法を通知する行を表示するよう変更。あわせて `loadAll()` の catch 側も、原因を問わず固定文言を出すのをやめ、実際のエラーメッセージを表示するように修正。また、2.4.0以降 `db_client`／`db_engine`／`db_ffi`／`dynamic_label_management`／`sql_engine` の `Cargo.toml` の `version` が `2.4.0` のまま更新されておらず、DB Info画面が参照する `CARGO_PKG_VERSION` がREADME上のバージョン表記（2.5.0）と食い違っていた（再ビルドしてもDB Infoの表示が古いまま変わらない不具合）ため、全クレートのバージョンをREADMEと同期させた |

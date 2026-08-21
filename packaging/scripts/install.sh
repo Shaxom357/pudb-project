@@ -15,6 +15,7 @@
 set -euo pipefail
 
 BIN_NAME="kagura-db"
+CLI_BIN_NAME="kdb"
 SERVICE_NAME="kagura-db.service"
 SERVICE_USER="kagura"
 SERVICE_GROUP="kagura"
@@ -58,12 +59,18 @@ if ! sudo -u "$BUILD_USER" -H bash -lc 'command -v cargo' >/dev/null 2>&1; then
 fi
 
 # ---- 1. リリースビルド ----
-log "リリースビルド中... (cargo build --release -p db_client, 実行ユーザー: $BUILD_USER)"
-sudo -u "$BUILD_USER" -H bash -lc "cd '$REPO_ROOT' && cargo build --release -p db_client"
+log "リリースビルド中... (cargo build --release -p db_client -p kdb_cli, 実行ユーザー: $BUILD_USER)"
+sudo -u "$BUILD_USER" -H bash -lc "cd '$REPO_ROOT' && cargo build --release -p db_client -p kdb_cli"
 
 BUILT_BIN="$REPO_ROOT/target/release/db_client"
 if [[ ! -x "$BUILT_BIN" ]]; then
     echo "[ERROR] ビルド成果物が見つかりません: $BUILT_BIN" >&2
+    exit 1
+fi
+
+BUILT_CLI_BIN="$REPO_ROOT/target/release/kdb"
+if [[ ! -x "$BUILT_CLI_BIN" ]]; then
+    echo "[ERROR] ビルド成果物が見つかりません: $BUILT_CLI_BIN" >&2
     exit 1
 fi
 
@@ -93,6 +100,9 @@ install -d -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 750 "$LOG_DIR"
 # ---- 4. バイナリ配置 ----
 log "バイナリを配置します: $INSTALL_BIN_DIR/$BIN_NAME"
 install -o root -g root -m 755 "$BUILT_BIN" "$INSTALL_BIN_DIR/$BIN_NAME"
+
+log "CLIクライアントを配置します: $INSTALL_BIN_DIR/$CLI_BIN_NAME"
+install -o root -g root -m 755 "$BUILT_CLI_BIN" "$INSTALL_BIN_DIR/$CLI_BIN_NAME"
 
 # ---- 5. 環境設定ファイル (初回のみ生成、マスターキーをランダム生成) ----
 ENV_FILE="$CONF_DIR/kagura.env"
@@ -147,5 +157,8 @@ cat <<EOF
   アプリログ    : $LOG_DIR/kagura.log
   設定ファイル  : $ENV_FILE
   データファイル: $DATA_DIR/db_data.kdb
+
+  CLIログイン   : kdb login -u kagura -p root -a localhost:3000
+                  （初期パスワード。ログイン後は至急変更してください）
 
 EOF

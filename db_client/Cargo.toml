@@ -1,6 +1,6 @@
 [package]
 name = "db_client"
-version = "3.1.0"
+version = "3.3.0"
 edition = "2024"
 
 [dependencies]
@@ -17,7 +17,8 @@ argon2 = "0.5"
 rand_core = { version = "0.6", features = ["getrandom"] }
 
 # ---- Linuxパッケージング (packaging/README.md 参照) ----
-# `cargo install cargo-deb` の上で `cargo deb -p db_client --no-build` を実行して生成する。
+# `cargo install cargo-deb` の上で、先に `cargo build --release -p db_client -p kdb_cli`
+# （kdb CLIクライアントも同梱するため）を実行してから `cargo deb -p db_client --no-build` を実行して生成する。
 [package.metadata.deb]
 name = "kagura-db"
 maintainer = "Shaxom357 <ghostxxtask_force141xx@yahoo.co.jp>"
@@ -33,18 +34,21 @@ priority = "optional"
 maintainer-scripts = "../packaging/debian"
 assets = [
     ["target/release/db_client", "usr/bin/kagura-db", "755"],
+    ["target/release/kdb", "usr/bin/kdb", "755"],
     ["../packaging/systemd/kagura-db.service", "lib/systemd/system/kagura-db.service", "644"],
     ["../packaging/env/kagura.env.example", "etc/kagura-db/kagura.env.example", "640"],
 ]
 conf-files = ["/etc/kagura-db/kagura.env.example"]
 
 # `cargo install cargo-generate-rpm` の上で
-# `cargo build --release -p db_client` 後に `cargo generate-rpm -p db_client` を実行して生成する。
+# `cargo build --release -p db_client -p kdb_cli`（kdb CLIクライアントも同梱するため）後に
+# `cargo generate-rpm -p db_client` を実行して生成する。
 [package.metadata.generate-rpm]
 name = "kagura-db"
 license = "Proprietary"
 assets = [
     { source = "target/release/db_client", dest = "/usr/bin/kagura-db", mode = "755" },
+    { source = "target/release/kdb", dest = "/usr/bin/kdb", mode = "755" },
     { source = "../packaging/systemd/kagura-db.service", dest = "/usr/lib/systemd/system/kagura-db.service", mode = "644" },
     { source = "../packaging/env/kagura.env.example", dest = "/etc/kagura-db/kagura.env.example", mode = "640", config = true },
 ]

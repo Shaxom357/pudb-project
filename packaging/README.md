@@ -39,9 +39,9 @@ sudo ./packaging/scripts/uninstall.sh [--purge]
 
 ```bash
 cargo install cargo-deb
-cargo build --release -p db_client
+cargo build --release -p db_client -p kdb_cli
 cargo deb -p db_client --no-build
-# 生成物: target/debian/kagura-db_<version>_<arch>.deb
+# 生成物: target/debian/kagura-db_<version>_<arch>.deb（db_client 本体 + kdb CLIクライアントを同梱）
 sudo dpkg -i target/debian/kagura-db_*.deb
 ```
 
@@ -61,9 +61,9 @@ sudo dpkg -i target/debian/kagura-db_*.deb
 
 ```bash
 cargo install cargo-generate-rpm
-cargo build --release -p db_client
+cargo build --release -p db_client -p kdb_cli
 cargo generate-rpm -p db_client
-# 生成物: target/generate-rpm/kagura-db-<version>-1.<arch>.rpm
+# 生成物: target/generate-rpm/kagura-db-<version>-1.<arch>.rpm（db_client 本体 + kdb CLIクライアントを同梱）
 sudo rpm -i target/generate-rpm/kagura-db-*.rpm
 ```
 
@@ -76,6 +76,7 @@ sudo rpm -i target/generate-rpm/kagura-db-*.rpm
 | 項目 | 値 |
 |------|-----|
 | バイナリ | `/usr/bin/kagura-db` |
+| CLIクライアント | `/usr/bin/kdb`（`kdb login` 等。詳細はルートREADMEの「kdb コマンドラインクライアント」参照） |
 | systemdユニット | `kagura-db.service` |
 | 実行ユーザー/グループ | `kagura` / `kagura`（システムアカウント） |
 | 設定ファイル | `/etc/kagura-db/kagura.env`（`root:kagura`, 640） |

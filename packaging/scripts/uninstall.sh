@@ -8,6 +8,7 @@
 set -euo pipefail
 
 BIN_NAME="kagura-db"
+CLI_BIN_NAME="kdb"
 SERVICE_NAME="kagura-db.service"
 SERVICE_USER="kagura"
 SERVICE_GROUP="kagura"
@@ -48,6 +49,11 @@ fi
 if [[ -f "$INSTALL_BIN_DIR/$BIN_NAME" ]]; then
     log "バイナリを削除します: $INSTALL_BIN_DIR/$BIN_NAME"
     rm -f "$INSTALL_BIN_DIR/$BIN_NAME"
+fi
+
+if [[ -f "$INSTALL_BIN_DIR/$CLI_BIN_NAME" ]]; then
+    log "CLIクライアントを削除します: $INSTALL_BIN_DIR/$CLI_BIN_NAME"
+    rm -f "$INSTALL_BIN_DIR/$CLI_BIN_NAME"
 fi
 
 if [[ "$PURGE" -eq 0 ]]; then
