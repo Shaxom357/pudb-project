@@ -55,11 +55,11 @@ pub async fn login(
     let mut inner = state.write().await;
     match inner.auth.login(&payload.username, &payload.password) {
         Ok(token) => {
-            inner.logger.db_info(format!("auth: login success user='{}'", payload.username));
+            inner.logger.auth_info(format!("login success user='{}'", payload.username));
             (StatusCode::OK, Json(LoginResponse { token, username: payload.username })).into_response()
         }
         Err(e) => {
-            inner.logger.db_warn(format!("auth: login failed user='{}': {}", payload.username, e));
+            inner.logger.auth_warn(format!("login failed user='{}': {}", payload.username, e));
             auth_error_response(e)
         }
     }
@@ -72,7 +72,7 @@ pub async fn logout(State(state): State<AppState>, req: Request) -> impl IntoRes
     if let Some(token) = token {
         inner.auth.logout(&token);
     }
-    inner.logger.db_info("auth: logout");
+    inner.logger.auth_info("logout");
     StatusCode::NO_CONTENT
 }
 
@@ -86,11 +86,11 @@ pub async fn change_password(
     let mut inner = state.write().await;
     match inner.auth.change_password(&payload.current_password, &payload.new_password) {
         Ok(()) => {
-            inner.logger.db_info("auth: password changed");
+            inner.logger.auth_info("password changed");
             StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => {
-            inner.logger.db_warn(format!("auth: password change failed: {}", e));
+            inner.logger.auth_warn(format!("password change failed: {}", e));
             auth_error_response(e)
         }
     }

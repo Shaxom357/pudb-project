@@ -7,12 +7,12 @@
 > ・メジャーバージョンが異なると互換性は無くなります。  
 > ・メジャーバージョンが一致し、マイナーバージョンだけが異なる場合問題なく移行ができ互換性を保ちます。
 
-**バージョン: `3.0.0`**
+**バージョン: `3.1.0`**
 
 | 区分 | 説明 |
 |------|------|
-| **A = 3** (メジャー) | **認証機能を新規追加**。既定で全エンドポイント（`/ui` と `POST /auth/login` を除く）がログイン必須になる破壊的変更。管理者ユーザー（`kagura` / 初期パスワード `root`）でログインし取得した Bearer トークンを `Authorization` ヘッダーに付与しないと `401 Unauthorized` になるため、既存クライアント（curl スクリプト・`generate_testdata.py` 等）はログイン処理の追加が必要 |
-| **B = 0** (マイナー) | 今回のマイナー更新はなし |
+| **A = 3** (メジャー) | 認証機能を新規追加した際の破壊的変更（3.0.0 で導入。既定で全エンドポイント（`/ui` と `POST /auth/login` を除く）がログイン必須） |
+| **B = 1** (マイナー) | ログ出力保管機能に新しいカテゴリ `category: "auth"` を追加。ログインの成功/失敗・ログアウト・パスワード変更・アカウントロックを専用カテゴリで記録するようになり、`GET /logs` と Web UI のログビューで `auth` として絞り込めるようになった（1機能追加。従来 `db` カテゴリに混在していた認証イベントが分離されるのみで、既存の `db` カテゴリのログ内容には影響しない） |
 | **C = 0** (ビルド) | 今回のビルド更新はなし |
 
 ---
@@ -629,6 +629,7 @@ KAGURA DB の稼働ログを JSON Lines（1行1JSONオブジェクト）形式�
 | SQLクエリ実行 | `category: "sql"` で成功/失敗（`success`）・実行時間（`duration_ms`）・エラー内容を記録 |
 | HTTPリクエスト | `category: "http"` で全リクエストのメソッド・パス・ステータスコード・応答時間（`duration_ms`）を記録 |
 | DB操作 | `category: "db"` でレコード/ラベルの作成・更新・削除、KDB/JSON保存の成功・失敗を記録 |
+| 認証 | `category: "auth"` でログインの成功/失敗（`success`）・ログアウト・パスワード変更・アカウントロックを記録（失敗時はユーザー名と理由をメッセージに含む） |
 | HW/ストレージ異常 | `category: "hardware"` でディスクI/Oエラー（`EIO` `ENOSPC` `EROFS` `ENODEV` 等）を検知した際に記録 |
 
 各エントリは共通で `timestamp`（RFC3339）・`level`（`info`/`warn`/`error`）・`category`・`message` を持つ。
@@ -690,7 +691,7 @@ Web UI の「📜 ログ」ビューからも、カテゴリで絞り込みな�
 ```json
 {
   "engine_name":    "KAGURA DB Engine",
-  "app_version":    "3.0.0",
+  "app_version":    "3.1.0",
   "storage_mode":   "kdb",
   "storage_format": "KDB Binary (WAL + XChaCha20-Poly1305 encrypted)",
   "encrypted":      true,
@@ -716,7 +717,7 @@ Web UI の「📜 ログ」ビューからも、カテゴリで絞り込みな�
 | **ℹ️ DB Info** | バージョン・ストレージモード・暗号化状態・統計カード・カラム一覧 |
 | **🔍 SQL Query** | SQL SELECT / INSERT / UPDATE / DELETE 実行・テーブル形式結果表示・ Ctrl+Enter 対応 |
 | **⚙️ 設定** | HTTPリクエスト（`/records` `/labels` 系 REST API）受付のオンオフを切替（既定は無効）。管理者パスワードの変更フォームもここにある |
-| **📜 ログ** | 保管されたログ（起動/停止・SQL・HTTP・DB操作・HW異常）をカテゴリで絞り込みながら一覧表示・自動更新（10秒） |
+| **📜 ログ** | 保管されたログ（起動/停止・SQL・HTTP・DB操作・認証・HW異常）をカテゴリで絞り込みながら一覧表示・自動更新（10秒） |
 
 ---
 
@@ -786,10 +787,10 @@ cargo test --workspace
 | `db_engine` | 39 | CRUD・ラベル操作（重複付与エラーを含む）・KDB暗号化・バイナリコーデック |
 | `dynamic_label_management` | 24 | AND/OR 検索・リネーム・差分・ラベル重複付与エラー |
 | `db_ffi` | 10 | FFI 関数・メモリ管理 |
-| `db_client`（ユニットテスト） | 12 | ログ出力保管機能（JSON Lines 書き込み/読み出し・HW起因エラー判定）・認証（ログイン成功/失敗・トークン検証・ログアウト・ロックアウト・パスワード変更） |
-| `db_client`（統合テスト） | 67 | HTTP API・ラベル操作（重複付与エラーを含む）・永続化・SQL SELECT/INSERT/UPDATE/DELETE（ラベル重複エラー・UPDATE LABELのWHERE絞り込み・DELETE/DELETE LABELのWHERE絞り込みを含む）・設定（HTTPリクエスト受付オンオフ）・ログ（`GET /logs`）・認証（未ログイン時の401・ログイン/ログアウト・ロックアウト・パスワード変更後の再ログイン必須化） |
+| `db_client`（ユニットテスト） | 13 | ログ出力保管機能（JSON Lines 書き込み/読み出し・HW起因エラー判定・authカテゴリ記録）・認証（ログイン成功/失敗・トークン検証・ログアウト・ロックアウト・パスワード変更） |
+| `db_client`（統合テスト） | 68 | HTTP API・ラベル操作（重複付与エラーを含む）・永続化・SQL SELECT/INSERT/UPDATE/DELETE（ラベル重複エラー・UPDATE LABELのWHERE絞り込み・DELETE/DELETE LABELのWHERE絞り込みを含む）・設定（HTTPリクエスト受付オンオフ）・ログ（`GET /logs`）・認証（未ログイン時の401・ログイン/ログアウト・ロックアウト・パスワード変更後の再ログイン必須化・ログイン成功/失敗のログ記録） |
 | `sql_engine` | 60 | パーサー・実行エンジン（SELECT・INSERT・UPDATE・DELETE・WHERE・ORDER BY・LIKE・ラベル重複エラー・UPDATE LABEL/DELETE LABELのWHERE絞り込み） |
-| **合計** | **212** | |
+| **合計** | **214** | |
 
 ---
 
@@ -824,6 +825,7 @@ cargo test --workspace
 
 | バージョン | 主な変更内容 |
 |-----------|-------------|
+| **3.1.0** | ログ出力保管機能に認証専用の `category: "auth"` を追加。従来ログイン成功/失敗・ログアウト・パスワード変更は `category: "db"` のログに `auth: ...` という接頭辞付きメッセージとして混在させて記録していたが、他のサブシステム（`sql` `http` `hardware`）と同様に独立したカテゴリへ分離し、`GET /logs` の絞り込みや Web UI ログビューのカテゴリセレクトから `auth` を選んで認証イベントだけを追えるようにした。`Logger` に `auth_info` / `auth_warn` を追加し、`auth_handlers.rs` のログイン・ログアウト・パスワード変更ハンドラーをこれらへ切り替え |
 | **3.0.0** | **【破壊的変更】** 認証機能を新規追加。管理者（マスター）ユーザー `kagura`（初期パスワード `root`）による Bearer トークン認証を実装し、`/ui`（Web UI のHTMLシェル）と `POST /auth/login` を除く全エンドポイント（`/db/info` `/sql` `/settings` `/logs` `/records` `/labels` 系すべて）が既定でログイン必須になった。認証情報（ユーザー名・Argon2idハッシュ化されたパスワード）は環境変数 `KAGURA_AUTH_FILE`（既定 `auth.json`）に永続化し、ファイルが存在しない初回起動時のみ初期管理者を自動作成する。追加した認証 API は `POST /auth/login`（ログイン・トークン発行）、`POST /auth/logout`（トークン失効）、`PUT /auth/password`（パスワード変更。成功すると全セッションを失効させ再ログインを必須化）の3本。セッショントークンはメモリ上でのみ管理し有効期限は24時間、同一ユーザー名で5回連続ログイン失敗すると15分間ロックする（`423 Locked`）。Web UI にログイン画面・ログアウトボタン・パスワード変更フォームを追加。影響範囲: (1) 認証を追加する前提で書かれていない既存クライアント（curlスクリプト・`examples/python/generate_testdata.py` 等）は事前ログインが必要になる（`generate_testdata.py` は自動でログインするよう追随済み）。(2) 全クレートの `Cargo.toml` バージョンをこのREADMEと同期させた |
 | **2.5.1** | Web UI「Records」画面の不具合修正。`SELECT * FROM label.*` で取得した全レコードを1つのHTML文字列に連結してから描画していたため、数万〜10万件規模のデータでは連結後の文字列がJavaScriptの文字列長上限を超え `RangeError: Invalid string length` が発生していた。この例外が `loadAll()` の汎用catchに捕捉され、実際はサーバーへの通信自体は成功しているにもかかわらず「Connection failed」と誤表示される（サーバーダウンしたかのように見える）事象があったため、Records一覧の描画件数に上限（1,000件）を設け、超過時は超過件数と絞り込み方法を通知する行を表示するよう変更。あわせて `loadAll()` の catch 側も、原因を問わず固定文言を出すのをやめ、実際のエラーメッセージを表示するように修正。また、2.4.0以降 `db_client`／`db_engine`／`db_ffi`／`dynamic_label_management`／`sql_engine` の `Cargo.toml` の `version` が `2.4.0` のまま更新されておらず、DB Info画面が参照する `CARGO_PKG_VERSION` がREADME上のバージョン表記（2.5.0）と食い違っていた（再ビルドしてもDB Infoの表示が古いまま変わらない不具合）ため、全クレートのバージョンをREADMEと同期させた |
 | **2.5.0** | Windows 向けインストール機能を新規追加。Windows のサービス制御マネージャーへの正規登録には実行ファイル側の対応が必要なため、代わりにタスクスケジューラ（PC起動時に自動実行、異常終了時は自動再起動）で常駐運用する方式を採用。導入方法として (1) 追加ツール不要の `packaging/windows/install.ps1`／`uninstall.ps1`（ソースビルド＋`%ProgramFiles%\KaguraDB`・`%ProgramData%\KaguraDB`への配置＋タスク登録）、(2) [Inno Setup](https://jrsoftware.org/isinfo.php) による `.exe` インストーラー（`packaging/windows/installer.iss`。アンインストーラーは自動生成され「プログラムと機能」に登録される）の2種を用意。`KAGURA_MASTER_KEY` はインストール時にランダム生成し `%ProgramData%\KaguraDB\config\kagura.env` へ保存する運用とし、Linux版と同様の挙動（既存ファイルは上書きしない）とした |

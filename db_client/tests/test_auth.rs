@@ -199,6 +199,44 @@ async fn test_change_password_rejects_short_new_password() {
 }
 
 #[tokio::test]
+async fn test_login_success_and_failure_are_recorded_in_logs() {
+    let (base, db_path) = spawn_test_server_with_auth().await;
+    let client = reqwest::Client::new();
+
+    // 失敗
+    client
+        .post(format!("{}/auth/login", base))
+        .json(&serde_json::json!({"username": "kagura", "password": "wrong"}))
+        .send()
+        .await
+        .unwrap();
+
+    // 成功
+    let res = client
+        .post(format!("{}/auth/login", base))
+        .json(&serde_json::json!({"username": "kagura", "password": "root"}))
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = res.json().await.unwrap();
+    let token = body["token"].as_str().unwrap().to_string();
+
+    let res = client.get(format!("{}/logs?lines=50", base)).bearer_auth(&token).send().await.unwrap();
+    assert_eq!(res.status(), 200);
+    let logs: serde_json::Value = res.json().await.unwrap();
+    let entries = logs.as_array().unwrap();
+
+    assert!(entries.iter().any(|e|
+        e["category"] == "auth" && e["success"] == true && e["message"].as_str().unwrap().contains("login success")
+    ));
+    assert!(entries.iter().any(|e|
+        e["category"] == "auth" && e["success"] == false && e["message"].as_str().unwrap().contains("login failed")
+    ));
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
 async fn test_data_endpoints_require_token_even_when_http_api_enabled() {
     let (base, db_path) = spawn_test_server_with_auth().await;
     let client = reqwest::Client::new();

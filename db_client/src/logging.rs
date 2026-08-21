@@ -35,6 +35,8 @@ pub enum LogCategory {
     Db,
     /// ディスクI/O等、ハードウェア/ストレージに起因すると見られる異常
     Hardware,
+    /// ログイン/ログアウト・パスワード変更・アカウントロックなどの認証関連イベント
+    Auth,
 }
 
 /// プロセス停止理由。
@@ -197,6 +199,16 @@ impl Logger {
         self.log(LogLevel::Warn, LogCategory::Db, message, None, Some(false), None, None);
     }
 
+    // ---- 認証（ログイン/ログアウト/パスワード変更/ロックアウト） -------------------
+
+    pub fn auth_info(&self, message: impl Into<String>) {
+        self.log(LogLevel::Info, LogCategory::Auth, message, None, Some(true), None, None);
+    }
+
+    pub fn auth_warn(&self, message: impl Into<String>) {
+        self.log(LogLevel::Warn, LogCategory::Auth, message, None, Some(false), None, None);
+    }
+
     /// I/Oエラーを検知した際に呼ぶ。HW起因と判定できる場合は Hardware カテゴリでも記録する。
     pub fn db_io_error(&self, context: &str, e: &std::io::Error) {
         self.db_warn(format!("{}: {}", context, e));
@@ -278,6 +290,24 @@ mod tests {
         assert_eq!(entries[0].stop_reason, Some(StopReason::Normal));
         assert!(entries.iter().any(|e| e.category == LogCategory::Sql && e.success == Some(false)));
         assert!(entries.iter().any(|e| e.category == LogCategory::Http && e.status_code == Some(200)));
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_auth_events_are_logged_with_auth_category() {
+        let path = temp_log_path("auth");
+        let logger = Logger::init(&path);
+        logger.auth_info("login success user='kagura'");
+        logger.auth_warn("login failed user='kagura': invalid credentials");
+
+        let entries = logger.recent(10);
+        assert!(entries.iter().any(|e|
+            e.category == LogCategory::Auth && e.level == LogLevel::Info && e.success == Some(true)
+        ));
+        assert!(entries.iter().any(|e|
+            e.category == LogCategory::Auth && e.level == LogLevel::Warn && e.success == Some(false)
+        ));
 
         let _ = std::fs::remove_file(&path);
     }
