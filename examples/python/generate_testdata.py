@@ -17,7 +17,12 @@ KAGURA DB  10,000件テストデータ自動生成スクリプト
   # 生成済みのJSONファイルを読み込んで投入（ランダム再生成せず、同じデータを再投入したい場合）
   python3 generate_testdata.py --load-json testdata_10000.json --url http://localhost:3000
 
+  # 初期パスワード(root)を変更済みの場合は --username/--password を指定
+  python3 generate_testdata.py --username kagura --password mynewpassword
+
 依存: Python 3.6+ 標準ライブラリのみ（pip不要）
+認証: 実行時にまず POST /auth/login でログインし、取得したトークンを以後の全リクエストに使う
+      （既定は kagura / root。事前に PUT /settings で http_api_enabled を有効化しておくこと）
 """
 
 import argparse
@@ -37,6 +42,11 @@ DEFAULT_COUNT   = 10_000
 DEFAULT_WORKERS = 16
 PROGRESS_STEP   = 200
 RANDOM_SEED     = 42
+DEFAULT_USERNAME = "kagura"
+DEFAULT_PASSWORD = "root"
+
+# ログイン成功後にセットされる認証トークン（全リクエストの Authorization ヘッダーに使う）
+AUTH_TOKEN = None
 
 # ===========================================================================
 # マスターデータ
@@ -281,11 +291,34 @@ def build_record_list(total):
 # HTTP ユーティリティ
 # ===========================================================================
 
+def _auth_headers():
+    return {"Authorization": f"Bearer {AUTH_TOKEN}"} if AUTH_TOKEN else {}
+
+def login(url, username, password, timeout=30):
+    """POST /auth/login でログインし、成功したらグローバルの AUTH_TOKEN にトークンをセットする"""
+    global AUTH_TOKEN
+    data = json.dumps({"username": username, "password": password}).encode("utf-8")
+    req  = urllib.request.Request(
+        f"{url}/auth/login", data=data,
+        headers={"Content-Type": "application/json"}, method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = json.loads(resp.read().decode())
+            AUTH_TOKEN = body["token"]
+            return True
+    except urllib.error.HTTPError as e:
+        print(f"\n  X ログイン失敗: HTTP {e.code}: {e.read().decode()[:200]}")
+        return False
+    except Exception as e:
+        print(f"\n  X ログイン失敗: {e}")
+        return False
+
 def post_record(url, payload, timeout=30):
     data = json.dumps(payload).encode("utf-8")
     req  = urllib.request.Request(
         f"{url}/records", data=data,
-        headers={"Content-Type": "application/json"}, method="POST",
+        headers={"Content-Type": "application/json", **_auth_headers()}, method="POST",
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -296,8 +329,9 @@ def post_record(url, payload, timeout=30):
         return (False, str(e)[:100])
 
 def get_json(url, path):
+    req = urllib.request.Request(f"{url}{path}", headers=_auth_headers())
     try:
-        with urllib.request.urlopen(f"{url}{path}", timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read().decode())
     except Exception:
         return None
@@ -306,7 +340,7 @@ def post_sql(url, query):
     data = json.dumps({"query": query}).encode("utf-8")
     req  = urllib.request.Request(
         f"{url}/sql", data=data,
-        headers={"Content-Type": "application/json"}, method="POST",
+        headers={"Content-Type": "application/json", **_auth_headers()}, method="POST",
     )
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
@@ -389,7 +423,7 @@ def generate(url, total, workers, records=None):
     print("  [1/3] サーバー接続確認...", end=" ", flush=True)
     info = get_json(url, "/db/info")
     if info is None:
-        print(f"\n  X 接続失敗: {url} に到達できません。サーバー起動を確認してください。")
+        print(f"\n  X 接続失敗: {url} に到達できません。サーバー起動・ログインを確認してください。")
         sys.exit(1)
     existing = info.get("record_count", 0)
     print(f"OK  (既存レコード: {existing:,} 件)")
@@ -535,6 +569,8 @@ def parse_args():
         description="KAGURA DB テストデータ自動生成スクリプト",
     )
     p.add_argument("--url",       default=DEFAULT_URL)
+    p.add_argument("--username",  default=DEFAULT_USERNAME, help="ログインユーザー名（既定: kagura）")
+    p.add_argument("--password",  default=DEFAULT_PASSWORD, help="ログインパスワード（既定: root。初期パスワードを変更済みの場合は指定すること）")
     p.add_argument("--count",     type=int, default=DEFAULT_COUNT)
     p.add_argument("--workers",   type=int, default=DEFAULT_WORKERS)
     p.add_argument("--bench-only",action="store_true")
@@ -560,6 +596,11 @@ def main():
         print(f"  -> {args.dump_json} ({len(records):,} 件, POST /records にそのまま投入可能な配列)")
         print(f"  投入例: python3 {sys.argv[0]} --load-json {args.dump_json} --url {DEFAULT_URL}")
         return
+
+    print(f"  ログイン中 ({args.username}@{args.url})...", end=" ", flush=True)
+    if not login(args.url, args.username, args.password):
+        sys.exit(1)
+    print("OK")
 
     if args.bench_only:
         run_benchmark(args.url, repeat=args.repeat)

@@ -1,19 +1,19 @@
 # 🗄️ KAGURA DB
 
 > Rust で一から実装したオリジナルのデータベースエンジン。  
-> 列指向ストレージ・ラベル検索・KDB暗号化バイナリ形式・SQL SELECT/INSERT/UPDATE/DELETE・REST API・Web管理UI を備えたフルスタックな DB システムです。  
+> 列指向ストレージ・ラベル検索・KDB暗号化バイナリ形式・SQL SELECT/INSERT/UPDATE/DELETE・REST API・認証機能・Web管理UI を備えたフルスタックな DB システムです。  
 > バージョンの情報については以下の補足を確認ください。  
 > 補足  
 > ・メジャーバージョンが異なると互換性は無くなります。  
 > ・メジャーバージョンが一致し、マイナーバージョンだけが異なる場合問題なく移行ができ互換性を保ちます。
 
-**バージョン: `2.5.1`**
+**バージョン: `3.0.0`**
 
 | 区分 | 説明 |
 |------|------|
-| **A = 2** (メジャー) | ラベルの重複付与を禁止する破壊的変更。既存レコードへの同一ラベル再付与は従来「冪等（サイレント成功）」だったが、変更せずエラーを返す仕様に変更（`POST /records/{id}/labels` は既存クライアントの再送処理などに影響しうる） |
-| **B = 5** (マイナー) | Windows へのインストール機能を新規追加。PowerShellスクリプト（`install.ps1`/`uninstall.ps1`）と、`.exe`インストーラー+自動生成アンインストーラーを作る Inno Setup スクリプト（`installer.iss`）を同梱（1機能追加） |
-| **C = 1** (ビルド) | Web UI の Records 画面で、数万〜10万件規模のデータを開くと「Connection failed」と誤表示されクラッシュしたように見える不具合を修正 |
+| **A = 3** (メジャー) | **認証機能を新規追加**。既定で全エンドポイント（`/ui` と `POST /auth/login` を除く）がログイン必須になる破壊的変更。管理者ユーザー（`kagura` / 初期パスワード `root`）でログインし取得した Bearer トークンを `Authorization` ヘッダーに付与しないと `401 Unauthorized` になるため、既存クライアント（curl スクリプト・`generate_testdata.py` 等）はログイン処理の追加が必要 |
+| **B = 0** (マイナー) | 今回のマイナー更新はなし |
+| **C = 0** (ビルド) | 今回のビルド更新はなし |
 
 ---
 
@@ -22,6 +22,7 @@
 - [概要](#概要)
 - [アーキテクチャ](#アーキテクチャ)
 - [機能一覧](#機能一覧)
+- [認証機能](#認証機能)
 - [プロジェクト構成](#プロジェクト構成)
 - [クイックスタート](#クイックスタート)
 - [Linux へのインストール（systemd連携）](#linux-へのインストールsystemd連携)
@@ -63,9 +64,10 @@ KAGURA DB は Rust で一から実装したデータベースエンジンです�
 ブラウザ (Web UI)       Python         curl / HTTP クライアント
       |                   |                      |
       +--------+----------+                      |
-               | HTTP                            | HTTP
+               | HTTP (POST /auth/login → Bearer トークンを取得して以後の全リクエストに付与)
     +----------+----------------------------------+----------+
     |              db_client  (axum REST API + Web UI)       |
+    |   auth / auth_handlers (認証・セッション管理)          |
     |   handlers / label_handlers / info_handlers            |
     |   sql_handlers / settings_handlers / app / models / ui |
     +----------------------------+----------------------------+
@@ -114,10 +116,11 @@ KAGURA DB は Rust で一から実装したデータベースエンジンです�
 - ✅ `KAGURA_MASTER_KEY` 環境変数によるカスタムマスターキー設定
 
 ### db_client（REST API サーバー）
-- ✅ 18 本のエンドポイント（レコード CRUD・ラベル管理・DB 情報・SQL・設定・ログ・Web UI）
+- ✅ **認証機能**: 管理者ユーザー（既定 `kagura` / 初期パスワード `root`）による Bearer トークン認証。`/ui`（Web UI の殻）と `POST /auth/login` を除く全エンドポイントがログイン必須（詳細は [認証機能](#認証機能) を参照）
+- ✅ 21 本のエンドポイント（認証・レコード CRUD・ラベル管理・DB 情報・SQL・設定・ログ・Web UI）
 - ✅ KDB モード（`.kdb`）と JSON モードの自動判別・後方互换
 - ✅ 起動時自動ロード・書き込み時自動セーブ
-- ✅ 環境変数による設定（`DB_FILE` / `DB_ADDR` / `KAGURA_MASTER_KEY`）
+- ✅ 環境変数による設定（`DB_FILE` / `DB_ADDR` / `KAGURA_MASTER_KEY` / `KAGURA_AUTH_FILE`）
 - ✅ ブラウザ Web 管理 UI（Records / DB Info / SQL Query / 設定 の 4 ビュー）
 - ✅ `GET /db/info` でバージョン・ストレージ状態・統計を取得
 - ✅ `POST /sql` で SQL SELECT / INSERT / UPDATE / DELETE クエリを実行
@@ -163,6 +166,53 @@ KAGURA DB は Rust で一から実装したデータベースエンジンです�
 
 ---
 
+## 認証機能
+
+KAGURA DB は単一の管理者（マスター）ユーザーによる Bearer トークン認証を備えています。
+`/ui`（Web UI のHTMLシェル。ログイン画面自体を表示するため）と `POST /auth/login` を除く
+**全エンドポイントがログイン必須**です（`GET /db/info` `POST /sql` `GET`/`PUT /settings` `GET /logs`
+`/records` `/labels` 系すべてが対象。既存の HTTPリクエスト受付オンオフ設定 `http_api_enabled` は
+認証の後段でさらに `/records` `/labels` 系のみを絞り込む形で従来通り機能する）。
+
+| 項目 | 内容 |
+|------|------|
+| 管理者ユーザー名 | `kagura`（固定・現バージョンでは複数ユーザー管理は非対応） |
+| 初期パスワード | `root`（初回起動時に認証情報ファイルが無い場合のみ自動作成される。**運用開始前に必ず変更してください**） |
+| 認証方式 | `POST /auth/login` でユーザー名/パスワードを検証し、成功したらセッショントークンを発行。以後のリクエストは `Authorization: Bearer <token>` ヘッダーを付与する |
+| トークンの保存場所 | サーバーのメモリ上のみ（再起動すると全セッションが失効し再ログインが必要） |
+| トークンの有効期限 | 発行から24時間 |
+| パスワードのハッシュ化 | [argon2](https://docs.rs/argon2) クレートによる Argon2id |
+| 認証情報の永続化先 | 環境変数 `KAGURA_AUTH_FILE`（既定: `auth.json`）に `{"username":..., "password_hash":...}` の形式で保存 |
+| ログイン失敗時のロック | 同一ユーザー名で5回連続失敗すると15分間ロック（`423 Locked` を返す）。成功するとカウントはリセットされる |
+| パスワード変更 | `PUT /auth/password`（要ログイン）。現在のパスワードの検証に成功すると新しいパスワードへ更新し、盗まれたトークン対策として既存の全セッション（実行中のリクエスト自身のトークンを含む）を失効させる。新しいパスワードは8文字以上が必要 |
+
+### 認証 API
+
+```bash
+# ログイン（初期状態）
+curl -X POST http://localhost:3000/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username": "kagura", "password": "root"}'
+# -> {"token": "...", "username": "kagura"}
+
+# 以後のリクエストは Authorization ヘッダーにトークンを付与する
+curl http://localhost:3000/db/info -H 'Authorization: Bearer <token>'
+
+# パスワード変更（成功すると渡したトークンを含め全セッションが失効するため、以後は新パスワードで再ログインする）
+curl -X PUT http://localhost:3000/auth/password \
+  -H 'Authorization: Bearer <token>' -H 'Content-Type: application/json' \
+  -d '{"current_password": "root", "new_password": "your-new-strong-password"}'
+
+# ログアウト（渡したトークンのみ失効）
+curl -X POST http://localhost:3000/auth/logout -H 'Authorization: Bearer <token>'
+```
+
+Web UI（`/ui`）はトークンを持たない状態でアクセスするとログイン画面を表示し、ログイン成功後は
+トークンをブラウザの `localStorage` に保存して以後の全リクエストに自動付与する。設定ビューから
+パスワード変更も行える。
+
+---
+
 ## プロジェクト構成
 
 ```
@@ -180,14 +230,17 @@ pudb-project/
 │   ├── src/
 │   │   ├── main.rs                     # エントリーポイント（KDB/JSON 自動判別）
 │   │   ├── app.rs                      # Router 定義
+│   │   ├── auth.rs                     # 認証状態（パスワードハッシュ・セッション・永続化）
+│   │   ├── auth_handlers.rs            # 認証 API ハンドラー（ログイン/ログアウト/パスワード変更）
 │   │   ├── handlers.rs                 # レコード CRUD ハンドラー
 │   │   ├── label_handlers.rs           # ラベル管理ハンドラー
 │   │   ├── info_handlers.rs            # DB 情報 API ハンドラー
 │   │   ├── sql_handlers.rs             # SQL 実行ハンドラー（SELECT / INSERT / UPDATE / DELETE）
 │   │   ├── settings_handlers.rs        # 設定 API ハンドラー（HTTPリクエスト受付オンオフ）
 │   │   ├── models.rs                   # JSON DTO
-│   │   └── ui.html                     # 管理画面（HTML/CSS/JS）
+│   │   └── ui.html                     # 管理画面（HTML/CSS/JS、ログイン画面を含む）
 │   └── tests/
+│       ├── test_auth.rs                # 認証 API テスト（8件）
 │       ├── test_records.rs             # レコード API テスト（12件）
 │       ├── test_labels.rs              # ラベル API テスト（12件）
 │       ├── test_persistence.rs         # 永続化テスト（4件）
@@ -237,28 +290,39 @@ cargo build --release -p db_client && ./target/release/db_client
 ### 動作確認
 
 ```bash
+# まずログインしてトークンを取得する（既定: username=kagura, password=root）
+# /db/info /sql /records /labels /settings /logs はすべてログイン必須（詳細は 認証機能 を参照）
+TOKEN=$(curl -s -X POST http://localhost:3000/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username": "kagura", "password": "root"}' | python3 -c 'import json,sys;print(json.load(sys.stdin)["token"])')
+
 # バージョン・状態確認
-curl http://localhost:3000/db/info
+curl http://localhost:3000/db/info -H "Authorization: Bearer $TOKEN"
 
 # SQL でレコード作成（既定の状態でそのまま使える）
 curl -X POST http://localhost:3000/sql \
-  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d "{\"query\": \"INSERT INTO (label.employee) (name, age) VALUE ('田中', 35)\"}"
 
 # SQL で検索
 curl -X POST http://localhost:3000/sql \
-  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"query": "SELECT * FROM label.employee WHERE age > 30"}'
 
 # HTTPリクエスト(REST API)は既定で無効。大量テストデータ投入などで使う場合は先に有効化する
 curl -X PUT http://localhost:3000/settings \
-  -H 'Content-Type: application/json' -d '{"http_api_enabled": true}'
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"http_api_enabled": true}'
 
 curl -X POST http://localhost:3000/records \
-  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"columns":{"name":{"type":"text","value":"田中"},"age":{"type":"integer","value":35}},"labels":["employee"]}'
 
-# Web UI（Records一覧はSQL経由のため、HTTPリクエストが無効でも閲覧可能）
+# 至急、初期パスワードを変更する（成功すると上で取得した $TOKEN を含む全セッションが失効するので、以後は新パスワードで再ログインする）
+curl -X PUT http://localhost:3000/auth/password \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"current_password": "root", "new_password": "your-new-strong-password"}'
+
+# Web UI（未ログインの場合はログイン画面が表示される。Records一覧はSQL経由のため、HTTPリクエストが無効でも閲覧可能）
 open http://localhost:3000/ui
 ```
 
@@ -284,13 +348,18 @@ open http://localhost:3000/ui
 |------|------|
 | バイナリ | `/usr/bin/kagura-db` |
 | systemdユニット | `kagura-db.service` |
-| 環境設定ファイル | `/etc/kagura-db/kagura.env`（`DB_ADDR` / `DB_FILE` / `KAGURA_MASTER_KEY` / `KAGURA_LOG_FILE`） |
+| 環境設定ファイル | `/etc/kagura-db/kagura.env`（`DB_ADDR` / `DB_FILE` / `KAGURA_MASTER_KEY` / `KAGURA_LOG_FILE` / `KAGURA_AUTH_FILE`） |
 | データディレクトリ | `/var/lib/kagura-db` |
 | ログディレクトリ | `/var/log/kagura-db` |
 | 実行ユーザー | `kagura`（システムアカウント・ログインシェルなし） |
 
 `KAGURA_MASTER_KEY`（KDB暗号化マスターキー）はインストール時に自動でランダム生成され、
 `/etc/kagura-db/kagura.env` に `root:kagura` 640 権限で保存されます（既存ファイルがある場合は上書きしません）。
+
+管理者ログイン用の認証情報（`KAGURA_AUTH_FILE`、既定 `/var/lib/kagura-db/auth.json`）は
+初回起動時にサーバー自身が自動作成します（username=`kagura` / 初期パスワード=`root`）。
+起動後は必ず `PUT /auth/password` またはWeb UIの設定画面からパスワードを変更してください
+（詳細は [認証機能](#認証機能) を参照）。
 
 ### 運用コマンド
 
@@ -332,12 +401,17 @@ Windows では、PC 起動時に自動的に開始され異常終了時は自動
 |------|------|
 | バイナリ | `%ProgramFiles%\KaguraDB\kagura-db.exe` |
 | 常駐方式 | タスクスケジューラ タスク `KaguraDB`（PC起動時に自動実行、異常終了時は自動再起動） |
-| 環境設定ファイル | `%ProgramData%\KaguraDB\config\kagura.env`（`DB_ADDR` / `DB_FILE` / `KAGURA_MASTER_KEY` / `KAGURA_LOG_FILE`） |
+| 環境設定ファイル | `%ProgramData%\KaguraDB\config\kagura.env`（`DB_ADDR` / `DB_FILE` / `KAGURA_MASTER_KEY` / `KAGURA_LOG_FILE` / `KAGURA_AUTH_FILE`） |
 | データディレクトリ | `%ProgramData%\KaguraDB\data` |
 | ログディレクトリ | `%ProgramData%\KaguraDB\logs` |
 
 `KAGURA_MASTER_KEY`（KDB暗号化マスターキー）はインストール時に自動でランダム生成され、
 `kagura.env` に保存されます（既存ファイルがある場合は上書きしません）。
+
+管理者ログイン用の認証情報（`KAGURA_AUTH_FILE`、既定 `%ProgramData%\KaguraDB\data\auth.json`）は
+初回起動時にサーバー自身が自動作成します（username=`kagura` / 初期パスワード=`root`）。
+起動後は必ず `PUT /auth/password` またはWeb UIの設定画面からパスワードを変更してください
+（詳細は [認証機能](#認証機能) を参照）。
 
 ### 運用コマンド
 
@@ -581,36 +655,42 @@ Web UI の「📜 ログ」ビューからも、カテゴリで絞り込みな�
 
 ### エンドポイント一覧
 
-HTTPリクエスト欄が「要HTTP API」の行は、既定では無効な `/records` `/labels` 系 REST API に属し、
+「要ログイン」列が ✅ の行は `Authorization: Bearer <token>` が無い/無効だと `401 Unauthorized` を返す
+（トークンは `POST /auth/login` で取得。詳細は [認証機能](#認証機能) を参照）。
+「要HTTP API」列が ✅ の行は、既定では無効な `/records` `/labels` 系 REST API に属し、
 `PUT /settings` で `http_api_enabled: true` にするまで `403 Forbidden` を返す（詳細は [設定](#web-管理ui) を参照）。
+ログイン必須とHTTP API有効化は独立したチェックで、両方が ✅ の行は両方を満たす必要がある。
 
-| メソッド | パス | 説明 | 要HTTP API |
-|---------|------|------|:---:|
-| `GET`    | `/ui` | Web 管理 UI | - |
-| `GET`    | `/records` | 全レコード取得 | ✅ |
-| `POST`   | `/records` | レコード作成 | ✅ |
-| `GET`    | `/records/{id}` | ID で取得 | ✅ |
-| `PUT`    | `/records/{id}` | レコード更新 | ✅ |
-| `DELETE` | `/records/{id}` | レコード削除 | ✅ |
-| `GET`    | `/records/label/{label}` | ラベルで絞り込み取得 | ✅ |
-| `GET`    | `/records/{id}/labels` | レコードのラベル一覧 | ✅ |
-| `POST`   | `/records/{id}/labels` | ラベル追加 | ✅ |
-| `DELETE` | `/records/{id}/labels/{label}` | ラベル削除 | ✅ |
-| `GET`    | `/labels` | 全ラベル一覧+統計 | ✅ |
-| `POST`   | `/labels/search` | AND/OR ラベル検索 | ✅ |
-| `PUT`    | `/labels/rename` | ラベルリネーム | ✅ |
-| `GET`    | `/db/info` | DB バージョン・統計情報 | - |
-| `POST`   | `/sql` | SQL SELECT / INSERT / UPDATE / DELETE 実行 | - |
-| `GET`    | `/settings` | 現在の設定取得 | - |
-| `PUT`    | `/settings` | 設定更新（HTTPリクエスト受付オンオフ） | - |
-| `GET`    | `/logs` | 保管されたログを新しい順に取得（`?lines=` で件数指定、既定200・上限2000） | - |
+| メソッド | パス | 説明 | 要ログイン | 要HTTP API |
+|---------|------|------|:---:|:---:|
+| `GET`    | `/ui` | Web 管理 UI（未ログイン時はログイン画面を表示） | - | - |
+| `POST`   | `/auth/login` | ログイン（ユーザー名/パスワードを検証しトークンを発行） | - | - |
+| `POST`   | `/auth/logout` | ログアウト（渡したトークンを失効） | ✅ | - |
+| `PUT`    | `/auth/password` | パスワード変更（成功すると全セッションが失効） | ✅ | - |
+| `GET`    | `/records` | 全レコード取得 | ✅ | ✅ |
+| `POST`   | `/records` | レコード作成 | ✅ | ✅ |
+| `GET`    | `/records/{id}` | ID で取得 | ✅ | ✅ |
+| `PUT`    | `/records/{id}` | レコード更新 | ✅ | ✅ |
+| `DELETE` | `/records/{id}` | レコード削除 | ✅ | ✅ |
+| `GET`    | `/records/label/{label}` | ラベルで絞り込み取得 | ✅ | ✅ |
+| `GET`    | `/records/{id}/labels` | レコードのラベル一覧 | ✅ | ✅ |
+| `POST`   | `/records/{id}/labels` | ラベル追加 | ✅ | ✅ |
+| `DELETE` | `/records/{id}/labels/{label}` | ラベル削除 | ✅ | ✅ |
+| `GET`    | `/labels` | 全ラベル一覧+統計 | ✅ | ✅ |
+| `POST`   | `/labels/search` | AND/OR ラベル検索 | ✅ | ✅ |
+| `PUT`    | `/labels/rename` | ラベルリネーム | ✅ | ✅ |
+| `GET`    | `/db/info` | DB バージョン・統計情報 | ✅ | - |
+| `POST`   | `/sql` | SQL SELECT / INSERT / UPDATE / DELETE 実行 | ✅ | - |
+| `GET`    | `/settings` | 現在の設定取得 | ✅ | - |
+| `PUT`    | `/settings` | 設定更新（HTTPリクエスト受付オンオフ） | ✅ | - |
+| `GET`    | `/logs` | 保管されたログを新しい順に取得（`?lines=` で件数指定、既定200・上限2000） | ✅ | - |
 
 ### GET /db/info レスポンス例
 
 ```json
 {
   "engine_name":    "KAGURA DB Engine",
-  "app_version":    "2.2.0",
+  "app_version":    "3.0.0",
   "storage_mode":   "kdb",
   "storage_format": "KDB Binary (WAL + XChaCha20-Poly1305 encrypted)",
   "encrypted":      true,
@@ -626,19 +706,24 @@ HTTPリクエスト欄が「要HTTP API」の行は、既定では無効な `/re
 
 ## Web 管理UI
 
-`http://localhost:3000/ui` でブラウザから DB を操作できます。
+`http://localhost:3000/ui` でブラウザから DB を操作できます。未ログインの場合はまずログイン画面が
+表示されます（既定 `kagura` / `root`）。ログインに成功するとトークンをブラウザの `localStorage` に
+保存し、以後の全リクエストへ自動的に付与します。ヘッダー右上の「Logout」でいつでもログアウトできます。
 
 | ビュー | 説明 |
 |--------|------|
 | **📋 Records** | レコード一覧（`POST /sql` の `SELECT * FROM label.*` 経由で取得。HTTPリクエストが無効でも閲覧可能）・検索・ラベルフィルター・自動更新（10秒）。作成・編集・削除は REST API（`/records`）を使うため、これらの操作には設定で HTTPリクエストを有効化する必要がある |
 | **ℹ️ DB Info** | バージョン・ストレージモード・暗号化状態・統計カード・カラム一覧 |
 | **🔍 SQL Query** | SQL SELECT / INSERT / UPDATE / DELETE 実行・テーブル形式結果表示・ Ctrl+Enter 対応 |
-| **⚙️ 設定** | HTTPリクエスト（`/records` `/labels` 系 REST API）受付のオンオフを切替（既定は無効）。大量テストデータ投入など HTTP 経由の操作が必要なときに有効化する |
+| **⚙️ 設定** | HTTPリクエスト（`/records` `/labels` 系 REST API）受付のオンオフを切替（既定は無効）。管理者パスワードの変更フォームもここにある |
 | **📜 ログ** | 保管されたログ（起動/停止・SQL・HTTP・DB操作・HW異常）をカテゴリで絞り込みながら一覧表示・自動更新（10秒） |
 
 ---
 
 ## テストデータ生成
+
+`generate_testdata.py` は実行時に自動で `POST /auth/login`（既定 `kagura` / `root`）してから投入する。
+初期パスワードを変更済みの場合は `--username`/`--password` を指定する。
 
 ```bash
 # 10,000件生成 + 性能テスト
@@ -655,10 +740,12 @@ python3 examples/python/generate_testdata.py --bench-only --repeat 5
 インストールし直した直後など、ランダム生成をやり直さずに同じデータを再投入したい場合に使えます。
 
 ```bash
-# HTTPリクエスト(REST API)を有効化してから投入（既定で無効のため）
-curl -X PUT http://localhost:3000/settings -H 'Content-Type: application/json' -d '{"http_api_enabled": true}'
+# ログインしてトークンを取得し、HTTPリクエスト(REST API)を有効化してから投入（既定で無効のため）
+TOKEN=$(curl -s -X POST http://localhost:3000/auth/login -H 'Content-Type: application/json' \
+  -d '{"username":"kagura","password":"root"}' | python3 -c 'import json,sys;print(json.load(sys.stdin)["token"])')
+curl -X PUT http://localhost:3000/settings -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"http_api_enabled": true}'
 
-# 同梱JSONを読み込んで投入
+# 同梱JSONを読み込んで投入（generate_testdata.py 自身がログインするため上記トークンは不要）
 python3 examples/python/generate_testdata.py \
   --load-json examples/testdata/kagura_testdata_10000.json \
   --url http://localhost:3000
@@ -699,10 +786,10 @@ cargo test --workspace
 | `db_engine` | 39 | CRUD・ラベル操作（重複付与エラーを含む）・KDB暗号化・バイナリコーデック |
 | `dynamic_label_management` | 24 | AND/OR 検索・リネーム・差分・ラベル重複付与エラー |
 | `db_ffi` | 10 | FFI 関数・メモリ管理 |
-| `db_client`（ユニットテスト） | 5 | ログ出力保管機能（JSON Lines 書き込み/読み出し・HW起因エラー判定） |
-| `db_client`（統合テスト） | 59 | HTTP API・ラベル操作（重複付与エラーを含む）・永続化・SQL SELECT/INSERT/UPDATE/DELETE（ラベル重複エラー・UPDATE LABELのWHERE絞り込み・DELETE/DELETE LABELのWHERE絞り込みを含む）・設定（HTTPリクエスト受付オンオフ）・ログ（`GET /logs`） |
+| `db_client`（ユニットテスト） | 12 | ログ出力保管機能（JSON Lines 書き込み/読み出し・HW起因エラー判定）・認証（ログイン成功/失敗・トークン検証・ログアウト・ロックアウト・パスワード変更） |
+| `db_client`（統合テスト） | 67 | HTTP API・ラベル操作（重複付与エラーを含む）・永続化・SQL SELECT/INSERT/UPDATE/DELETE（ラベル重複エラー・UPDATE LABELのWHERE絞り込み・DELETE/DELETE LABELのWHERE絞り込みを含む）・設定（HTTPリクエスト受付オンオフ）・ログ（`GET /logs`）・認証（未ログイン時の401・ログイン/ログアウト・ロックアウト・パスワード変更後の再ログイン必須化） |
 | `sql_engine` | 60 | パーサー・実行エンジン（SELECT・INSERT・UPDATE・DELETE・WHERE・ORDER BY・LIKE・ラベル重複エラー・UPDATE LABEL/DELETE LABELのWHERE絞り込み） |
-| **合計** | **197** | |
+| **合計** | **212** | |
 
 ---
 
@@ -714,7 +801,8 @@ cargo test --workspace
 | HTTP フレームワーク | [axum](https://github.com/tokio-rs/axum) 0.8 |
 | 非同期ランタイム | [tokio](https://tokio.rs/) 1.x |
 | シリアライゼーション | [serde](https://serde.rs/) + serde_json |
-| 暗号化 | XChaCha20-Poly1305 AEAD（純 Rust 手実装・外部クレートなし） |
+| 暗号化（KDBストレージ） | XChaCha20-Poly1305 AEAD（純 Rust 手実装・外部クレートなし） |
+| 認証（パスワードハッシュ） | [argon2](https://docs.rs/argon2) クレート（Argon2id） |
 | SQL パーサー | 手書き再帰下降パーサー（外部ライブラリなし） |
 | FFI | Rust `extern "C"` + Python `ctypes` |
 | フロントエンド | バニラ HTML / CSS / JavaScript（外部依存なし） |
@@ -736,6 +824,7 @@ cargo test --workspace
 
 | バージョン | 主な変更内容 |
 |-----------|-------------|
+| **3.0.0** | **【破壊的変更】** 認証機能を新規追加。管理者（マスター）ユーザー `kagura`（初期パスワード `root`）による Bearer トークン認証を実装し、`/ui`（Web UI のHTMLシェル）と `POST /auth/login` を除く全エンドポイント（`/db/info` `/sql` `/settings` `/logs` `/records` `/labels` 系すべて）が既定でログイン必須になった。認証情報（ユーザー名・Argon2idハッシュ化されたパスワード）は環境変数 `KAGURA_AUTH_FILE`（既定 `auth.json`）に永続化し、ファイルが存在しない初回起動時のみ初期管理者を自動作成する。追加した認証 API は `POST /auth/login`（ログイン・トークン発行）、`POST /auth/logout`（トークン失効）、`PUT /auth/password`（パスワード変更。成功すると全セッションを失効させ再ログインを必須化）の3本。セッショントークンはメモリ上でのみ管理し有効期限は24時間、同一ユーザー名で5回連続ログイン失敗すると15分間ロックする（`423 Locked`）。Web UI にログイン画面・ログアウトボタン・パスワード変更フォームを追加。影響範囲: (1) 認証を追加する前提で書かれていない既存クライアント（curlスクリプト・`examples/python/generate_testdata.py` 等）は事前ログインが必要になる（`generate_testdata.py` は自動でログインするよう追随済み）。(2) 全クレートの `Cargo.toml` バージョンをこのREADMEと同期させた |
 | **2.5.1** | Web UI「Records」画面の不具合修正。`SELECT * FROM label.*` で取得した全レコードを1つのHTML文字列に連結してから描画していたため、数万〜10万件規模のデータでは連結後の文字列がJavaScriptの文字列長上限を超え `RangeError: Invalid string length` が発生していた。この例外が `loadAll()` の汎用catchに捕捉され、実際はサーバーへの通信自体は成功しているにもかかわらず「Connection failed」と誤表示される（サーバーダウンしたかのように見える）事象があったため、Records一覧の描画件数に上限（1,000件）を設け、超過時は超過件数と絞り込み方法を通知する行を表示するよう変更。あわせて `loadAll()` の catch 側も、原因を問わず固定文言を出すのをやめ、実際のエラーメッセージを表示するように修正。また、2.4.0以降 `db_client`／`db_engine`／`db_ffi`／`dynamic_label_management`／`sql_engine` の `Cargo.toml` の `version` が `2.4.0` のまま更新されておらず、DB Info画面が参照する `CARGO_PKG_VERSION` がREADME上のバージョン表記（2.5.0）と食い違っていた（再ビルドしてもDB Infoの表示が古いまま変わらない不具合）ため、全クレートのバージョンをREADMEと同期させた |
 | **2.5.0** | Windows 向けインストール機能を新規追加。Windows のサービス制御マネージャーへの正規登録には実行ファイル側の対応が必要なため、代わりにタスクスケジューラ（PC起動時に自動実行、異常終了時は自動再起動）で常駐運用する方式を採用。導入方法として (1) 追加ツール不要の `packaging/windows/install.ps1`／`uninstall.ps1`（ソースビルド＋`%ProgramFiles%\KaguraDB`・`%ProgramData%\KaguraDB`への配置＋タスク登録）、(2) [Inno Setup](https://jrsoftware.org/isinfo.php) による `.exe` インストーラー（`packaging/windows/installer.iss`。アンインストーラーは自動生成され「プログラムと機能」に登録される）の2種を用意。`KAGURA_MASTER_KEY` はインストール時にランダム生成し `%ProgramData%\KaguraDB\config\kagura.env` へ保存する運用とし、Linux版と同様の挙動（既存ファイルは上書きしない）とした |
 | **2.4.0** | `examples/python/generate_testdata.py` に `--dump-json PATH`（サーバー接続不要でPOST /records用のJSON配列をファイルへ書き出し）と `--load-json PATH`（ランダム生成せずファイルから読み込んで投入）を追加。インストールし直した後などにランダム再生成せず同じテストデータを再投入できるように、事前生成済みの10,000件JSON配列 `examples/testdata/kagura_testdata_10000.json` を同梱（各要素は `{"columns": {...}, "labels": [...]}` の形式で `POST /records` にそのまま投入可能） |

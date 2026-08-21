@@ -1,5 +1,7 @@
 // src/lib.rs
 pub mod app;
+pub mod auth;
+pub mod auth_handlers;
 pub mod handlers;
 pub mod info_handlers;
 pub mod label_handlers;

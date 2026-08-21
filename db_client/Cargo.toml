@@ -1,6 +1,6 @@
 [package]
 name = "db_client"
-version = "2.5.1"
+version = "3.0.0"
 edition = "2024"
 
 [dependencies]
@@ -13,6 +13,8 @@ dynamic_label_management = { path = "../dynamic_label_management" }
 sql_engine = { path = "../sql_engine" }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+argon2 = "0.5"
+rand_core = { version = "0.6", features = ["getrandom"] }
 
 # ---- Linuxパッケージング (packaging/README.md 参照) ----
 # `cargo install cargo-deb` の上で `cargo deb -p db_client --no-build` を実行して生成する。

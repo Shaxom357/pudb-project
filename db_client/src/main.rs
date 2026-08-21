@@ -7,8 +7,12 @@
 //   DB_ADDR  バインドアドレス（デフォルト: 0.0.0.0:3000）
 //   KAGURA_MASTER_KEY  暗号化マスターキー(hex64)
 //   KAGURA_LOG_FILE  ログ保存先ファイルパス（デフォルト: logs/kagura.log）
+//   KAGURA_AUTH_FILE  認証情報（管理者ユーザー名・パスワードハッシュ）保存先ファイルパス
+//                     （デフォルト: auth.json。初回起動時は username=kagura, password=root で自動作成）
 
 mod app;
+mod auth;
+mod auth_handlers;
 mod handlers;
 mod info_handlers;
 mod label_handlers;
@@ -64,9 +68,14 @@ async fn main() {
     let db_path = std::env::var("DB_FILE").unwrap_or_else(|_| "db_data.kdb".to_string());
     let addr    = std::env::var("DB_ADDR").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
     let log_path = std::env::var("KAGURA_LOG_FILE").unwrap_or_else(|_| "logs/kagura.log".to_string());
+    let auth_path = std::env::var("KAGURA_AUTH_FILE").unwrap_or_else(|_| "auth.json".to_string());
     let is_kdb  = db_path.ends_with(".kdb");
 
     let logger = Arc::new(Logger::init(&log_path));
+    let auth = crate::auth::AuthState::load_or_init(&auth_path);
+    if auth.is_default_password() {
+        println!("[WARN] 管理者ユーザー '{}' は初期パスワードのままです。至急 PUT /auth/password で変更してください", auth.username());
+    }
 
     // パニックが発生した場合もエラー停止としてログへ残す
     // (「エラーで停止したのか」の判定材料。パニックは HW 起因とは判定できないため Error 扱い)
@@ -122,6 +131,7 @@ async fn main() {
         // 大量テストデータ投入など用途がある場合は設定画面(/settings)から有効化する。
         http_api_enabled: false,
         logger: logger.clone(),
+        auth,
     }));
 
     let (router, _) = app::build_app_with_state(state);
@@ -133,8 +143,9 @@ async fn main() {
 
     println!("KAGURA DB listening on http://{}", addr);
     println!("Storage: {} ({})", db_path, if is_kdb { "KDB encrypted" } else { "JSON" });
-    println!("Endpoints: /records /labels /sql /db/info /settings /logs /ui");
+    println!("Endpoints: /records /labels /sql /db/info /settings /logs /ui /auth/login");
     println!("HTTP API (REST /records /labels): disabled by default -- enable via PUT /settings or the 設定 view in /ui");
+    println!("Authentication: required for all endpoints except /ui and /auth/login -- POST /auth/login to obtain a Bearer token");
     println!("Logs: {} (view recent entries via GET /logs)", log_path);
 
     logger.startup(&addr, if is_kdb { "kdb" } else { "json" }, &db_path);

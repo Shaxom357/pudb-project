@@ -39,6 +39,7 @@ case "$1" in
                 echo "DB_ADDR=0.0.0.0:3000"
                 echo "KAGURA_MASTER_KEY=$MASTER_KEY"
                 echo "KAGURA_LOG_FILE=$LOG_DIR/kagura.log"
+                echo "KAGURA_AUTH_FILE=$DATA_DIR/auth.json"
             } > "$ENV_FILE"
             chmod 640 "$ENV_FILE"
             chown root:"$SERVICE_GROUP" "$ENV_FILE"

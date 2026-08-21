@@ -12,6 +12,7 @@ use db_engine::kdb_store::{KdbError, KdbFile};
 use db_engine::PersistError;
 use dynamic_label_management::LabelManager;
 
+use crate::auth::AuthState;
 use crate::logging::Logger;
 use crate::models::{
     CreateRecordRequest, UpdateRecordRequest,
@@ -26,6 +27,7 @@ pub struct AppStateInner {
     /// false の場合、データ操作はSQL経由(/sql)のみ許可される。
     pub http_api_enabled: bool,
     pub logger: Arc<Logger>,
+    pub auth: AuthState,
 }
 
 pub type AppState = Arc<RwLock<AppStateInner>>;

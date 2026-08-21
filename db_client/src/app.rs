@@ -15,6 +15,8 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
 
+use crate::auth::AuthState;
+use crate::auth_handlers::{change_password, login, logout, require_auth};
 use crate::handlers::{
     create_record, delete_record, get_record,
     get_records_by_label, list_records, update_record,
@@ -82,24 +84,36 @@ fn build_router(state: AppState) -> Router {
         .route("/labels/rename", put(rename_label))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_http_api_enabled));
 
-    Router::new()
-        .route("/ui", get(ui_handler))
-        .route("/", get(|| async { axum::response::Redirect::temporary("/ui") }))
+    // ログイン必須のエンドポイント群（/ui のアプリ殻と /auth/login 以外の全て）。
+    // Bearer トークンが無い/無効な場合は require_auth が 401 を返す。
+    let protected = Router::new()
         .route("/db/info", get(get_db_info))
         .route("/sql", post(execute_sql))
         .route("/settings", get(get_settings).put(update_settings))
         .route("/logs", get(get_logs))
+        .route("/auth/logout", post(logout))
+        .route("/auth/password", put(change_password))
         .merge(gated)
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_auth));
+
+    Router::new()
+        .route("/ui", get(ui_handler))
+        .route("/", get(|| async { axum::response::Redirect::temporary("/ui") }))
+        .route("/auth/login", post(login))
+        .merge(protected)
         .route_layer(middleware::from_fn_with_state(state.clone(), request_logging_middleware))
         .with_state(state)
 }
 
 /// テスト用: mgr と db_path から AppState を作って Router を返す
-/// 本番の既定値(無効)とは異なり、REST APIテストを直接書けるよう有効化しておく
+/// 本番の既定値(無効)とは異なり、REST APIテストを直接書けるよう有効化しておく。
+/// 認証も同様の理由で AuthState::bypass_for_tests() により素通りにしてある
+/// （認証自体の挙動は test_auth.rs で個別に検証する）。
 pub fn build_app(mgr: LabelManager, db_path: String) -> (Router, AppState) {
     let logger = Arc::new(Logger::init(&format!("{}.log", db_path)));
     let state: AppState = Arc::new(RwLock::new(AppStateInner {
         mgr, db_path, kdb: None, http_api_enabled: true, logger,
+        auth: AuthState::bypass_for_tests(),
     }));
     let router = build_router(state.clone());
     (router, state)

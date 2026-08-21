@@ -130,7 +130,16 @@ tbody td { padding: 10px 14px; vertical-align: middle; }
 .switch input:checked + .slider { background: #4f6ef7; }
 .switch input:checked + .slider:before { transform: translateX(20px); }
 .toggle-status { margin-top: 14px; font-size: 12px; color: #888; }
-
+/* Login */
+.login-overlay { position: fixed; inset: 0; background: #1a1a2e; z-index: 300; display: flex; align-items: center; justify-content: center; }
+.login-overlay.hidden { display: none; }
+.login-box { background: #fff; border-radius: 12px; padding: 36px 32px; width: 340px; max-width: 90vw; box-shadow: 0 20px 60px rgba(0,0,0,.4); }
+.login-box h1 { font-size: 18px; margin-bottom: 4px; }
+.login-box .sub { font-size: 12px; color: #888; margin-bottom: 22px; }
+.login-error { font-size: 12px; color: #e03131; margin-top: 4px; min-height: 16px; }
+.header .logout-btn { background: transparent; border: 1px solid #444; color: #ccc; border-radius: 6px; padding: 5px 12px; font-size: 12px; cursor: pointer; margin-left: 12px; }
+.header .logout-btn:hover { background: #2a2a44; }
+.header .whoami { font-size: 12px; color: #aaa; margin-left: 16px; }
 </style>
 </head>
 <body>
@@ -139,6 +148,25 @@ tbody td { padding: 10px 14px; vertical-align: middle; }
   <span class="badge" id="headerCount">0 records</span>
   <div class="spacer"></div>
   <span class="stats">localhost:3000</span>
+  <span class="whoami" id="whoami"></span>
+  <button class="logout-btn" onclick="doLogout()">Logout</button>
+</div>
+
+<div class="login-overlay hidden" id="loginOverlay">
+  <div class="login-box">
+    <h1>&#x1F5C4;&#xFE0F; KAGURA DB Admin</h1>
+    <div class="sub">ログインしてください</div>
+    <div class="form-group">
+      <label>Username</label>
+      <input type="text" id="loginUsername" autocomplete="username">
+    </div>
+    <div class="form-group">
+      <label>Password</label>
+      <input type="password" id="loginPassword" autocomplete="current-password">
+    </div>
+    <div class="login-error" id="loginError"></div>
+    <button class="btn btn-primary" style="width:100%;margin-top:6px" onclick="doLogin()">Login</button>
+  </div>
 </div>
 <div class="layout">
   <div class="sidebar">
@@ -227,6 +255,19 @@ tbody td { padding: 10px 14px; vertical-align: middle; }
           </div>
           <div class="toggle-status" id="httpApiStatus"></div>
         </div>
+        <div class="info-section-title" style="margin-top:24px">パスワード変更</div>
+        <div class="settings-card">
+          <div class="form-group">
+            <label>現在のパスワード</label>
+            <input type="password" id="curPassword" autocomplete="current-password">
+          </div>
+          <div class="form-group">
+            <label>新しいパスワード（8文字以上）</label>
+            <input type="password" id="newPassword" autocomplete="new-password">
+          </div>
+          <button class="btn btn-primary" onclick="doChangePassword()">パスワードを変更</button>
+          <div class="toggle-status" id="passwordStatus"></div>
+        </div>
       </div>
     </div>
     <!-- Logs View -->
@@ -299,9 +340,14 @@ tbody td { padding: 10px 14px; vertical-align: middle; }
 <script>
 let allRecords=[], allLabels=[], activeLabel=null, deleteTarget=null;
 let currentView='dbinfo';
+let authToken = null;
+try{ authToken = localStorage.getItem('kagura_token'); }catch(_){}
+
+function authHeaders(){ return authToken ? {'Authorization':'Bearer '+authToken} : {}; }
 
 async function checkOk(r){
   if(!r.ok){
+    if(r.status===401){ showLogin('セッションの有効期限が切れました。再度ログインしてください。'); }
     let msg = 'HTTP '+r.status;
     try{ const body = await r.clone().json(); if(body && body.error) msg = body.error; }catch(_){}
     const e = new Error(msg); e.status = r.status; throw e;
@@ -310,11 +356,71 @@ async function checkOk(r){
 }
 
 const api = {
-  async get(p){ return (await checkOk(await fetch(p))).json(); },
-  async post(p,b){ return (await checkOk(await fetch(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}))).json(); },
-  async put(p,b){ return (await checkOk(await fetch(p,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}))).json(); },
-  async delete(p){ return checkOk(await fetch(p,{method:'DELETE'})); },
+  async get(p){ return (await checkOk(await fetch(p,{headers:{...authHeaders()}}))).json(); },
+  async post(p,b){ return (await checkOk(await fetch(p,{method:'POST',headers:{'Content-Type':'application/json',...authHeaders()},body:JSON.stringify(b)}))).json(); },
+  async put(p,b){ return (await checkOk(await fetch(p,{method:'PUT',headers:{'Content-Type':'application/json',...authHeaders()},body:JSON.stringify(b)}))).json(); },
+  async delete(p){ return checkOk(await fetch(p,{method:'DELETE',headers:{...authHeaders()}})); },
 };
+
+// ---- ログイン ----
+function showLogin(errorMsg){
+  authToken = null;
+  try{ localStorage.removeItem('kagura_token'); }catch(_){}
+  document.getElementById('loginOverlay').classList.remove('hidden');
+  document.getElementById('loginError').textContent = errorMsg||'';
+  document.getElementById('loginPassword').value = '';
+}
+
+function hideLogin(){ document.getElementById('loginOverlay').classList.add('hidden'); }
+
+async function doLogin(){
+  const username = document.getElementById('loginUsername').value.trim();
+  const password = document.getElementById('loginPassword').value;
+  const errEl = document.getElementById('loginError');
+  errEl.textContent = 'ログイン中...';
+  try{
+    const resp = await fetch('/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username,password})});
+    const data = await resp.json();
+    if(!resp.ok){ errEl.textContent = data.error || 'ログインに失敗しました'; return; }
+    authToken = data.token;
+    try{ localStorage.setItem('kagura_token', authToken); localStorage.setItem('kagura_username', data.username); }catch(_){}
+    hideLogin();
+    document.getElementById('whoami').textContent = data.username;
+    showView(currentView);
+  }catch(e){
+    errEl.textContent = 'ネットワークエラー: '+(e && e.message ? e.message : String(e));
+  }
+}
+
+async function doLogout(){
+  try{ await fetch('/auth/logout',{method:'POST',headers:{...authHeaders()}}); }catch(_){}
+  try{ localStorage.removeItem('kagura_username'); }catch(_){}
+  showLogin('');
+}
+
+async function doChangePassword(){
+  const current_password = document.getElementById('curPassword').value;
+  const new_password = document.getElementById('newPassword').value;
+  const statusEl = document.getElementById('passwordStatus');
+  statusEl.textContent = '更新中...';
+  try{
+    const resp = await fetch('/auth/password',{method:'PUT',headers:{'Content-Type':'application/json',...authHeaders()},body:JSON.stringify({current_password,new_password})});
+    if(resp.status===204){
+      showToast('パスワードを変更しました。再度ログインしてください','success');
+      document.getElementById('curPassword').value='';
+      document.getElementById('newPassword').value='';
+      showLogin('パスワードを変更しました。新しいパスワードでログインしてください。');
+      return;
+    }
+    const data = await resp.json().catch(()=>({}));
+    statusEl.textContent = data.error || '更新に失敗しました';
+  }catch(e){
+    statusEl.textContent = 'ネットワークエラー';
+  }
+}
+
+document.getElementById('loginPassword').addEventListener('keydown', e=>{ if(e.key==='Enter') doLogin(); });
+document.getElementById('loginUsername').addEventListener('keydown', e=>{ if(e.key==='Enter') doLogin(); });
 
 function showView(name){
   currentView = name;
@@ -355,7 +461,8 @@ function sqlRowsToRecords(data){
 // 設定でオフにできるため、一覧表示自体はそれに依存させない。
 async function loadAll(){
   try{
-    const resp = await fetch('/sql',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:'SELECT * FROM label.*'})});
+    const resp = await fetch('/sql',{method:'POST',headers:{'Content-Type':'application/json',...authHeaders()},body:JSON.stringify({query:'SELECT * FROM label.*'})});
+    if(resp.status===401){ showLogin('セッションの有効期限が切れました。再度ログインしてください。'); return; }
     const data = await resp.json();
     if(!data.ok) throw new Error(data.error || 'query failed');
     allRecords = sqlRowsToRecords(data);
@@ -654,7 +761,8 @@ async function runSql(){
   statusEl.textContent = 'Running...';
   resultEl.innerHTML = '<div class="empty" style="padding:40px"><div style="font-size:28px">&#x23F3;</div></div>';
   try{
-    const resp = await fetch('/sql',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query})});
+    const resp = await fetch('/sql',{method:'POST',headers:{'Content-Type':'application/json',...authHeaders()},body:JSON.stringify({query})});
+    if(resp.status===401){ showLogin('セッションの有効期限が切れました。再度ログインしてください。'); return; }
     const data = await resp.json();
     if(data.ok){
       if(data.inserted_id!==undefined && data.inserted_id!==null){
@@ -708,13 +816,20 @@ function showToast(msg,type='success'){ const t=document.getElementById('toast')
 document.getElementById('modal').addEventListener('click',e=>{ if(e.target.id==='modal')closeModal(); });
 document.getElementById('deleteModal').addEventListener('click',e=>{ if(e.target.id==='deleteModal')closeDeleteModal(); });
 
-// 初回表示は軽量な DB Info。Records一覧（全件取得＋巨大テーブル再描画）はRecordsビューを
-// 実際に開いたときにだけ取得する（10,000件規模だと初回表示が非常に重くなるため）。
-showView('dbinfo');
+// 未ログインならログイン画面を表示する。ログイン済みなら軽量な DB Info から表示する
+// （Records一覧は全件取得＋巨大テーブル再描画になるため、実際にRecordsビューを開いたときにだけ取得する）。
+if(authToken){
+  let savedUsername = '';
+  try{ savedUsername = localStorage.getItem('kagura_username') || ''; }catch(_){}
+  document.getElementById('whoami').textContent = savedUsername;
+  showView('dbinfo');
+} else {
+  showLogin('');
+}
 // Records一覧の自動更新もRecordsビュー表示中のみ行う。
 // 他の画面（DB Info/SQL/設定/ログ）を見ている間はこの重いポーリングを止め、操作性を優先する。
-setInterval(()=>{ if(currentView==='records') loadAll(); },10000);
-setInterval(()=>{ if(currentView==='logs') loadLogs(); },10000);
+setInterval(()=>{ if(currentView==='records' && authToken) loadAll(); },10000);
+setInterval(()=>{ if(currentView==='logs' && authToken) loadLogs(); },10000);
 </script>
 </body>
 </html>

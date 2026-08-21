@@ -35,8 +35,9 @@ if (Test-Path $EnvFile) {
     [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
     $masterKey = -join ($bytes | ForEach-Object { $_.ToString("x2") })
 
-    $dbFile  = Join-Path $DataDir "db_data.kdb"
-    $logFile = Join-Path $LogDir  "kagura.log"
+    $dbFile   = Join-Path $DataDir "db_data.kdb"
+    $logFile  = Join-Path $LogDir  "kagura.log"
+    $authFile = Join-Path $DataDir "auth.json"
 
     @"
 # KAGURA DB 環境設定ファイル（自動生成: $(Get-Date -Format o)）
@@ -44,6 +45,7 @@ DB_FILE=$dbFile
 DB_ADDR=0.0.0.0:3000
 KAGURA_MASTER_KEY=$masterKey
 KAGURA_LOG_FILE=$logFile
+KAGURA_AUTH_FILE=$authFile
 "@ | Set-Content -Path $EnvFile -Encoding utf8
 }
 
