@@ -268,6 +268,21 @@ tbody td { padding: 10px 14px; vertical-align: middle; }
           <button class="btn btn-primary" onclick="doChangePassword()">パスワードを変更</button>
           <div class="toggle-status" id="passwordStatus"></div>
         </div>
+        <div class="info-section-title" style="margin-top:24px">ユーザー管理（管理者のみ）</div>
+        <div class="settings-card" id="userMgmtCard">
+          <div class="toggle-desc" style="margin-bottom:12px">一般ユーザーを作成します（SQL の <code>CREATE USER 'name' IDENTIFIED BY 'password'</code> と同じ）。簡単なパスワードの場合は確認を求めます。管理者以外でログインしている場合、この操作は行えません。</div>
+          <div class="form-group">
+            <label>ユーザー名</label>
+            <input type="text" id="newUserName" autocomplete="off" spellcheck="false">
+          </div>
+          <div class="form-group">
+            <label>パスワード</label>
+            <input type="password" id="newUserPassword" autocomplete="new-password">
+          </div>
+          <button class="btn btn-primary" onclick="doCreateUser()">ユーザーを作成</button>
+          <div class="toggle-status" id="userMgmtStatus"></div>
+          <div id="userListWrap" style="margin-top:16px;overflow-x:auto"></div>
+        </div>
       </div>
     </div>
     <!-- Logs View -->
@@ -422,6 +437,77 @@ async function doChangePassword(){
 
 document.getElementById('loginPassword').addEventListener('keydown', e=>{ if(e.key==='Enter') doLogin(); });
 document.getElementById('loginUsername').addEventListener('keydown', e=>{ if(e.key==='Enter') doLogin(); });
+
+// ---- ユーザー管理（設定画面） ----
+// SQL 文字列リテラル用に ' を '' へエスケープして 'foo' の形にする
+function sqlQuote(s){ return "'" + String(s).replace(/'/g, "''") + "'"; }
+
+async function doCreateUser(){
+  const name = document.getElementById('newUserName').value.trim();
+  const pw   = document.getElementById('newUserPassword').value;
+  const statusEl = document.getElementById('userMgmtStatus');
+  if(!name || !pw){ statusEl.textContent = 'ユーザー名とパスワードを入力してください'; return; }
+  statusEl.textContent = '作成中...';
+  try{
+    const data = await sqlRequest('CREATE USER ' + sqlQuote(name) + ' IDENTIFIED BY ' + sqlQuote(pw));
+    if(data===null) return;
+    if(data.ok){
+      showToast("ユーザー '" + name + "' を作成しました",'success');
+      statusEl.textContent = '';
+      document.getElementById('newUserName').value = '';
+      document.getElementById('newUserPassword').value = '';
+      loadUsers();
+    } else {
+      statusEl.textContent = data.error || '作成に失敗しました';
+    }
+  }catch(e){
+    statusEl.textContent = 'ネットワークエラー';
+  }
+}
+
+async function loadUsers(){
+  const wrap = document.getElementById('userListWrap');
+  if(!wrap) return;
+  try{
+    const data = await sqlRequest('SHOW USERS');
+    if(data===null) return;
+    if(!data.ok){
+      wrap.innerHTML = '<div class="toggle-status">' + esc(data.error||'ユーザー一覧を取得できませんでした') + '</div>';
+      return;
+    }
+    const cols = data.columns || [];
+    const rows = data.rows || [];
+    let html = '<table class="sql-result-table" style="width:100%;border-collapse:collapse;font-size:13px">'
+      + '<thead><tr>' + cols.map(c=>'<th style="text-align:left;padding:6px 10px;border-bottom:2px solid #4f6ef7">'+esc(c)+'</th>').join('') + '<th></th></tr></thead><tbody>';
+    for(const r of rows){
+      const obj = {}; cols.forEach((c,i)=>obj[c]=r[i]);
+      const isAdmin = String(obj.role) === 'admin';
+      html += '<tr>' + r.map(v=>'<td style="padding:6px 10px;border-bottom:1px solid #eee">'+esc(v===null||v===undefined?'':String(v))+'</td>').join('')
+        + '<td style="padding:6px 10px;border-bottom:1px solid #eee">'
+        + (isAdmin ? '' : '<button class="btn btn-danger btn-sm" data-dropuser="'+esc(String(obj.username))+'">削除</button>')
+        + '</td></tr>';
+    }
+    html += '</tbody></table>';
+    wrap.innerHTML = html;
+    wrap.querySelectorAll('button[data-dropuser]').forEach(btn=>{
+      btn.addEventListener('click', ()=>doDropUser(btn.getAttribute('data-dropuser')));
+    });
+  }catch(e){
+    wrap.innerHTML = '<div class="toggle-status">ユーザー一覧の取得に失敗しました</div>';
+  }
+}
+
+async function doDropUser(name){
+  if(!confirm("ユーザー '" + name + "' を削除しますか？")) return;
+  try{
+    const data = await sqlRequest('DROP USER ' + sqlQuote(name));
+    if(data===null) return;
+    if(data.ok){ showToast("ユーザー '" + name + "' を削除しました",'success'); loadUsers(); }
+    else showToast(data.error || '削除に失敗しました','error');
+  }catch(e){
+    showToast('ネットワークエラー','error');
+  }
+}
 
 function showView(name){
   currentView = name;
@@ -592,6 +678,7 @@ async function loadSettings(){
     statusEl.textContent = '設定の読み込みに失敗しました';
     showToast('設定の読み込みに失敗しました','error');
   }
+  loadUsers();
 }
 
 async function onHttpApiToggle(){
@@ -754,6 +841,26 @@ function clearSql(){
   document.getElementById('sqlStatus').textContent='';
 }
 
+// /sql を実行する共通関数。
+// サーバーが needs_confirmation（脆弱パスワード）を返した場合は要件どおりの文言を
+// 表示して yes/no を尋ね、yes なら confirm_weak_password:true で再送する。
+// 401 はログイン画面へ遷移して null を返す。
+async function sqlRequest(query, confirmWeak){
+  const body = { query };
+  if(confirmWeak!==undefined) body.confirm_weak_password = confirmWeak;
+  const resp = await fetch('/sql',{method:'POST',headers:{'Content-Type':'application/json',...authHeaders()},body:JSON.stringify(body)});
+  if(resp.status===401){ showLogin('セッションの有効期限が切れました。再度ログインしてください。'); return null; }
+  const data = await resp.json();
+  if(data && data.needs_confirmation){
+    const ans = prompt(data.warning || "Warning: The password strength is too weak. Do you want to proceed?\n\nPlease enter 'yes' to proceed or 'no' to cancel.");
+    if(ans!==null && ans.trim().toLowerCase()==='yes'){
+      return await sqlRequest(query, true);
+    }
+    return { ok:false, error:'操作をキャンセルしました（パスワードが脆弱です）', query };
+  }
+  return data;
+}
+
 async function runSql(){
   const query = document.getElementById('sqlInput').value.trim();
   if(!query){ showToast('Please enter a SQL query','error'); return; }
@@ -762,12 +869,16 @@ async function runSql(){
   statusEl.textContent = 'Running...';
   resultEl.innerHTML = '<div class="empty" style="padding:40px"><div style="font-size:28px">&#x23F3;</div></div>';
   try{
-    const resp = await fetch('/sql',{method:'POST',headers:{'Content-Type':'application/json',...authHeaders()},body:JSON.stringify({query})});
-    if(resp.status===401){ showLogin('セッションの有効期限が切れました。再度ログインしてください。'); return; }
-    const data = await resp.json();
+    const data = await sqlRequest(query);
+    if(data===null) return;
     if(data.ok){
       if(data.inserted_id!==undefined && data.inserted_id!==null){
         statusEl.innerHTML = '<span class="ok">&#x2714; inserted id='+data.inserted_id+'</span>';
+      } else if((!data.columns||data.columns.length===0) && (data.returned===undefined||data.returned===null)){
+        // CREATE / DROP / ALTER USER 等、行を返さない成功
+        statusEl.innerHTML = '<span class="ok">&#x2714; OK</span>';
+        resultEl.innerHTML = '<div class="sql-meta"><span class="ok">Query executed successfully</span></div>';
+        return;
       } else {
         const total = data.total_matched ?? 0;
         const ret   = data.returned    ?? 0;

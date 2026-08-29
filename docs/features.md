@@ -18,6 +18,7 @@
 
 ## db_client（REST API サーバー）
 - ✅ **認証機能**: 管理者ユーザー（既定 `kagura` / 初期パスワード `root`）による Bearer トークン認証。`/ui`（Web UI の殻）と `POST /auth/login` を除く全エンドポイントがログイン必須（詳細は [authentication.md](authentication.md) を参照）
+- ✅ **一般ユーザー管理**: 管理者が SQL 文 `CREATE USER 'name' IDENTIFIED BY 'password'`（`DROP USER` / `ALTER USER` / `SHOW USERS` も対応）で一般ユーザーを発行。脆弱なパスワードは yes/no 確認を求める。Web UI の設定画面からも操作可能
 - ✅ 21 本のエンドポイント（認証・レコード CRUD・ラベル管理・DB 情報・SQL・設定・ログ・Web UI。詳細は [api.md](api.md) を参照）
 - ✅ KDB モード（`.kdb`）と JSON モードの自動判別・後方互换
 - ✅ 起動時自動ロード・書き込み時自動セーブ

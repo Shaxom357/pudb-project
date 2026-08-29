@@ -22,6 +22,7 @@ mod models;
 mod settings_handlers;
 mod sql_handlers;
 mod ui;
+mod user_sql;
 
 use std::sync::Arc;
 

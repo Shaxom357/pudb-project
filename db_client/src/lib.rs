@@ -12,4 +12,5 @@ pub mod settings_handlers;
 pub mod sql_handlers;
 pub mod test_helpers;
 pub mod ui;
+pub mod user_sql;
 

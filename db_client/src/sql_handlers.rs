@@ -3,12 +3,14 @@
 
 use axum::{
     extract::State,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
     Json,
 };
 use serde::{Deserialize, Serialize};
+use crate::auth_handlers::resolve_actor;
 use crate::handlers::{auto_save, AppState};
+use crate::user_sql::{execute_user_statement, parse_user_statement, UserSqlOutcome};
 use sql_engine::{run_select, run_insert_fast, run_update, run_delete, CellValue};
 
 // ---------------------------------------------------------------------------
@@ -19,6 +21,10 @@ use sql_engine::{run_select, run_insert_fast, run_update, run_delete, CellValue}
 pub struct SqlQueryRequest {
     /// 実行するSQL文
     pub query: String,
+    /// 脆弱なパスワードで `CREATE USER` / `ALTER USER` を実行する際の確認回答。
+    /// 未指定=未回答（サーバーは needs_confirmation を返す）, true=続行, false=中止。
+    #[serde(default)]
+    pub confirm_weak_password: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -52,6 +58,12 @@ pub struct SqlQueryResponse {
     /// エラーメッセージ（失敗時）
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// 脆弱なパスワードにつき yes/no 確認が必要なとき true
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub needs_confirmation: Option<bool>,
+    /// needs_confirmation 時にクライアントへ提示する確認文言
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
     /// 実行したSQL（エコーバック）
     pub query: String,
 }
@@ -61,7 +73,35 @@ impl SqlQueryResponse {
         SqlQueryResponse {
             ok: false, columns: vec![], rows: vec![], total_matched: None, returned: None,
             inserted_id: None, labels: vec![], updated_count: None, deleted_count: None,
-            error: Some(message.into()), query,
+            error: Some(message.into()), needs_confirmation: None, warning: None, query,
+        }
+    }
+
+    /// SHOW USERS など、表形式の結果をそのまま返す
+    fn rows(query: String, columns: Vec<String>, rows: Vec<Vec<serde_json::Value>>) -> Self {
+        let returned = rows.len();
+        SqlQueryResponse {
+            ok: true, columns, rows, total_matched: Some(returned), returned: Some(returned),
+            inserted_id: None, labels: vec![], updated_count: None, deleted_count: None,
+            error: None, needs_confirmation: None, warning: None, query,
+        }
+    }
+
+    /// CREATE/DROP/ALTER USER の成功（返す行なし）
+    fn acknowledged(query: String) -> Self {
+        SqlQueryResponse {
+            ok: true, columns: vec![], rows: vec![], total_matched: None, returned: None,
+            inserted_id: None, labels: vec![], updated_count: None, deleted_count: None,
+            error: None, needs_confirmation: None, warning: None, query,
+        }
+    }
+
+    /// 脆弱パスワードの確認要求
+    fn needs_confirmation(query: String, warning: String) -> Self {
+        SqlQueryResponse {
+            ok: false, columns: vec![], rows: vec![], total_matched: None, returned: None,
+            inserted_id: None, labels: vec![], updated_count: None, deleted_count: None,
+            error: None, needs_confirmation: Some(true), warning: Some(warning), query,
         }
     }
 }
@@ -84,9 +124,51 @@ fn cell_to_json(cell: &CellValue) -> serde_json::Value {
 
 pub async fn execute_sql(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(payload): Json<SqlQueryRequest>,
 ) -> impl IntoResponse {
     let query = payload.query.trim().to_string();
+
+    // ユーザー管理系（CREATE USER / DROP USER / ALTER USER / SHOW USERS）は
+    // レコードストアではなく認証状態(AuthState)を操作する。SELECT/INSERT/... の
+    // ディスパッチより前に処理し、該当しなければ None が返って通常処理へ進む。
+    if let Some(parsed) = parse_user_statement(&query) {
+        let started = std::time::Instant::now();
+        let mut inner = state.write().await;
+        let stmt = match parsed {
+            Ok(s) => s,
+            Err(e) => {
+                inner.logger.sql_query(&query, false, started.elapsed().as_millis(), Some(&e));
+                return (StatusCode::BAD_REQUEST, Json(SqlQueryResponse::error(query, e)));
+            }
+        };
+        let Some(actor) = resolve_actor(&mut inner, &headers) else {
+            let msg = "認証が必要です。/auth/login でログインしてください。";
+            inner.logger.sql_query(&query, false, started.elapsed().as_millis(), Some(msg));
+            return (StatusCode::UNAUTHORIZED, Json(SqlQueryResponse::error(query, msg)));
+        };
+        return match execute_user_statement(&mut inner.auth, &actor, stmt, payload.confirm_weak_password) {
+            UserSqlOutcome::Rows { columns, rows } => {
+                inner.logger.sql_query(&query, true, started.elapsed().as_millis(), None);
+                (StatusCode::OK, Json(SqlQueryResponse::rows(query, columns, rows)))
+            }
+            UserSqlOutcome::Ok { message } => {
+                inner.logger.auth_info(format!("user-mgmt by '{}': {} | query={}", actor, message, query));
+                inner.logger.sql_query(&query, true, started.elapsed().as_millis(), None);
+                (StatusCode::OK, Json(SqlQueryResponse::acknowledged(query)))
+            }
+            UserSqlOutcome::NeedsConfirmation { warning } => {
+                // 確認待ち。ログ上は失敗扱いにしない（未実行）。
+                (StatusCode::OK, Json(SqlQueryResponse::needs_confirmation(query, warning)))
+            }
+            UserSqlOutcome::Err { status, message } => {
+                inner.logger.auth_warn(format!("user-mgmt by '{}' failed: {} | query={}", actor, message, query));
+                inner.logger.sql_query(&query, false, started.elapsed().as_millis(), Some(&message));
+                let code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_REQUEST);
+                (code, Json(SqlQueryResponse::error(query, message)))
+            }
+        };
+    }
 
     // 現時点では SELECT / INSERT / UPDATE のみサポート
     let upper = query.to_uppercase();
@@ -115,6 +197,8 @@ pub async fn execute_sql(
                     updated_count: None,
                     deleted_count: None,
                     error: None,
+                    needs_confirmation: None,
+                    warning: None,
                     query,
                 }))
             }
@@ -161,6 +245,8 @@ pub async fn execute_sql(
                     updated_count: None,
                     deleted_count: None,
                     error: None,
+                    needs_confirmation: None,
+                    warning: None,
                     query,
                 }))
             }
@@ -192,6 +278,8 @@ pub async fn execute_sql(
                     updated_count: Some(result.updated_count),
                     deleted_count: None,
                     error: None,
+                    needs_confirmation: None,
+                    warning: None,
                     query,
                 }))
             }
@@ -223,6 +311,8 @@ pub async fn execute_sql(
                     updated_count: None,
                     deleted_count: Some(result.deleted_count),
                     error: None,
+                    needs_confirmation: None,
+                    warning: None,
                     query,
                 }))
             }

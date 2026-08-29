@@ -35,7 +35,7 @@
 | `POST`   | `/labels/search` | AND/OR ラベル検索 | ✅ | ✅ |
 | `PUT`    | `/labels/rename` | ラベルリネーム | ✅ | ✅ |
 | `GET`    | `/db/info` | DB バージョン・統計情報 | ✅ | - |
-| `POST`   | `/sql` | SQL SELECT / INSERT / UPDATE / DELETE 実行 | ✅ | - |
+| `POST`   | `/sql` | SQL SELECT / INSERT / UPDATE / DELETE 実行、および管理者向けユーザー管理（`CREATE`/`DROP`/`ALTER USER`・`SHOW USERS`。詳細は [authentication.md](authentication.md)） | ✅ | - |
 | `GET`    | `/settings` | 現在の設定取得 | ✅ | - |
 | `PUT`    | `/settings` | 設定更新（HTTPリクエスト受付オンオフ） | ✅ | - |
 | `GET`    | `/logs` | 保管されたログを新しい順に取得（`?lines=` で件数指定、既定200・上限2000） | ✅ | - |
@@ -69,8 +69,8 @@
 |--------|------|
 | **📋 Records** | レコード一覧（`POST /sql` の `SELECT * FROM label.*` 経由で取得。HTTPリクエストが無効でも閲覧可能）・検索・ラベルフィルター・自動更新（10秒）。作成・編集・削除は REST API（`/records`）を使うため、これらの操作には設定で HTTPリクエストを有効化する必要がある |
 | **ℹ️ DB Info** | バージョン・ストレージモード・暗号化状態・統計カード・カラム一覧 |
-| **🔍 SQL Query** | SQL SELECT / INSERT / UPDATE / DELETE 実行・テーブル形式結果表示・ Ctrl+Enter 対応 |
-| **⚙️ 設定** | HTTPリクエスト（`/records` `/labels` 系 REST API）受付のオンオフを切替（既定は無効）。管理者パスワードの変更フォームもここにある |
+| **🔍 SQL Query** | SQL SELECT / INSERT / UPDATE / DELETE 実行・テーブル形式結果表示・ Ctrl+Enter 対応。脆弱パスワードの `CREATE USER` 実行時は確認プロンプトを表示 |
+| **⚙️ 設定** | HTTPリクエスト（`/records` `/labels` 系 REST API）受付のオンオフを切替（既定は無効）。管理者パスワードの変更フォーム、および一般ユーザーの作成・一覧・削除（管理者のみ）もここにある |
 | **📜 ログ** | 保管されたログ（起動/停止・SQL・HTTP・DB操作・認証・HW異常）をカテゴリで絞り込みながら一覧表示・自動更新（10秒） |
 
 ---
