@@ -1,8 +1,8 @@
 # packaging/
 
 KAGURA DB を Linux / Windows 上で一般的なパッケージと同様に導入・運用するための一式です。
-利用者向けの手順はリポジトリルートの [README.md](../README.md) の「Linux へのインストール」
-「Windows へのインストール」を参照してください。ここではメンテナー向けに、各成果物の生成方法をまとめます。
+利用者向けの手順は [docs/installation.md](../docs/installation.md)（Linux / Windows へのインストール）を
+参照してください。ここではメンテナー向けに、各成果物の生成方法をまとめます。
 
 ## 構成
 
