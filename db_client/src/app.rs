@@ -4,7 +4,7 @@
 
 use axum::{
     extract::{Request, State},
-    http::StatusCode,
+    http::{Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{delete, get, post, put},
@@ -15,8 +15,8 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
 
-use crate::auth::AuthState;
-use crate::auth_handlers::{change_password, login, logout, require_auth};
+use crate::auth::{AuthState, Privilege};
+use crate::auth_handlers::{bearer_token, change_password, login, logout, require_auth};
 use crate::handlers::{
     create_record, delete_record, get_record,
     get_records_by_label, list_records, update_record,
@@ -71,6 +71,65 @@ async fn require_http_api_enabled(
     next.run(req).await
 }
 
+/// REST データ操作エンドポイントに必要な権限を、HTTP メソッドとパスから判定する。
+/// `None` の場合は権限チェック不要。
+fn required_privilege_for(method: &Method, path: &str) -> Option<Privilege> {
+    match path {
+        // ラベル検索は POST だが実体は参照系
+        "/labels/search" => return Some(Privilege::Select),
+        // ラベルのリネームは更新系
+        "/labels/rename" => return Some(Privilege::Update),
+        _ => {}
+    }
+    match *method {
+        Method::GET => Some(Privilege::Select),
+        Method::POST => Some(Privilege::Insert),
+        Method::PUT | Method::PATCH => Some(Privilege::Update),
+        Method::DELETE => Some(Privilege::Delete),
+        _ => None,
+    }
+}
+
+/// /records・/labels 系 REST API に対し、ログイン中ユーザーの privileges を検査するミドルウェア。
+/// 管理者ロール・`All` 権限保持者は常に通過する。権限不足は 403。
+/// テスト用バイパスモード（build_app）では素通りする。
+async fn require_data_privilege(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+    let mut inner = state.write().await;
+    if inner.auth.is_test_bypass() {
+        drop(inner);
+        return next.run(req).await;
+    }
+    let actor = bearer_token(&req).and_then(|t| inner.auth.username_for_token(&t));
+    let Some(actor) = actor else {
+        drop(inner);
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse::new(
+                "認証が必要です。/auth/login でログインしてください。",
+            )),
+        )
+            .into_response();
+    };
+    if let Some(privilege) = required_privilege_for(&method, &path) {
+        if !inner.auth.user_has_privilege(&actor, privilege) {
+            let msg = format!(
+                "この操作には {} 権限が必要です。管理者に GRANT を依頼してください。",
+                privilege.label()
+            );
+            drop(inner);
+            return (StatusCode::FORBIDDEN, Json(ErrorResponse::new(msg))).into_response();
+        }
+    }
+    drop(inner);
+    next.run(req).await
+}
+
 fn build_router(state: AppState) -> Router {
     // データ操作系のREST API。設定でオンオフできる。
     let gated = Router::new()
@@ -82,6 +141,9 @@ fn build_router(state: AppState) -> Router {
         .route("/labels", get(list_all_labels))
         .route("/labels/search", post(search_by_labels))
         .route("/labels/rename", put(rename_label))
+        // route_layer は後に追加したものが外側。REST API 無効チェックを先に、
+        // 続いて privileges チェックを行う。
+        .route_layer(middleware::from_fn_with_state(state.clone(), require_data_privilege))
         .route_layer(middleware::from_fn_with_state(state.clone(), require_http_api_enabled));
 
     // ログイン必須のエンドポイント群（/ui のアプリ殻と /auth/login 以外の全て）。

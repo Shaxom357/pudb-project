@@ -4,11 +4,13 @@
 
 use axum::{
     extract::{Request, State},
-    http::{header::AUTHORIZATION, StatusCode},
+    http::{header::AUTHORIZATION, HeaderMap, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
     Json,
 };
+
+use crate::auth::DEFAULT_USERNAME;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::AuthError;
@@ -37,14 +39,48 @@ fn auth_error_response(e: AuthError) -> Response {
     let status = match e {
         AuthError::InvalidCredentials => StatusCode::UNAUTHORIZED,
         AuthError::Locked { .. } => StatusCode::LOCKED,
-        AuthError::PasswordTooShort => StatusCode::BAD_REQUEST,
+        AuthError::PasswordTooShort
+        | AuthError::InvalidUsername
+        | AuthError::EmptyPassword => StatusCode::BAD_REQUEST,
+        AuthError::UserNotFound => StatusCode::NOT_FOUND,
+        AuthError::UserAlreadyExists => StatusCode::CONFLICT,
+        AuthError::PermissionDenied | AuthError::CannotModifyAdmin => StatusCode::FORBIDDEN,
     };
     (status, Json(ErrorResponse::new(e.to_string()))).into_response()
 }
 
-fn bearer_token(req: &Request) -> Option<String> {
-    let header = req.headers().get(AUTHORIZATION)?.to_str().ok()?;
+/// Authorization: Bearer <token> ヘッダーからトークンを取り出す。
+pub fn bearer_token(req: &Request) -> Option<String> {
+    bearer_from_headers(req.headers())
+}
+
+/// HeaderMap から Bearer トークンを取り出す（Json 抽出と併用するハンドラー向け）。
+pub fn bearer_from_headers(headers: &HeaderMap) -> Option<String> {
+    let header = headers.get(AUTHORIZATION)?.to_str().ok()?;
     header.strip_prefix("Bearer ").map(|t| t.to_string())
+}
+
+/// リクエストの Bearer トークンから操作主体（ログイン中ユーザー名）を解決する。
+/// テスト用のバイパスモードでは常に管理者ユーザーとして扱う。
+pub fn resolve_actor(inner: &mut crate::handlers::AppStateInner, headers: &HeaderMap) -> Option<String> {
+    if inner.auth.is_test_bypass() {
+        return Some(DEFAULT_USERNAME.to_string());
+    }
+    let token = bearer_from_headers(headers)?;
+    inner.auth.username_for_token(&token)
+}
+
+/// resolve_actor の read ロック版。期限切れセッションの掃除はしないが、
+/// require_auth を通過済みのリクエストであれば実用上問題ない。
+pub fn resolve_actor_readonly(
+    inner: &crate::handlers::AppStateInner,
+    headers: &HeaderMap,
+) -> Option<String> {
+    if inner.auth.is_test_bypass() {
+        return Some(DEFAULT_USERNAME.to_string());
+    }
+    let token = bearer_from_headers(headers)?;
+    inner.auth.peek_username_for_token(&token)
 }
 
 /// POST /auth/login -- ユーザー名/パスワードを検証し、成功したらセッショントークンを発行する
@@ -81,10 +117,17 @@ pub async fn logout(State(state): State<AppState>, req: Request) -> impl IntoRes
 /// クライアントは再ログインが必要になる。
 pub async fn change_password(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(payload): Json<ChangePasswordRequest>,
 ) -> impl IntoResponse {
     let mut inner = state.write().await;
-    match inner.auth.change_password(&payload.current_password, &payload.new_password) {
+    let Some(actor) = resolve_actor(&mut inner, &headers) else {
+        return auth_error_response(AuthError::InvalidCredentials);
+    };
+    match inner
+        .auth
+        .change_password(&actor, &payload.current_password, &payload.new_password)
+    {
         Ok(()) => {
             inner.logger.auth_info("password changed");
             StatusCode::NO_CONTENT.into_response()
