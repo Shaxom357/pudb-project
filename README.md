@@ -7,13 +7,13 @@
 > ・メジャーバージョンが異なると互換性は無くなります。  
 > ・メジャーバージョンが一致し、マイナーバージョンだけが異なる場合問題なく移行ができ互換性を保ちます。
 
-**バージョン: `4.0.0`**
+**バージョン: `4.1.0`**
 
 | 区分 | 説明 |
 |------|------|
-| **A = 4** (メジャー) | **【破壊的変更】** 一般ユーザーの `privileges` を実際に強制するようになった。`/sql` の SELECT/INSERT/UPDATE/DELETE と `/records`・`/labels` 系 REST API は、ログイン中ユーザーが対応する権限（`SELECT`/`INSERT`/`UPDATE`/`DELETE`）を持たない場合 `403 Forbidden` を返す（管理者ロール `kagura` は常に全権限。既存の一般ユーザーは作成時の既定で4種すべてを保持するため挙動は変わらない）。あわせて権限を付与・剥奪する SQL 文 `GRANT <権限>[, ...] TO <ユーザー>[, ...]` / `REVOKE <権限>[, ...] FROM <ユーザー>[, ...]` を追加（`MANAGE_USERS` 権限が必要。指定できる権限は `SELECT`/`INSERT`/`UPDATE`/`DELETE`/`MANAGE_USERS` と、まとめ指定用の `ALL`=データ操作4種・`SUPER`=4種+`MANAGE_USERS`）。3.0.0 で導入した「`/ui` と `POST /auth/login` を除く全エンドポイントがログイン必須」は継続。`.kdb` バイナリフォーマット・`auth.json` フォーマットは変更なし |
-| **B = 0** (マイナー) | （今回のメジャー更新でリセット） |
-| **C = 0** (ビルド) | （今回のメジャー更新でリセット） |
+| **A = 4** (メジャー) | **【破壊的変更】** 一般ユーザーの `privileges` を実際に強制する。`/sql` の SELECT/INSERT/UPDATE/DELETE と `/records`・`/labels` 系 REST API は、ログイン中ユーザーが対応する権限（`SELECT`/`INSERT`/`UPDATE`/`DELETE`）を持たない場合 `403 Forbidden` を返す（管理者ロール `kagura` は常に全権限。既存の一般ユーザーは作成時の既定で4種すべてを保持するため挙動は変わらない）。権限を付与・剥奪する SQL 文 `GRANT <権限>[, ...] TO <ユーザー>[, ...]` / `REVOKE <権限>[, ...] FROM <ユーザー>[, ...]`（`MANAGE_USERS` 権限が必要。指定できる権限は `SELECT`/`INSERT`/`UPDATE`/`DELETE`/`MANAGE_USERS` と、まとめ指定用の `ALL`=データ操作4種・`SUPER`=4種+`MANAGE_USERS`）。3.0.0 で導入した「`/ui` と `POST /auth/login` を除く全エンドポイントがログイン必須」は継続。`.kdb` バイナリフォーマット・`auth.json` フォーマットは変更なし |
+| **B = 1** (マイナー) | **【新機能】** `db_ffi`（Python `ctypes` 向け FFI）に暗号化 `.kdb` ストレージを本格利用するための API を追加。従来は `Database::save`/`load`（平文 JSON・全書き直し）しか公開しておらず、`.kdb` 暗号化・WAL 追記・SQL が Python から使えなかった。追加関数: `kdb_open`/`kdb_close`/`kdb_save`（チェックポイント）/`kdb_count`、`kdb_insert`（WAL 追記 O(1)）、`kdb_insert_many`（JSON 配列を 1 件ずつ追記。大量バックフィルの FFI+JSON オーバーヘッド削減）、`kdb_sql`（SELECT/INSERT/UPDATE/DELETE を文字列で実行し JSON を返す。JOIN・GROUP BY 非対応）、`kdb_get_by_label`（型情報付き）、`kdb_get_by_label_ndjson`（巨大スライスをフラット NDJSON ファイルへ書き出し `polars.scan_ndjson` で読む）。不透明ポインタ `KdbSession` は `Database` + `Option<KdbFile>` を束ね、`db_client` の `state.kdb` と同じ持ち方に倣う。文字列は既存どおり `db_string_free` で解放。単一ライター制約を補助する advisory lock（`<path>.lock` の排他作成）付き。Python ラッパー `examples/python/kdb_engine.py`（`KdbEngine`）を新規追加。`db_engine`/`sql_engine` 本体・既存 FFI 関数・REST サーバーの挙動は不変。全クレートの `Cargo.toml` バージョンを `4.1.0` に同期 |
+| **C = 0** (ビルド) | （マイナー更新に伴いリセット） |
 
 ---
 
@@ -148,8 +148,10 @@ pudb-project/
 │       └── lib.rs                      # 公開 API（run_select・run_insert・run_update・run_delete）
 ├── dynamic_label_management/           # ラベル管理ライブラリ (v1.6.0)
 │   └── src/lib.rs + tests.rs           # ユニットテスト（24件）
-├── db_ffi/                             # C FFI バインディング (v1.6.0)
-│   └── src/lib.rs                      # FFI 関数（13本）＋テスト（10件）
+├── db_ffi/                             # C FFI バインディング
+│   └── src/
+│       ├── lib.rs                      # 平文 JSON 版 FFI 関数（db_new/insert/get/... 13本）
+│       └── kdb_session.rs              # 暗号化 .kdb セッション FFI（kdb_open/insert/sql/... 9本）＋テスト（10件）
 ├── kdb_cli/                             # コマンドラインクライアント (v3.3.0, バイナリ名: kdb)
 │   └── src/
 │       ├── main.rs                      # CLI定義（login/logout/whoami）とエントリーポイント
@@ -157,7 +159,8 @@ pudb-project/
 │       └── session.rs                   # セッション永続化（~/.config/kdb/session.json）
 ├── packaging/                           # Linux/Windows パッケージング一式
 └── examples/python/
-    ├── db_engine.py                    # Python ctypes ラッパー
+    ├── db_engine.py                    # Python ctypes ラッパー（平文 JSON 版 DbEngine）
+    ├── kdb_engine.py                   # Python ctypes ラッパー（暗号化 .kdb 版 KdbEngine）
     ├── demo.py                         # デモスクリプト
     └── generate_testdata.py           # 10,000件テストデータ自動生成スクリプト
 ```
@@ -251,7 +254,7 @@ SQL 構文の詳細は [docs/sql.md](docs/sql.md)、全エンドポイントは 
 | テストデータ生成 | Python 3.6+ 標準ライブラリのみ |
 | ログ | JSON Lines 形式でファイル保存（[chrono](https://github.com/chronotope/chrono) でタイムスタンプ生成） |
 
-テスト（`cargo test --workspace`・合計 254 件）の内訳は [docs/development.md](docs/development.md) を参照してください。
+テスト（`cargo test --workspace`・合計 264 件）の内訳は [docs/development.md](docs/development.md) を参照してください。
 
 ---
 
@@ -267,6 +270,7 @@ SQL 構文の詳細は [docs/sql.md](docs/sql.md)、全エンドポイントは 
 
 | バージョン | 主な変更内容 |
 |-----------|-------------|
+| **4.1.0** | `db_ffi`（Python `ctypes` 向け FFI）に暗号化 `.kdb` ストレージの本格利用 API を新規追加。従来公開されていたのは `Database::save`/`load`（平文 JSON・全書き直し）のみで、`.kdb` 暗号化・WAL 追記・SQL が Python から使えなかった。不透明ポインタ `KdbSession`（`Database` + `Option<KdbFile>` を束ねる。`db_client` の `state.kdb` と同じ持ち方）と、`kdb_open`（`load_or_new_kdb` + `KdbFile::open_or_create`）/`kdb_close`/`kdb_save`（`KdbFile::compact` によるチェックポイント。`db_client::handlers::auto_save` と同一パスで、同じ .kdb を 2 本開かない）/`kdb_count` を追加。書き込みは `kdb_insert`（`insert_fast` による WAL 追記、O(1)）と `kdb_insert_many`（JSON 配列を 1 件ずつ `insert_fast`。200 万件クラスのバックフィルで FFI 呼び出しと JSON パースを 1 回に集約。成功件数を返す）。`kdb_sql` は先頭トークンで `sql_engine::run_select`/`run_insert_fast`/`run_update`/`run_delete` にディスパッチし、`QueryResult`/`CellValue` を `db_client/src/sql_handlers.rs` と同じ規則で JSON 化して返す（`WHERE`/`ORDER BY`/`LIMIT`/ラベル AND-OR/`DELETE FROM label.x WHERE ...` に対応。JOIN・GROUP BY は非対応。UPDATE/DELETE は実行後に自動でチェックポイント）。`kdb_get_by_label` は型タグ付き JSON 配列、`kdb_get_by_label_ndjson` は年 40 万件クラスの巨大スライスを `ctypes` 越しの巨大文字列にせず「`SELECT *` 相当のフラット NDJSON」をファイルへ書き出して件数を返す（Python 側は `polars.scan_ndjson` で遅延読み込み）。戻り値の文字列は従来どおり `db_string_free` で解放。単一ライター制約（あるプロセスが `kdb_open` 中は同じ `.kdb` に `db_client` を起動しない。WAL 二重書き込みで破損）を補助する advisory lock ファイル `<path>.lock` の排他作成を実装（別プロセスがロック中なら `kdb_open` は NULL）。Python ラッパー `examples/python/kdb_engine.py`（`KdbEngine.open` / `insert` / `insert_many` / `sql` / `get_by_label` / `get_by_label_ndjson` / `count` / `save` / `close`、コンテキストマネージャ対応）を新規追加。`db_ffi` のユニットテストを 10 件追加（計 20 件）。`db_engine` / `sql_engine` 本体（コア外部クレート不使用の方針）・既存の FFI 関数・REST サーバー・Web UI・`kdb` CLI の挙動には一切影響しない。全クレートの `Cargo.toml` バージョンを `4.1.0` に同期 |
 | **4.0.0** | **【破壊的変更】** 一般ユーザーの `privileges` を実際に強制するようになり、あわせて権限付与・剥奪の SQL 文 `GRANT` / `REVOKE` を新規追加。`GRANT <権限>[, ...] TO <ユーザー>[, ...]` / `REVOKE <権限>[, ...] FROM <ユーザー>[, ...]`（`MANAGE_USERS` 権限が必要。指定できる権限は `SELECT`/`INSERT`/`UPDATE`/`DELETE`/`MANAGE_USERS` と、まとめ指定用の `ALL`=データ操作4種・`SUPER`=4種+`MANAGE_USERS`。複数権限・複数ユーザーをカンマ区切りで同時指定可。`ALL PRIVILEGES` 表記も許容）。`SUPER` / `ALL` は付与時に個別権限へ展開して `auth.json` へ永続化する。これらの文は他のユーザー管理文と同じく `db_client/src/user_sql.rs` の専用パーサーで処理（トークナイザに `,` を追加）。強制（enforce）は3か所: (1) `db_client/src/sql_handlers.rs` の `execute_sql` で SELECT→`SELECT` / INSERT→`INSERT` / UPDATE→`UPDATE` / DELETE→`DELETE` を要求、(2) `db_client/src/app.rs` に新ミドルウェア `require_data_privilege` を追加し `/records`・`/labels` 系 REST API をメソッド（GET/`POST /labels/search`→`SELECT`、POST→`INSERT`、PUT→`UPDATE`、DELETE→`DELETE`）で判定、(3) ユーザー管理文は従来どおり `MANAGE_USERS`。いずれも不足時は `403 Forbidden`（必要な権限名をメッセージに含む）。管理者ロール `kagura` は常に全権限。既存の一般ユーザーは作成時の既定で `SELECT`/`INSERT`/`UPDATE`/`DELETE` の4種を保持するため実挙動は変わらない。Web UI（設定→ユーザー管理）のユーザー一覧に権限チェックボックスを追加し、切り替えで `GRANT` / `REVOKE` を実行できるようにした。`.kdb` バイナリフォーマット・`auth.json` フォーマット・`kdb` CLI の挙動には影響しない。全クレートの `Cargo.toml` バージョンを `4.0.0` に同期 |
 | **3.4.0** | 一般ユーザー管理機能を新規追加。管理者ユーザー `kagura` のみが `POST /sql` 経由で `CREATE USER 'name' IDENTIFIED BY 'password'` を実行して一般ユーザーを発行できる（`DROP USER 'name' [IF EXISTS]` / `ALTER USER 'name' IDENTIFIED BY 'pw'` / `SHOW USERS` にも対応）。これらの文はレコードストアではなく認証状態を操作するため `sql_engine` には手を入れず、`db_client/src/user_sql.rs`（新規）の専用パーサーで処理し `db_client/src/sql_handlers.rs` の `execute_sql` 冒頭でディスパッチする。簡単なパスワード（`1234` `aaa` / 8文字未満 / 単一文字種 / 連番 / よくある語）の場合は要件どおり `Warning: The password strength is too weak. Do you want to proceed?\n\nPlease enter 'yes' to proceed or 'no' to cancel.` を返す。`/sql` は `{"ok":false,"needs_confirmation":true,"warning":...}` を返し、クライアントは `confirm_weak_password: true` を付けて再送すると作成を続行、`false` で中止（エラー）。Web UI（`/ui` 設定画面）に「ユーザー管理」セクションを追加し、作成フォーム・`SHOW USERS` 一覧・削除ボタンを提供、脆弱パスワード時は `prompt` で yes/no を確認する。認証情報ファイル `auth.json`（`KAGURA_AUTH_FILE`）は単一ユーザー形式から複数ユーザー対応形式 `{"schema_version":2,"users":[{username,password_hash,role,privileges,created_at,disabled}]}` へ拡張。旧形式のファイルは起動時に自動で新形式へ移行する（ユーザー操作不要）。一般ユーザーには将来の GRANT/REVOKE を見据えた `privileges`（既定 `select,insert,update,delete`）を保持し、現バージョンで enforce するのは `manage_users`（ユーザー管理操作の可否）のみ。`PUT /auth/password` はトークンからログイン中ユーザーを解決して本人のパスワードを変更するよう変更。`.kdb` バイナリフォーマット（`VERSION`）は不変で、既存の REST API・Web UI・`kagura`/`root` ログイン・`kdb` CLI の挙動には影響しない。全クレートの `Cargo.toml` バージョンを `3.4.0` に同期 |
 | **3.3.1** | 肥大化した `README.md`（約990行）を整理。認証・`kdb` CLI・インストール（Linux/Windows）・SQL 機能・KDB ストレージフォーマット・API リファレンス/Web UI/ログ機能・テスト/テストデータ生成/Python バインディングの各詳細セクションを `docs/` 配下の個別ファイル（`features.md` `authentication.md` `cli.md` `sql.md` `api.md` `storage-format.md` `installation.md` `development.md`）へ分割し、README 本体は概要・アーキテクチャ・機能概要・プロジェクト構成・クイックスタート・技術スタック・各ドキュメントへの入口・バージョン履歴に再編した。ドキュメントのみの変更でありコードの挙動・互換性には一切影響しない |

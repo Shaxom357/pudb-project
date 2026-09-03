@@ -66,8 +66,13 @@
 
 ## db_ffi
 - ✅ C ABI 互换の共有ライブラリ（`libdb_ffi.so`）
-- ✅ Python `ctypes` ラッパークラス（`DbEngine`）
+- ✅ Python `ctypes` ラッパークラス（平文 JSON 版 `DbEngine` / 暗号化 `.kdb` 版 `KdbEngine`）
 - ✅ JSON 文字列による全データ型対応
+- ✅ 暗号化 `.kdb` セッション（`KdbSession` 不透明ポインタ）: `kdb_open`/`kdb_close`/`kdb_save`（チェックポイント）/`kdb_count`
+- ✅ WAL 追記 INSERT（`kdb_insert` = O(1)）／一括バックフィル（`kdb_insert_many`、JSON 配列を 1 件ずつ追記し成功件数を返す）
+- ✅ `kdb_sql`: SELECT / INSERT / UPDATE / DELETE を文字列で実行し JSON で返す（WHERE・ORDER BY・LIMIT・ラベル AND-OR・`DELETE FROM label.x WHERE ...` 対応。JOIN・GROUP BY 非対応。UPDATE/DELETE は自動チェックポイント）
+- ✅ `kdb_get_by_label`（型情報付き）／`kdb_get_by_label_ndjson`（`SELECT *` 相当のフラット NDJSON をファイルへ書き出し。`polars.scan_ndjson` 向け）
+- ✅ 単一ライター制約を補助する advisory lock ファイル（`<path>.lock` の排他作成）
 
 ## kdb_cli（コマンドラインクライアント）
 - ✅ KAGURA DB インストール後に使える専用コマンド `kdb`（詳細は [cli.md](cli.md) を参照）
