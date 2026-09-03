@@ -9,20 +9,24 @@ use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use db_engine::{Database, DataType, Record};
 
+// .kdb セッション（暗号化 WAL・SQL・NDJSON エクスポート）の FFI
+mod kdb_session;
+pub use kdb_session::*;
+
 // ---------------------------------------------------------------------------
 // 内部ヘルパー
 // ---------------------------------------------------------------------------
 
 /// C 文字列を Rust &str に変換するヘルパー
 /// NULL または無効な UTF-8 の場合は None を返す
-fn c_str_to_str<'a>(ptr: *const c_char) -> Option<&'a str> {
+pub(crate) fn c_str_to_str<'a>(ptr: *const c_char) -> Option<&'a str> {
     if ptr.is_null() { return None; }
     unsafe { CStr::from_ptr(ptr).to_str().ok() }
 }
 
 /// Rust String をヒープ確保した C 文字列に変換する
 /// 呼び出し元は db_string_free() で解放する必要がある
-fn to_c_string(s: String) -> *mut c_char {
+pub(crate) fn to_c_string(s: String) -> *mut c_char {
     match CString::new(s) {
         Ok(cs) => cs.into_raw(),
         Err(_) => std::ptr::null_mut(),
@@ -31,8 +35,13 @@ fn to_c_string(s: String) -> *mut c_char {
 
 /// JSON 文字列から Record を構築する
 /// JSON 形式: {"id":0, "columns":{"name":{"type":"text","value":"Alice"}}, "labels":["tag1"]}
-fn json_to_record(json: &str) -> Option<Record> {
+pub(crate) fn json_to_record(json: &str) -> Option<Record> {
     let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    json_value_to_record(&v)
+}
+
+/// パース済み JSON 値から Record を構築する（配列一括投入で再シリアライズを避けるため）
+pub(crate) fn json_value_to_record(v: &serde_json::Value) -> Option<Record> {
     let id = v["id"].as_u64().unwrap_or(0);
     let mut record = Record::new(id);
 
@@ -60,7 +69,7 @@ fn json_to_record(json: &str) -> Option<Record> {
 }
 
 /// Record を JSON 値に変換する
-fn record_to_json(record: &Record) -> serde_json::Value {
+pub(crate) fn record_to_json(record: &Record) -> serde_json::Value {
     let mut cols = serde_json::Map::new();
     for (k, v) in &record.columns {
         let val = match v {
