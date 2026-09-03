@@ -7,13 +7,13 @@
 > ・メジャーバージョンが異なると互換性は無くなります。  
 > ・メジャーバージョンが一致し、マイナーバージョンだけが異なる場合問題なく移行ができ互換性を保ちます。
 
-**バージョン: `3.4.0`**
+**バージョン: `4.0.0`**
 
 | 区分 | 説明 |
 |------|------|
-| **A = 3** (メジャー) | 認証機能を新規追加した際の破壊的変更（3.0.0 で導入。既定で全エンドポイント（`/ui` と `POST /auth/login` を除く）がログイン必須） |
-| **B = 4** (マイナー) | 一般ユーザー管理機能を新規追加。管理者ユーザー `kagura` が SQL 文 `CREATE USER 'name' IDENTIFIED BY 'password'` で一般ユーザーを発行できるようになった（あわせて `DROP USER` / `ALTER USER ... IDENTIFIED BY` / `SHOW USERS` に対応、いずれも `POST /sql` 経由・管理者専用）。簡単なパスワード（`1234` `aaa` 等）の場合は SQL 実行時・Web UI 操作時ともに `Warning: The password strength is too weak. Do you want to proceed?` を表示して yes/no 確認を求める（`/sql` は `needs_confirmation` を返し、`confirm_weak_password: true` の再送で続行）。認証情報ファイル `auth.json` は複数ユーザー対応フォーマット（`{"schema_version":2,"users":[...]}`）へ拡張し、旧フォーマットは起動時に自動移行する。一般ユーザーには将来の権限付与を見据えた `privileges` リスト（既定は SELECT/INSERT/UPDATE/DELETE）を保持。`.kdb` バイナリフォーマットは変更なし。既存の REST API・Web UI・`kagura`/`root` ログインの挙動には影響しない |
-| **C = 0** (ビルド) | （今回のマイナー更新でリセット） |
+| **A = 4** (メジャー) | **【破壊的変更】** 一般ユーザーの `privileges` を実際に強制するようになった。`/sql` の SELECT/INSERT/UPDATE/DELETE と `/records`・`/labels` 系 REST API は、ログイン中ユーザーが対応する権限（`SELECT`/`INSERT`/`UPDATE`/`DELETE`）を持たない場合 `403 Forbidden` を返す（管理者ロール `kagura` は常に全権限。既存の一般ユーザーは作成時の既定で4種すべてを保持するため挙動は変わらない）。あわせて権限を付与・剥奪する SQL 文 `GRANT <権限>[, ...] TO <ユーザー>[, ...]` / `REVOKE <権限>[, ...] FROM <ユーザー>[, ...]` を追加（`MANAGE_USERS` 権限が必要。指定できる権限は `SELECT`/`INSERT`/`UPDATE`/`DELETE`/`MANAGE_USERS` と、まとめ指定用の `ALL`=データ操作4種・`SUPER`=4種+`MANAGE_USERS`）。3.0.0 で導入した「`/ui` と `POST /auth/login` を除く全エンドポイントがログイン必須」は継続。`.kdb` バイナリフォーマット・`auth.json` フォーマットは変更なし |
+| **B = 0** (マイナー) | （今回のメジャー更新でリセット） |
+| **C = 0** (ビルド) | （今回のメジャー更新でリセット） |
 
 ---
 
@@ -251,7 +251,7 @@ SQL 構文の詳細は [docs/sql.md](docs/sql.md)、全エンドポイントは 
 | テストデータ生成 | Python 3.6+ 標準ライブラリのみ |
 | ログ | JSON Lines 形式でファイル保存（[chrono](https://github.com/chronotope/chrono) でタイムスタンプ生成） |
 
-テスト（`cargo test --workspace`・合計 214 件）の内訳は [docs/development.md](docs/development.md) を参照してください。
+テスト（`cargo test --workspace`・合計 254 件）の内訳は [docs/development.md](docs/development.md) を参照してください。
 
 ---
 
@@ -267,6 +267,7 @@ SQL 構文の詳細は [docs/sql.md](docs/sql.md)、全エンドポイントは 
 
 | バージョン | 主な変更内容 |
 |-----------|-------------|
+| **4.0.0** | **【破壊的変更】** 一般ユーザーの `privileges` を実際に強制するようになり、あわせて権限付与・剥奪の SQL 文 `GRANT` / `REVOKE` を新規追加。`GRANT <権限>[, ...] TO <ユーザー>[, ...]` / `REVOKE <権限>[, ...] FROM <ユーザー>[, ...]`（`MANAGE_USERS` 権限が必要。指定できる権限は `SELECT`/`INSERT`/`UPDATE`/`DELETE`/`MANAGE_USERS` と、まとめ指定用の `ALL`=データ操作4種・`SUPER`=4種+`MANAGE_USERS`。複数権限・複数ユーザーをカンマ区切りで同時指定可。`ALL PRIVILEGES` 表記も許容）。`SUPER` / `ALL` は付与時に個別権限へ展開して `auth.json` へ永続化する。これらの文は他のユーザー管理文と同じく `db_client/src/user_sql.rs` の専用パーサーで処理（トークナイザに `,` を追加）。強制（enforce）は3か所: (1) `db_client/src/sql_handlers.rs` の `execute_sql` で SELECT→`SELECT` / INSERT→`INSERT` / UPDATE→`UPDATE` / DELETE→`DELETE` を要求、(2) `db_client/src/app.rs` に新ミドルウェア `require_data_privilege` を追加し `/records`・`/labels` 系 REST API をメソッド（GET/`POST /labels/search`→`SELECT`、POST→`INSERT`、PUT→`UPDATE`、DELETE→`DELETE`）で判定、(3) ユーザー管理文は従来どおり `MANAGE_USERS`。いずれも不足時は `403 Forbidden`（必要な権限名をメッセージに含む）。管理者ロール `kagura` は常に全権限。既存の一般ユーザーは作成時の既定で `SELECT`/`INSERT`/`UPDATE`/`DELETE` の4種を保持するため実挙動は変わらない。Web UI（設定→ユーザー管理）のユーザー一覧に権限チェックボックスを追加し、切り替えで `GRANT` / `REVOKE` を実行できるようにした。`.kdb` バイナリフォーマット・`auth.json` フォーマット・`kdb` CLI の挙動には影響しない。全クレートの `Cargo.toml` バージョンを `4.0.0` に同期 |
 | **3.4.0** | 一般ユーザー管理機能を新規追加。管理者ユーザー `kagura` のみが `POST /sql` 経由で `CREATE USER 'name' IDENTIFIED BY 'password'` を実行して一般ユーザーを発行できる（`DROP USER 'name' [IF EXISTS]` / `ALTER USER 'name' IDENTIFIED BY 'pw'` / `SHOW USERS` にも対応）。これらの文はレコードストアではなく認証状態を操作するため `sql_engine` には手を入れず、`db_client/src/user_sql.rs`（新規）の専用パーサーで処理し `db_client/src/sql_handlers.rs` の `execute_sql` 冒頭でディスパッチする。簡単なパスワード（`1234` `aaa` / 8文字未満 / 単一文字種 / 連番 / よくある語）の場合は要件どおり `Warning: The password strength is too weak. Do you want to proceed?\n\nPlease enter 'yes' to proceed or 'no' to cancel.` を返す。`/sql` は `{"ok":false,"needs_confirmation":true,"warning":...}` を返し、クライアントは `confirm_weak_password: true` を付けて再送すると作成を続行、`false` で中止（エラー）。Web UI（`/ui` 設定画面）に「ユーザー管理」セクションを追加し、作成フォーム・`SHOW USERS` 一覧・削除ボタンを提供、脆弱パスワード時は `prompt` で yes/no を確認する。認証情報ファイル `auth.json`（`KAGURA_AUTH_FILE`）は単一ユーザー形式から複数ユーザー対応形式 `{"schema_version":2,"users":[{username,password_hash,role,privileges,created_at,disabled}]}` へ拡張。旧形式のファイルは起動時に自動で新形式へ移行する（ユーザー操作不要）。一般ユーザーには将来の GRANT/REVOKE を見据えた `privileges`（既定 `select,insert,update,delete`）を保持し、現バージョンで enforce するのは `manage_users`（ユーザー管理操作の可否）のみ。`PUT /auth/password` はトークンからログイン中ユーザーを解決して本人のパスワードを変更するよう変更。`.kdb` バイナリフォーマット（`VERSION`）は不変で、既存の REST API・Web UI・`kagura`/`root` ログイン・`kdb` CLI の挙動には影響しない。全クレートの `Cargo.toml` バージョンを `3.4.0` に同期 |
 | **3.3.1** | 肥大化した `README.md`（約990行）を整理。認証・`kdb` CLI・インストール（Linux/Windows）・SQL 機能・KDB ストレージフォーマット・API リファレンス/Web UI/ログ機能・テスト/テストデータ生成/Python バインディングの各詳細セクションを `docs/` 配下の個別ファイル（`features.md` `authentication.md` `cli.md` `sql.md` `api.md` `storage-format.md` `installation.md` `development.md`）へ分割し、README 本体は概要・アーキテクチャ・機能概要・プロジェクト構成・クイックスタート・技術スタック・各ドキュメントへの入口・バージョン履歴に再編した。ドキュメントのみの変更でありコードの挙動・互換性には一切影響しない |
 | **3.3.0** | `kdb shell-init bash`/`zsh`（シェル連携スクリプト出力）と `kdb prompt`（ログイン状態タグ出力。`shell-init`が内部的に利用）を新規追加。ログインしたことがOSのシェルプロンプト上からは分からず、`kdb login` を打ったあとも `[ec2-user@ip-10-0-0-5 scripts]$` のまま変化しないのが分かりにくいという指摘を受けて対応。`kdb login` 自体は子プロセスのため親シェルの `PS1`/`PROMPT` を直接書き換えることはできないので、`kube-ps1` 等と同様に「シェル設定ファイルに1行追加 → プロンプト描画のたびに `$(__kdb_ps1)` が `kdb prompt` を呼び出し、ローカルのセッションファイル（`~/.config/kdb/session.json`）の有無に応じてタグの表示/非表示を切り替える」方式を採用。ホスト名・カレントディレクトリ等の既存プロンプト情報は保持したまま、先頭に `(kdb:ユーザー名@接続先) ` タグを付加する。サーバーへの通信は行わずローカルのセッションファイルの有無のみで判定するため、トークンの期限切れ・サーバー側失効は反映されない（正確な有効性確認は `kdb whoami` を使う） |

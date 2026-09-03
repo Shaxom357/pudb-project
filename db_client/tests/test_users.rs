@@ -265,6 +265,150 @@ async fn test_alter_user_password() {
 }
 
 #[tokio::test]
+async fn test_grant_and_revoke_enforced_on_sql() {
+    let (base, db_path) = spawn_test_server_with_auth().await;
+    let client = reqwest::Client::new();
+    let admin = admin_token(&client, &base).await;
+
+    let (status, _) = run_sql(
+        &client,
+        &base,
+        &admin,
+        json!({"query": "CREATE USER 'ken' IDENTIFIED BY 'aA951753'"}),
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    let bt = login(&client, &base, "ken", "aA951753")
+        .await
+        .json::<serde_json::Value>()
+        .await
+        .unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // 既定では SELECT / INSERT 可能
+    let (status, _) = run_sql(&client, &base, &bt, json!({"query": "SELECT * FROM label.*"})).await;
+    assert_eq!(status, 200);
+
+    // INSERT 権限を剥奪 -> INSERT が 403、SELECT は引き続き 200
+    let (status, _) = run_sql(
+        &client,
+        &base,
+        &admin,
+        json!({"query": "REVOKE INSERT, DELETE FROM 'ken'"}),
+    )
+    .await;
+    assert_eq!(status, 200);
+
+    let (status, body) = run_sql(
+        &client,
+        &base,
+        &bt,
+        json!({"query": "INSERT INTO (label.t) (a) VALUE (1)"}),
+    )
+    .await;
+    assert_eq!(status, 403, "body={body}");
+    let (status, _) = run_sql(&client, &base, &bt, json!({"query": "SELECT * FROM label.*"})).await;
+    assert_eq!(status, 200);
+
+    // 権限を再付与 -> INSERT が通る
+    let (status, _) = run_sql(
+        &client,
+        &base,
+        &admin,
+        json!({"query": "GRANT INSERT TO 'ken'"}),
+    )
+    .await;
+    assert_eq!(status, 200);
+    let (status, _) = run_sql(
+        &client,
+        &base,
+        &bt,
+        json!({"query": "INSERT INTO (label.t) (a) VALUE (1)"}),
+    )
+    .await;
+    assert_eq!(status, 201);
+
+    // MANAGE_USERS を持たない一般ユーザーは GRANT / SHOW USERS ができない
+    let (status, _) = run_sql(&client, &base, &bt, json!({"query": "SHOW USERS"})).await;
+    assert_eq!(status, 403);
+    let (status, _) = run_sql(
+        &client,
+        &base,
+        &bt,
+        json!({"query": "GRANT SELECT TO 'ken'"}),
+    )
+    .await;
+    assert_eq!(status, 403);
+
+    // SUPER を付与すると MANAGE_USERS も含まれ、SHOW USERS が可能になる
+    let (status, _) = run_sql(&client, &base, &admin, json!({"query": "GRANT SUPER TO 'ken'"})).await;
+    assert_eq!(status, 200);
+    let (status, _) = run_sql(&client, &base, &bt, json!({"query": "SHOW USERS"})).await;
+    assert_eq!(status, 200);
+
+    // 管理者ユーザーへの GRANT は 403
+    let (status, _) = run_sql(
+        &client,
+        &base,
+        &admin,
+        json!({"query": "GRANT SELECT TO 'kagura'"}),
+    )
+    .await;
+    assert_eq!(status, 403);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
+async fn test_grant_enforced_on_rest_api() {
+    let (base, db_path) = spawn_test_server_with_auth().await;
+    let client = reqwest::Client::new();
+    let admin = admin_token(&client, &base).await;
+
+    // REST API を有効化
+    let res = client
+        .put(format!("{}/settings", base))
+        .bearer_auth(&admin)
+        .json(&json!({"http_api_enabled": true}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+
+    run_sql(
+        &client,
+        &base,
+        &admin,
+        json!({"query": "CREATE USER 'lea' IDENTIFIED BY 'aA951753'"}),
+    )
+    .await;
+    run_sql(&client, &base, &admin, json!({"query": "REVOKE SELECT FROM 'lea'"})).await;
+
+    let lt = login(&client, &base, "lea", "aA951753")
+        .await
+        .json::<serde_json::Value>()
+        .await
+        .unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // SELECT 権限が無いので GET /records は 403
+    let res = client
+        .get(format!("{}/records", base))
+        .bearer_auth(&lt)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 403);
+
+    let _ = std::fs::remove_file(db_path);
+}
+
+#[tokio::test]
 async fn test_create_user_duplicate_and_syntax_errors() {
     let (base, db_path) = spawn_test_server_with_auth().await;
     let client = reqwest::Client::new();

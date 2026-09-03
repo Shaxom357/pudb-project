@@ -2,7 +2,7 @@
 
 `POST /sql` エンドポイントで SQL SELECT / INSERT / UPDATE / DELETE クエリを実行できます。
 通常の SQL とは異なり、テーブル名の代わりに `label.xxx` でラベルを指定する独自拡張構文です。
-また、管理者向けに `CREATE USER` / `DROP USER` / `ALTER USER` / `SHOW USERS`（[ユーザー管理](#ユーザー管理-create-user--drop-user--alter-user--show-users)）も実行できます。
+また、`MANAGE_USERS` 権限を持つユーザー向けに `CREATE USER` / `DROP USER` / `ALTER USER` / `SHOW USERS` / `GRANT` / `REVOKE`（[ユーザー管理](#ユーザー管理-create-user--drop-user--alter-user--show-users--grant--revoke)）も実行できます。
 
 ## SELECT 構文
 
@@ -91,10 +91,11 @@ DELETE LABEL FROM label.employee
 - いずれも一致した行が無い場合はエラーにはならず、削除件数 0 として成功を返す。
 - レスポンスの削除件数は `deleted_count` に格納される（`DELETE LABEL` の場合はラベルを外したレコード数）。
 
-## ユーザー管理 (CREATE USER / DROP USER / ALTER USER / SHOW USERS)
+## ユーザー管理 (CREATE USER / DROP USER / ALTER USER / SHOW USERS / GRANT / REVOKE)
 
-`POST /sql` では一般ユーザーの発行・管理を行う文も実行できます（**管理者権限が必要**。
-一般ユーザーが実行すると `403`）。これらの文はレコードストアではなく認証状態を操作します。
+`POST /sql` では一般ユーザーの発行・管理を行う文も実行できます（**`MANAGE_USERS` 権限が必要**。
+管理者 `kagura` は常に保持。持たないユーザーが実行すると `403`）。
+これらの文はレコードストアではなく認証状態を操作します。
 
 ```sql
 CREATE USER 'test' IDENTIFIED BY 'aA951753'
@@ -103,6 +104,10 @@ DROP USER 'test'
 DROP USER IF EXISTS 'test'
 ALTER USER 'test' IDENTIFIED BY 'Xy837261'
 SHOW USERS
+GRANT SELECT, INSERT TO 'test'
+GRANT ALL TO 'alice', 'bob'
+GRANT SUPER TO 'ops'
+REVOKE DELETE FROM 'test'
 ```
 
 - 簡単なパスワード（`1234` `aaa` / 8文字未満 / 単一文字種 / 連番 / `password` 等）は「脆弱」と判定され、
@@ -110,7 +115,11 @@ SHOW USERS
   `{"ok": false, "needs_confirmation": true, "warning": "Warning: The password strength is too weak. Do you want to proceed?\n\nPlease enter 'yes' to proceed or 'no' to cancel."}` を返す。
   リクエストに `"confirm_weak_password": true` を付けて再送すると作成を続行、`false` で中止（エラー）。
 - ユーザー名・パスワードはクォート（`'...'` / `` `...` `` / `"..."`）または素の語で指定。クォート内の `'` は `''` でエスケープ。
-- 詳細は [authentication.md](authentication.md#一般ユーザー管理-create-user--drop-user--alter-user--show-users) を参照。
+- `GRANT` / `REVOKE` の権限は `SELECT` / `INSERT` / `UPDATE` / `DELETE` / `MANAGE_USERS` と、
+  まとめ指定用の `ALL`（データ操作4種）・`SUPER`（4種 + `MANAGE_USERS`）。一般ユーザーは
+  自分の `privileges` の範囲でのみデータ操作でき、不足時は `403`。詳細は
+  [authentication.md](authentication.md#権限privilegesと-grant--revoke) を参照。
+- 詳細は [authentication.md](authentication.md) を参照。
 
 ## リクエスト例
 

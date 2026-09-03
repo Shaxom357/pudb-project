@@ -70,6 +70,19 @@ pub fn resolve_actor(inner: &mut crate::handlers::AppStateInner, headers: &Heade
     inner.auth.username_for_token(&token)
 }
 
+/// resolve_actor の read ロック版。期限切れセッションの掃除はしないが、
+/// require_auth を通過済みのリクエストであれば実用上問題ない。
+pub fn resolve_actor_readonly(
+    inner: &crate::handlers::AppStateInner,
+    headers: &HeaderMap,
+) -> Option<String> {
+    if inner.auth.is_test_bypass() {
+        return Some(DEFAULT_USERNAME.to_string());
+    }
+    let token = bearer_from_headers(headers)?;
+    inner.auth.peek_username_for_token(&token)
+}
+
 /// POST /auth/login -- ユーザー名/パスワードを検証し、成功したらセッショントークンを発行する
 pub async fn login(
     State(state): State<AppState>,

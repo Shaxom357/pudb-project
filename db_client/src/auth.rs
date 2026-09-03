@@ -70,6 +70,22 @@ pub enum Privilege {
     All,
 }
 
+impl Privilege {
+    /// GRANT / REVOKE・エラーメッセージ・SHOW USERS 表示で使う大文字ラベル。
+    pub fn label(&self) -> &'static str {
+        match self {
+            Privilege::Select => "SELECT",
+            Privilege::Insert => "INSERT",
+            Privilege::Update => "UPDATE",
+            Privilege::Delete => "DELETE",
+            Privilege::ManageUsers => "MANAGE_USERS",
+            Privilege::ManageSettings => "MANAGE_SETTINGS",
+            Privilege::ViewLogs => "VIEW_LOGS",
+            Privilege::All => "ALL",
+        }
+    }
+}
+
 /// 一般ユーザー作成時に既定で付与する権限（データ操作一式）。
 fn default_user_privileges() -> Vec<Privilege> {
     vec![Privilege::Select, Privilege::Insert, Privilege::Update, Privilege::Delete]
@@ -426,6 +442,16 @@ impl AuthState {
         Ok(token)
     }
 
+    /// 期限切れセッションの掃除を行わずにトークン→ユーザー名を引く。
+    /// read ロックしか取れない箇所（`/sql` の SELECT 権限判定など）で使う。
+    pub fn peek_username_for_token(&self, token: &str) -> Option<String> {
+        let s = self.sessions.get(token)?;
+        if s.created_at.elapsed() > SESSION_TTL {
+            return None;
+        }
+        Some(s.username.clone())
+    }
+
     /// Bearer トークンが有効なら、対応するユーザー名を返す。期限切れは無効として掃除する。
     pub fn username_for_token(&mut self, token: &str) -> Option<String> {
         let expired = match self.sessions.get(token) {
@@ -553,6 +579,40 @@ impl AuthState {
         };
         user.password_hash = hash;
         self.sessions.retain(|_, s| s.username != username);
+        self.persist();
+        Ok(())
+    }
+
+    // ---- 権限付与 / 剥奪（GRANT / REVOKE） ----
+
+    /// GRANT / REVOKE の対象にできるユーザーかを事前検証する。
+    /// 管理者ユーザーは常に全権限を持つため対象外（`CannotModifyAdmin`）。
+    pub fn ensure_grantable(&self, username: &str) -> Result<(), AuthError> {
+        match self.find(username) {
+            None => Err(AuthError::UserNotFound),
+            Some(u) if matches!(u.role, Role::Admin) => Err(AuthError::CannotModifyAdmin),
+            Some(_) => Ok(()),
+        }
+    }
+
+    /// 指定ユーザーへ権限を付与する（既に持っている権限は無視）。
+    pub fn grant_privileges(&mut self, username: &str, privs: &[Privilege]) -> Result<(), AuthError> {
+        self.ensure_grantable(username)?;
+        let user = self.find_mut(username).ok_or(AuthError::UserNotFound)?;
+        for p in privs {
+            if !user.privileges.contains(p) {
+                user.privileges.push(*p);
+            }
+        }
+        self.persist();
+        Ok(())
+    }
+
+    /// 指定ユーザーから権限を剥奪する（持っていない権限は無視）。
+    pub fn revoke_privileges(&mut self, username: &str, privs: &[Privilege]) -> Result<(), AuthError> {
+        self.ensure_grantable(username)?;
+        let user = self.find_mut(username).ok_or(AuthError::UserNotFound)?;
+        user.privileges.retain(|p| !privs.contains(p));
         self.persist();
         Ok(())
     }
@@ -780,6 +840,55 @@ mod tests {
         assert_eq!(users.len(), 2);
         assert!(users.iter().any(|u| u.username == DEFAULT_USERNAME && matches!(u.role, Role::Admin)));
         assert!(users.iter().any(|u| u.username == "grace" && matches!(u.role, Role::User)));
+    }
+
+    // ---- 権限付与 / 剥奪 ----
+
+    #[test]
+    fn test_grant_and_revoke_privileges() {
+        let mut auth = admin_auth();
+        auth.create_user("ivan", "aA951753", false).unwrap();
+        // 既定はデータ操作4種
+        assert!(auth.user_has_privilege("ivan", Privilege::Select));
+        assert!(!auth.user_has_privilege("ivan", Privilege::ManageUsers));
+
+        // 剥奪
+        auth.revoke_privileges("ivan", &[Privilege::Delete, Privilege::Update])
+            .unwrap();
+        assert!(!auth.user_has_privilege("ivan", Privilege::Delete));
+        assert!(!auth.user_has_privilege("ivan", Privilege::Update));
+        assert!(auth.user_has_privilege("ivan", Privilege::Select));
+
+        // 付与（重複は無視）
+        auth.grant_privileges("ivan", &[Privilege::Delete, Privilege::ManageUsers, Privilege::Select])
+            .unwrap();
+        assert!(auth.user_has_privilege("ivan", Privilege::Delete));
+        assert!(auth.user_has_privilege("ivan", Privilege::ManageUsers));
+        assert_eq!(
+            auth.list_users()
+                .iter()
+                .find(|u| u.username == "ivan")
+                .unwrap()
+                .privileges
+                .iter()
+                .filter(|p| **p == Privilege::Select)
+                .count(),
+            1,
+            "同じ権限が重複して格納されない"
+        );
+    }
+
+    #[test]
+    fn test_grant_rejects_admin_and_missing_user() {
+        let mut auth = admin_auth();
+        assert_eq!(
+            auth.grant_privileges(DEFAULT_USERNAME, &[Privilege::Select]),
+            Err(AuthError::CannotModifyAdmin)
+        );
+        assert_eq!(
+            auth.grant_privileges("nobody", &[Privilege::Select]),
+            Err(AuthError::UserNotFound)
+        );
     }
 
     // ---- パスワード強度 ----

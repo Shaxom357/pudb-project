@@ -8,7 +8,8 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
-use crate::auth_handlers::resolve_actor;
+use crate::auth::Privilege;
+use crate::auth_handlers::{resolve_actor, resolve_actor_readonly};
 use crate::handlers::{auto_save, AppState};
 use crate::user_sql::{execute_user_statement, parse_user_statement, UserSqlOutcome};
 use sql_engine::{run_select, run_insert_fast, run_update, run_delete, CellValue};
@@ -170,9 +171,38 @@ pub async fn execute_sql(
         };
     }
 
-    // 現時点では SELECT / INSERT / UPDATE のみサポート
+    // 現時点では SELECT / INSERT / UPDATE / DELETE のみサポート
     let upper = query.to_uppercase();
     let trimmed = upper.trim_start();
+
+    // データ操作文はログイン中ユーザーの privileges を検査する（管理者は常に通過）。
+    let required_privilege = if trimmed.starts_with("SELECT") {
+        Some(Privilege::Select)
+    } else if trimmed.starts_with("INSERT") {
+        Some(Privilege::Insert)
+    } else if trimmed.starts_with("UPDATE") {
+        Some(Privilege::Update)
+    } else if trimmed.starts_with("DELETE") {
+        Some(Privilege::Delete)
+    } else {
+        None
+    };
+    if let Some(privilege) = required_privilege {
+        let inner = state.read().await;
+        let Some(actor) = resolve_actor_readonly(&inner, &headers) else {
+            let msg = "認証が必要です。/auth/login でログインしてください。";
+            inner.logger.sql_query(&query, false, 0, Some(msg));
+            return (StatusCode::UNAUTHORIZED, Json(SqlQueryResponse::error(query, msg)));
+        };
+        if !inner.auth.user_has_privilege(&actor, privilege) {
+            let msg = format!(
+                "この操作には {} 権限が必要です。管理者に GRANT を依頼してください。",
+                privilege.label()
+            );
+            inner.logger.sql_query(&query, false, 0, Some(&msg));
+            return (StatusCode::FORBIDDEN, Json(SqlQueryResponse::error(query, msg)));
+        }
+    }
 
     if trimmed.starts_with("SELECT") {
         let started = std::time::Instant::now();

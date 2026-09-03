@@ -7,7 +7,7 @@
 // `/sql` ハンドラーの冒頭で parse_user_statement() を呼び、Some が返ったら
 // 通常の SELECT/INSERT/... ディスパッチには回さずここで完結させる。
 
-use crate::auth::{password_strength, AuthError, AuthState, PasswordStrength, Role};
+use crate::auth::{password_strength, AuthError, AuthState, PasswordStrength, Privilege, Role};
 
 /// 脆弱パスワード時にクライアントへ提示する確認メッセージ（要件で文言が固定）
 pub const WEAK_PASSWORD_WARNING: &str = "Warning: The password strength is too weak. Do you want to proceed?\n\nPlease enter 'yes' to proceed or 'no' to cancel.";
@@ -28,6 +28,16 @@ pub enum UserStatement {
         password: String,
     },
     ShowUsers,
+    /// GRANT <権限,...> TO <ユーザー,...>
+    Grant {
+        privileges: Vec<Privilege>,
+        users: Vec<String>,
+    },
+    /// REVOKE <権限,...> FROM <ユーザー,...>
+    Revoke {
+        privileges: Vec<Privilege>,
+        users: Vec<String>,
+    },
 }
 
 /// execute_user_statement の結果
@@ -55,6 +65,8 @@ enum Tok {
     Word(String),
     /// クォート文字列（'..' `..` ".." — 値をそのまま保持）
     Quoted(String),
+    /// カンマ（GRANT/REVOKE の権限・ユーザーリスト区切り）
+    Comma,
 }
 
 fn tokenize(input: &str) -> Result<Vec<Tok>, String> {
@@ -77,6 +89,11 @@ fn tokenize(input: &str) -> Result<Vec<Tok>, String> {
                 return Err("複数の文をまとめて実行することはできません".to_string());
             }
             break;
+        }
+        if c == ',' {
+            tokens.push(Tok::Comma);
+            i += 1;
+            continue;
         }
         if c == '\'' || c == '"' || c == '`' {
             let quote = c;
@@ -125,6 +142,7 @@ fn tok_value(t: &Tok) -> String {
     match t {
         Tok::Word(w) => w.clone(),
         Tok::Quoted(s) => s.clone(),
+        Tok::Comma => ",".to_string(),
     }
 }
 
@@ -154,6 +172,8 @@ pub fn parse_user_statement(sql: &str) -> Option<Result<UserStatement, String>> 
             | ["ALTER", "USER", ..]
             | ["SHOW", "USERS", ..]
             | ["SHOW", "USER", ..]
+            | ["GRANT", ..]
+            | ["REVOKE", ..]
     );
     if !is_user_stmt {
         return None;
@@ -230,7 +250,119 @@ fn parse_inner(sql: &str) -> Result<UserStatement, String> {
         return Ok(UserStatement::DropUser { name, if_exists });
     }
 
+    if is_word(&toks[0], "GRANT") || is_word(&toks[0], "REVOKE") {
+        // GRANT  <priv>[, <priv>...] TO   <user>[, <user>...]
+        // REVOKE <priv>[, <priv>...] FROM <user>[, <user>...]
+        let is_grant = is_word(&toks[0], "GRANT");
+        let sep = if is_grant { "TO" } else { "FROM" };
+        let mut idx = 1;
+        let privileges = take_privilege_list(&toks, &mut idx, sep)?;
+        if !toks.get(idx).map(|t| is_word(t, sep)).unwrap_or(false) {
+            return Err(format!(
+                "構文エラー: 権限リストの後に '{}' とユーザー名が必要です",
+                sep
+            ));
+        }
+        idx += 1;
+        let users = take_identifier_list(&toks, &mut idx)?;
+        expect_end(&toks, idx)?;
+        return Ok(if is_grant {
+            UserStatement::Grant { privileges, users }
+        } else {
+            UserStatement::Revoke { privileges, users }
+        });
+    }
+
     Err("サポートされていないユーザー管理文です".to_string())
+}
+
+/// 1つの権限キーワードを Privilege のリストへ展開する。
+/// `ALL` = SELECT/INSERT/UPDATE/DELETE、`SUPER` = それ + MANAGE_USERS。
+fn privilege_keyword(word: &str) -> Result<Vec<Privilege>, String> {
+    let data = [
+        Privilege::Select,
+        Privilege::Insert,
+        Privilege::Update,
+        Privilege::Delete,
+    ];
+    match word {
+        "SELECT" => Ok(vec![Privilege::Select]),
+        "INSERT" => Ok(vec![Privilege::Insert]),
+        "UPDATE" => Ok(vec![Privilege::Update]),
+        "DELETE" => Ok(vec![Privilege::Delete]),
+        "MANAGE_USERS" => Ok(vec![Privilege::ManageUsers]),
+        "ALL" => Ok(data.to_vec()),
+        "SUPER" => {
+            let mut v = data.to_vec();
+            v.push(Privilege::ManageUsers);
+            Ok(v)
+        }
+        other => Err(format!(
+            "不明な権限です: '{}'（SELECT / INSERT / UPDATE / DELETE / MANAGE_USERS / SUPER / ALL のいずれか）",
+            other
+        )),
+    }
+}
+
+/// カンマ区切りの権限リストを、区切りキーワード（TO / FROM）の手前まで読む。
+fn take_privilege_list(toks: &[Tok], idx: &mut usize, sep: &str) -> Result<Vec<Privilege>, String> {
+    let mut privs: Vec<Privilege> = Vec::new();
+    loop {
+        let word = match toks.get(*idx) {
+            Some(Tok::Word(w)) => w.clone(),
+            Some(other) => {
+                return Err(format!("権限名が不正です（'{}'）", tok_value(other)))
+            }
+            None => return Err("権限が指定されていません".to_string()),
+        };
+        for p in privilege_keyword(&word)? {
+            if !privs.contains(&p) {
+                privs.push(p);
+            }
+        }
+        *idx += 1;
+        // `ALL PRIVILEGES` という書き方も許容する
+        if word == "ALL" && toks.get(*idx).map(|t| is_word(t, "PRIVILEGES")).unwrap_or(false) {
+            *idx += 1;
+        }
+        match toks.get(*idx) {
+            Some(Tok::Comma) => {
+                *idx += 1;
+                continue;
+            }
+            Some(Tok::Word(w)) if w == sep => break,
+            Some(other) => {
+                return Err(format!(
+                    "構文エラー: '{}' の前に '{}' が必要です",
+                    tok_value(other),
+                    sep
+                ))
+            }
+            None => {
+                return Err(format!("構文エラー: 権限リストの後に '{}' が必要です", sep))
+            }
+        }
+    }
+    Ok(privs)
+}
+
+/// カンマ区切りの識別子（ユーザー名）リストを末尾まで読む。
+fn take_identifier_list(toks: &[Tok], idx: &mut usize) -> Result<Vec<String>, String> {
+    let mut names: Vec<String> = Vec::new();
+    loop {
+        let name = take_identifier(toks, idx)?;
+        if !names.contains(&name) {
+            names.push(name);
+        }
+        match toks.get(*idx) {
+            Some(Tok::Comma) => {
+                *idx += 1;
+                continue;
+            }
+            _ => break,
+        }
+    }
+    Ok(names)
 }
 
 fn take_identifier(toks: &[Tok], idx: &mut usize) -> Result<String, String> {
@@ -415,6 +547,52 @@ pub fn execute_user_statement(
             },
             Err(e) => map_err(e),
         },
+
+        UserStatement::Grant { privileges, users } => {
+            apply_privilege_change(auth, &users, &privileges, true)
+        }
+
+        UserStatement::Revoke { privileges, users } => {
+            apply_privilege_change(auth, &users, &privileges, false)
+        }
+    }
+}
+
+/// GRANT / REVOKE の共通処理。対象ユーザーを先に全件検証してから適用し、
+/// 一部のユーザーにだけ反映される中途半端な状態を避ける。
+fn apply_privilege_change(
+    auth: &mut AuthState,
+    users: &[String],
+    privileges: &[Privilege],
+    grant: bool,
+) -> UserSqlOutcome {
+    for u in users {
+        if let Err(e) = auth.ensure_grantable(u) {
+            return map_err(e);
+        }
+    }
+    for u in users {
+        let result = if grant {
+            auth.grant_privileges(u, privileges)
+        } else {
+            auth.revoke_privileges(u, privileges)
+        };
+        if let Err(e) = result {
+            return map_err(e);
+        }
+    }
+    let plist = privileges
+        .iter()
+        .map(|p| p.label())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let ulist = users.join(", ");
+    UserSqlOutcome::Ok {
+        message: if grant {
+            format!("{} に権限 {} を付与しました", ulist, plist)
+        } else {
+            format!("{} から権限 {} を剥奪しました", ulist, plist)
+        },
     }
 }
 
@@ -529,6 +707,129 @@ mod tests {
             _ => panic!("expected Ok on confirm"),
         }
         assert!(auth.login("weak", "1234").is_ok());
+    }
+
+    #[test]
+    fn parse_grant_single() {
+        let s = parse_user_statement("GRANT SELECT TO 'alice'").unwrap().unwrap();
+        assert_eq!(
+            s,
+            UserStatement::Grant {
+                privileges: vec![Privilege::Select],
+                users: vec!["alice".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn parse_grant_multi_privs_and_users() {
+        let s = parse_user_statement("grant select, insert , delete to 'a', 'b'")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            s,
+            UserStatement::Grant {
+                privileges: vec![Privilege::Select, Privilege::Insert, Privilege::Delete],
+                users: vec!["a".to_string(), "b".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn parse_grant_all_and_super_expand() {
+        match parse_user_statement("GRANT ALL TO 'x'").unwrap().unwrap() {
+            UserStatement::Grant { privileges, .. } => assert_eq!(
+                privileges,
+                vec![Privilege::Select, Privilege::Insert, Privilege::Update, Privilege::Delete]
+            ),
+            _ => panic!(),
+        }
+        match parse_user_statement("GRANT SUPER TO 'x'").unwrap().unwrap() {
+            UserStatement::Grant { privileges, .. } => assert!(
+                privileges.contains(&Privilege::ManageUsers)
+                    && privileges.contains(&Privilege::Select)
+            ),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn parse_revoke_and_all_privileges_keyword() {
+        let s = parse_user_statement("REVOKE ALL PRIVILEGES FROM 'x'")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            s,
+            UserStatement::Revoke {
+                privileges: vec![Privilege::Select, Privilege::Insert, Privilege::Update, Privilege::Delete],
+                users: vec!["x".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn parse_grant_errors() {
+        assert!(parse_user_statement("GRANT SELECT 'alice'").unwrap().is_err());
+        assert!(parse_user_statement("GRANT TO 'alice'").unwrap().is_err());
+        assert!(parse_user_statement("GRANT BOGUS TO 'alice'").unwrap().is_err());
+        assert!(parse_user_statement("GRANT SELECT TO").unwrap().is_err());
+        assert!(parse_user_statement("REVOKE SELECT, FROM 'x'").unwrap().is_err());
+    }
+
+    #[test]
+    fn execute_grant_then_revoke() {
+        let mut auth = AuthState::bypass_for_tests();
+        auth.create_user("norm", "aA951753", false).unwrap();
+
+        let grant = UserStatement::Grant {
+            privileges: vec![Privilege::ManageUsers],
+            users: vec!["norm".to_string()],
+        };
+        match execute_user_statement(&mut auth, "kagura", grant, None) {
+            UserSqlOutcome::Ok { .. } => {}
+            _ => panic!("expected Ok"),
+        }
+        assert!(auth.can_manage_users("norm"));
+
+        let revoke = UserStatement::Revoke {
+            privileges: vec![Privilege::ManageUsers, Privilege::Delete],
+            users: vec!["norm".to_string()],
+        };
+        match execute_user_statement(&mut auth, "kagura", revoke, None) {
+            UserSqlOutcome::Ok { .. } => {}
+            _ => panic!("expected Ok"),
+        }
+        assert!(!auth.can_manage_users("norm"));
+        assert!(!auth.user_has_privilege("norm", Privilege::Delete));
+        assert!(auth.user_has_privilege("norm", Privilege::Select));
+    }
+
+    #[test]
+    fn execute_grant_rejects_admin_target() {
+        let mut auth = AuthState::bypass_for_tests();
+        let stmt = UserStatement::Grant {
+            privileges: vec![Privilege::Select],
+            users: vec!["kagura".to_string()],
+        };
+        match execute_user_statement(&mut auth, "kagura", stmt, None) {
+            UserSqlOutcome::Err { status, .. } => assert_eq!(status, 403),
+            _ => panic!("expected Err 403"),
+        }
+    }
+
+    #[test]
+    fn execute_grant_denied_for_general_user() {
+        let mut auth = AuthState::bypass_for_tests();
+        auth.create_user("norm", "aA951753", false).unwrap();
+        auth.create_user("victim", "aA951753", false).unwrap();
+        let stmt = UserStatement::Grant {
+            privileges: vec![Privilege::ManageUsers],
+            users: vec!["victim".to_string()],
+        };
+        match execute_user_statement(&mut auth, "norm", stmt, None) {
+            UserSqlOutcome::Err { status, .. } => assert_eq!(status, 403),
+            _ => panic!("expected permission denied"),
+        }
     }
 
     #[test]

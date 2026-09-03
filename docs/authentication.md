@@ -47,10 +47,11 @@ Web UI（`/ui`）はトークンを持たない状態でアクセスするとロ
 
 コマンドラインからログイン・セッション管理を行う場合は [cli.md](cli.md)（`kdb` コマンド）を参照してください。
 
-## 一般ユーザー管理 (CREATE USER / DROP USER / ALTER USER / SHOW USERS)
+## 一般ユーザー管理 (CREATE USER / DROP USER / ALTER USER / SHOW USERS / GRANT / REVOKE)
 
-一般ユーザーの発行・管理は **`POST /sql` 経由の SQL 文**で行います（`kagura` などの管理者権限が必要。
-一般ユーザーが実行すると `403 Forbidden`）。これらの文はレコードストアではなく認証状態を操作します。
+一般ユーザーの発行・管理は **`POST /sql` 経由の SQL 文**で行います（`MANAGE_USERS` 権限が必要。
+`kagura` などの管理者は常に保持。持たないユーザーが実行すると `403 Forbidden`）。
+これらの文はレコードストアではなく認証状態を操作します。
 
 | 文 | 説明 |
 |----|------|
@@ -58,6 +59,8 @@ Web UI（`/ui`）はトークンを持たない状態でアクセスするとロ
 | `DROP USER 'name' [IF EXISTS]` | ユーザーを削除（`kagura` など管理者は削除不可）。そのユーザーのセッションも失効する |
 | `ALTER USER 'name' IDENTIFIED BY 'newpassword'` | 管理者権限でパスワードをリセット。そのユーザーのセッションも失効する |
 | `SHOW USERS` | ユーザー一覧（`username, role, privileges, created_at, disabled`）。パスワードハッシュは返さない |
+| `GRANT <権限>[, ...] TO <ユーザー>[, ...]` | 権限を付与する |
+| `REVOKE <権限>[, ...] FROM <ユーザー>[, ...]` | 権限を剥奪する |
 
 ユーザー名はクォート（`'...'` / `` `...` `` / `"..."`）または素の語で指定できます（空白不可・1〜64文字）。
 パスワードにクォートを含める場合は `''` のように2つ重ねてエスケープします。
@@ -93,9 +96,34 @@ ALTER USER 'test' IDENTIFIED BY 'Xy837261';
 DROP USER IF EXISTS 'test';
 ```
 
-### 権限（privileges）について
+### 権限（privileges）と GRANT / REVOKE
 
-一般ユーザーには将来の `GRANT` / `REVOKE` を見据えた `privileges` リストを保持しています
-（作成時の既定は `select, insert, update, delete`）。現バージョンで実際に参照するのは
-`manage_users`（ユーザー管理系操作の可否）のみで、データ操作（`SELECT`/`INSERT`/`UPDATE`/`DELETE`）は
-ログイン済みであれば従来どおり誰でも実行できます。
+一般ユーザーは `privileges` リストの範囲でのみ操作できます（作成時の既定は
+`select, insert, update, delete`）。管理者ロール（`kagura`）は常に全権限を持ちます。
+
+| 権限キーワード | 許可される操作 | 許可されない操作 |
+|----------------|----------------|------------------|
+| `SELECT` | データの表示・検索（`SELECT` / `GET /records` / `GET /labels` / `POST /labels/search`） | ユーザー一覧の表示（`SHOW USERS`） |
+| `INSERT` | データ・ラベルの追加（`INSERT` / `POST /records` / `POST /records/{id}/labels`） | ユーザーの作成 |
+| `UPDATE` | データ・ラベルの更新（`UPDATE` / `PUT /records/{id}` / `PUT /labels/rename`） | ユーザー名の変更・パスワード更新 |
+| `DELETE` | データ・ラベルの削除（`DELETE` / `DELETE /records/{id}` / `DELETE /records/{id}/labels/{label}`） | ユーザーの削除 |
+| `MANAGE_USERS` | ユーザー管理系 SQL（`CREATE`/`DROP`/`ALTER USER`・`SHOW USERS`・`GRANT`/`REVOKE`） | — |
+| `SUPER` | `SELECT`+`INSERT`+`UPDATE`+`DELETE`+`MANAGE_USERS` をまとめて付与 | — |
+| `ALL` | `SELECT`+`INSERT`+`UPDATE`+`DELETE` をまとめて付与（ユーザー操作は含まない） | — |
+
+権限が不足している操作は `403 Forbidden` を返します（`/sql` はレスポンス `error`、
+REST API は `{"error": "..."}` に必要な権限名を含めて返します）。
+
+```sql
+GRANT SELECT, INSERT TO 'alice';          -- 複数権限をまとめて付与
+GRANT ALL TO 'alice', 'bob';              -- 複数ユーザーへ同時付与
+GRANT SUPER TO 'ops';                     -- データ操作 + ユーザー管理
+REVOKE DELETE FROM 'alice';               -- 剥奪
+REVOKE ALL PRIVILEGES FROM 'bob';         -- `ALL PRIVILEGES` とも書ける
+```
+
+- 権限キーワードは大文字小文字を区別しません。ユーザー名はクォート（`'...'`）または素の語で指定します。
+- 対象は既存の一般ユーザーのみ。存在しないユーザーは `404`、管理者ユーザーを対象にすると `403`。
+- `SUPER` / `ALL` は付与時に個別権限へ展開して保存されます（`SHOW USERS` には展開後の一覧が出ます）。
+- 変更は認証情報ファイル（`KAGURA_AUTH_FILE`）へ即時永続化されます。
+- Web UI（設定 → ユーザー管理）のユーザー一覧では、権限チェックボックスの切り替えで `GRANT` / `REVOKE` を実行できます。

@@ -16,6 +16,12 @@
 `PUT /settings` で `http_api_enabled: true` にするまで `403 Forbidden` を返す（詳細は [Web 管理UI](#web-管理ui) の設定を参照）。
 ログイン必須とHTTP API有効化は独立したチェックで、両方が ✅ の行は両方を満たす必要がある。
 
+さらに `/records` `/labels` 系と `/sql` のデータ操作は、ログイン中ユーザーの `privileges` を検査する。
+参照系（`GET`・`POST /labels/search`・`SELECT`）は `SELECT`、追加系（`POST`・`INSERT`）は `INSERT`、
+更新系（`PUT`・`UPDATE`）は `UPDATE`、削除系（`DELETE`）は `DELETE` を要求し、不足時は `403 Forbidden`
+（必要な権限名をメッセージに含む）。管理者ロール（`kagura`）は常に全権限。付与・剥奪は
+`GRANT` / `REVOKE`（[authentication.md](authentication.md#権限privilegesと-grant--revoke)）で行う。
+
 | メソッド | パス | 説明 | 要ログイン | 要HTTP API |
 |---------|------|------|:---:|:---:|
 | `GET`    | `/ui` | Web 管理 UI（未ログイン時はログイン画面を表示） | - | - |
@@ -35,7 +41,7 @@
 | `POST`   | `/labels/search` | AND/OR ラベル検索 | ✅ | ✅ |
 | `PUT`    | `/labels/rename` | ラベルリネーム | ✅ | ✅ |
 | `GET`    | `/db/info` | DB バージョン・統計情報 | ✅ | - |
-| `POST`   | `/sql` | SQL SELECT / INSERT / UPDATE / DELETE 実行、および管理者向けユーザー管理（`CREATE`/`DROP`/`ALTER USER`・`SHOW USERS`。詳細は [authentication.md](authentication.md)） | ✅ | - |
+| `POST`   | `/sql` | SQL SELECT / INSERT / UPDATE / DELETE 実行（一般ユーザーは付与された権限の範囲のみ・不足時 `403`）、および `MANAGE_USERS` 権限向けユーザー管理（`CREATE`/`DROP`/`ALTER USER`・`SHOW USERS`・`GRANT`/`REVOKE`。詳細は [authentication.md](authentication.md)） | ✅ | - |
 | `GET`    | `/settings` | 現在の設定取得 | ✅ | - |
 | `PUT`    | `/settings` | 設定更新（HTTPリクエスト受付オンオフ） | ✅ | - |
 | `GET`    | `/logs` | 保管されたログを新しい順に取得（`?lines=` で件数指定、既定200・上限2000） | ✅ | - |
