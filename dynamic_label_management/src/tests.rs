@@ -22,11 +22,13 @@ fn test_add_label_basic() {
 }
 
 #[test]
-fn test_add_label_idempotent() {
+fn test_add_label_duplicate_returns_error() {
     let mut mgr = LabelManager::new();
     let id = insert_named(&mut mgr, "Alice", &[]);
     mgr.add_label(id, "tag").unwrap();
-    mgr.add_label(id, "tag").unwrap();
+    let err = mgr.add_label(id, "tag").unwrap_err();
+    assert_eq!(err, LabelError::DuplicateLabel("tag".to_string()));
+    // 変更されず1件のまま
     assert_eq!(mgr.list_labels(id).unwrap().len(), 1);
 }
 

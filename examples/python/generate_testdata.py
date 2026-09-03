@@ -10,7 +10,19 @@ KAGURA DB  10,000件テストデータ自動生成スクリプト
   python3 generate_testdata.py --bench-only   # 性能テストのみ
   python3 generate_testdata.py --bench        # 生成後に性能テストも実行
 
+  # サーバーに接続せず、POST /records にそのまま投げられる形の
+  # JSON配列ファイルを生成するだけ（インストール後の再投入などに利用）
+  python3 generate_testdata.py --dump-json testdata_10000.json
+
+  # 生成済みのJSONファイルを読み込んで投入（ランダム再生成せず、同じデータを再投入したい場合）
+  python3 generate_testdata.py --load-json testdata_10000.json --url http://localhost:3000
+
+  # 初期パスワード(root)を変更済みの場合は --username/--password を指定
+  python3 generate_testdata.py --username kagura --password mynewpassword
+
 依存: Python 3.6+ 標準ライブラリのみ（pip不要）
+認証: 実行時にまず POST /auth/login でログインし、取得したトークンを以後の全リクエストに使う
+      （既定は kagura / root。事前に PUT /settings で http_api_enabled を有効化しておくこと）
 """
 
 import argparse
@@ -30,6 +42,11 @@ DEFAULT_COUNT   = 10_000
 DEFAULT_WORKERS = 16
 PROGRESS_STEP   = 200
 RANDOM_SEED     = 42
+DEFAULT_USERNAME = "kagura"
+DEFAULT_PASSWORD = "root"
+
+# ログイン成功後にセットされる認証トークン（全リクエストの Authorization ヘッダーに使う）
+AUTH_TOKEN = None
 
 # ===========================================================================
 # マスターデータ
@@ -274,11 +291,34 @@ def build_record_list(total):
 # HTTP ユーティリティ
 # ===========================================================================
 
+def _auth_headers():
+    return {"Authorization": f"Bearer {AUTH_TOKEN}"} if AUTH_TOKEN else {}
+
+def login(url, username, password, timeout=30):
+    """POST /auth/login でログインし、成功したらグローバルの AUTH_TOKEN にトークンをセットする"""
+    global AUTH_TOKEN
+    data = json.dumps({"username": username, "password": password}).encode("utf-8")
+    req  = urllib.request.Request(
+        f"{url}/auth/login", data=data,
+        headers={"Content-Type": "application/json"}, method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = json.loads(resp.read().decode())
+            AUTH_TOKEN = body["token"]
+            return True
+    except urllib.error.HTTPError as e:
+        print(f"\n  X ログイン失敗: HTTP {e.code}: {e.read().decode()[:200]}")
+        return False
+    except Exception as e:
+        print(f"\n  X ログイン失敗: {e}")
+        return False
+
 def post_record(url, payload, timeout=30):
     data = json.dumps(payload).encode("utf-8")
     req  = urllib.request.Request(
         f"{url}/records", data=data,
-        headers={"Content-Type": "application/json"}, method="POST",
+        headers={"Content-Type": "application/json", **_auth_headers()}, method="POST",
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -289,8 +329,9 @@ def post_record(url, payload, timeout=30):
         return (False, str(e)[:100])
 
 def get_json(url, path):
+    req = urllib.request.Request(f"{url}{path}", headers=_auth_headers())
     try:
-        with urllib.request.urlopen(f"{url}{path}", timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read().decode())
     except Exception:
         return None
@@ -299,7 +340,7 @@ def post_sql(url, query):
     data = json.dumps({"query": query}).encode("utf-8")
     req  = urllib.request.Request(
         f"{url}/sql", data=data,
-        headers={"Content-Type": "application/json"}, method="POST",
+        headers={"Content-Type": "application/json", **_auth_headers()}, method="POST",
     )
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
@@ -354,7 +395,23 @@ def _fmt_bytes(b):
     if b < 1024**3:   return f"{b/1024**2:.2f} MB"
     return f"{b/1024**3:.2f} GB"
 
-def generate(url, total, workers):
+def load_records_from_file(path):
+    """--dump-json で保存したJSON配列（POST /records にそのまま投げられる形）を読み込む"""
+    with open(path, "r", encoding="utf-8") as f:
+        records = json.load(f)
+    if not isinstance(records, list):
+        print(f"  X {path} はJSON配列ではありません。")
+        sys.exit(1)
+    return records
+
+
+def dump_records_to_file(records, path):
+    """POST /records にそのまま投げられる形のJSON配列としてファイルへ保存する"""
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(records, f, ensure_ascii=False, indent=2)
+
+
+def generate(url, total, workers, records=None):
     print(f"\n{chr(61)*60}")
     print(f"  KAGURA DB テストデータ生成")
     print(f"{chr(61)*60}")
@@ -366,15 +423,19 @@ def generate(url, total, workers):
     print("  [1/3] サーバー接続確認...", end=" ", flush=True)
     info = get_json(url, "/db/info")
     if info is None:
-        print(f"\n  X 接続失敗: {url} に到達できません。サーバー起動を確認してください。")
+        print(f"\n  X 接続失敗: {url} に到達できません。サーバー起動・ログインを確認してください。")
         sys.exit(1)
     existing = info.get("record_count", 0)
     print(f"OK  (既存レコード: {existing:,} 件)")
 
-    print(f"\n  [2/3] レコードデータ生成中...", end=" ", flush=True)
-    t0 = time.perf_counter()
-    records = build_record_list(total)
-    print(f"完了 ({time.perf_counter() - t0:.2f}s)")
+    if records is None:
+        print(f"\n  [2/3] レコードデータ生成中...", end=" ", flush=True)
+        t0 = time.perf_counter()
+        records = build_record_list(total)
+        print(f"完了 ({time.perf_counter() - t0:.2f}s)")
+    else:
+        print(f"\n  [2/3] ファイルから読み込んだ {len(records):,} 件を使用します")
+        total = len(records)
 
     label_count = {}
     for r in records:
@@ -508,12 +569,18 @@ def parse_args():
         description="KAGURA DB テストデータ自動生成スクリプト",
     )
     p.add_argument("--url",       default=DEFAULT_URL)
+    p.add_argument("--username",  default=DEFAULT_USERNAME, help="ログインユーザー名（既定: kagura）")
+    p.add_argument("--password",  default=DEFAULT_PASSWORD, help="ログインパスワード（既定: root。初期パスワードを変更済みの場合は指定すること）")
     p.add_argument("--count",     type=int, default=DEFAULT_COUNT)
     p.add_argument("--workers",   type=int, default=DEFAULT_WORKERS)
     p.add_argument("--bench-only",action="store_true")
     p.add_argument("--bench",     action="store_true")
     p.add_argument("--repeat",    type=int, default=3)
     p.add_argument("--seed",      type=int, default=RANDOM_SEED)
+    p.add_argument("--dump-json", metavar="PATH",
+                    help="サーバーに接続せず、POST /records用のJSON配列をPATHへ書き出して終了")
+    p.add_argument("--load-json", metavar="PATH",
+                    help="ランダム生成せず、PATHのJSON配列を読み込んで投入する")
     return p.parse_args()
 
 
@@ -521,11 +588,26 @@ def main():
     args = parse_args()
     random.seed(args.seed)
 
+    if args.dump_json:
+        print(f"  {args.count:,} 件のテストデータを生成中...", end=" ", flush=True)
+        records = build_record_list(args.count)
+        dump_records_to_file(records, args.dump_json)
+        print("完了")
+        print(f"  -> {args.dump_json} ({len(records):,} 件, POST /records にそのまま投入可能な配列)")
+        print(f"  投入例: python3 {sys.argv[0]} --load-json {args.dump_json} --url {DEFAULT_URL}")
+        return
+
+    print(f"  ログイン中 ({args.username}@{args.url})...", end=" ", flush=True)
+    if not login(args.url, args.username, args.password):
+        sys.exit(1)
+    print("OK")
+
     if args.bench_only:
         run_benchmark(args.url, repeat=args.repeat)
         return
 
-    stats = generate(url=args.url, total=args.count, workers=args.workers)
+    loaded = load_records_from_file(args.load_json) if args.load_json else None
+    stats = generate(url=args.url, total=args.count, workers=args.workers, records=loaded)
 
     if args.bench:
         run_benchmark(args.url, repeat=args.repeat)

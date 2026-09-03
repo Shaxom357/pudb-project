@@ -61,6 +61,8 @@ pub enum DatabaseError {
     RecordNotFound(u64),
     DuplicateId(u64),
     ColumnNotFound(String),
+    /// レコードに既に付与されているラベルを重複して付与しようとした
+    DuplicateLabel(String),
 }
 
 impl std::fmt::Display for DatabaseError {
@@ -69,8 +71,16 @@ impl std::fmt::Display for DatabaseError {
             DatabaseError::RecordNotFound(id)  => write!(f, "Record id={} not found", id),
             DatabaseError::DuplicateId(id)     => write!(f, "Record id={} already exists", id),
             DatabaseError::ColumnNotFound(col) => write!(f, "Column '{}' not found", col),
+            DatabaseError::DuplicateLabel(label) =>
+                write!(f, "Label '{}' is already attached to this record", label),
         }
     }
+}
+
+/// labels 内に重複するラベル名が無いかを検査し、最初に見つかった重複ラベル名を返す
+fn find_duplicate_label(labels: &[String]) -> Option<&String> {
+    let mut seen = std::collections::HashSet::new();
+    labels.iter().find(|l| !seen.insert(l.as_str()))
 }
 
 /// 列ごとのデータを保持する内部構造体
@@ -115,6 +125,9 @@ impl Database {
 
     /// INSERT: id=0 なら自動採番。戻り値: 発行されたレコードID
     pub fn insert(&mut self, mut record: Record) -> Result<u64, DatabaseError> {
+        if let Some(dup) = find_duplicate_label(&record.labels) {
+            return Err(DatabaseError::DuplicateLabel(dup.clone()));
+        }
         if record.id == 0 {
             record.id = self.allocate_id();
         } else if self.id_to_index.contains_key(&record.id) {
@@ -253,16 +266,16 @@ impl Database {
         self.records.iter().filter(|r| r.is_some()).count()
     }
 
-    /// ATTACH LABEL: 既存レコードにラベルを追加する（重複は無視）
+    /// ATTACH LABEL: 既存レコードにラベルを追加する（重複付与は禁止。既に付与済みならエラー）
     pub fn attach_label(&mut self, id: u64, label: impl Into<String>) -> Result<(), DatabaseError> {
         let label = label.into();
         let &row_idx = self.id_to_index.get(&id)
             .ok_or(DatabaseError::RecordNotFound(id))?;
 
         let record = self.records[row_idx].as_mut().unwrap();
-        // 既に同じラベルがあれば何もしない
+        // 既に同じラベルがある場合は変更せずエラーを返す（ラベルの重複付与は禁止）
         if record.labels.contains(&label) {
-            return Ok(());
+            return Err(DatabaseError::DuplicateLabel(label));
         }
         record.labels.push(label.clone());
 
@@ -517,6 +530,9 @@ impl Database {
         mut record: Record,
         kdb: Option<&mut kdb_store::KdbFile>,
     ) -> Result<u64, DatabaseError> {
+        if let Some(dup) = find_duplicate_label(&record.labels) {
+            return Err(DatabaseError::DuplicateLabel(dup.clone()));
+        }
         // ID採番
         if record.id == 0 {
             record.id = self.next_id;

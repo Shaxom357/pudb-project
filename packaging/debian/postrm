@@ -1,0 +1,32 @@
+#!/bin/sh
+# KAGURA DB - dpkg postrm
+set -e
+
+SERVICE_NAME="kagura-db.service"
+SERVICE_USER="kagura"
+SERVICE_GROUP="kagura"
+CONF_DIR="/etc/kagura-db"
+DATA_DIR="/var/lib/kagura-db"
+LOG_DIR="/var/log/kagura-db"
+
+case "$1" in
+    remove)
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload || true
+        fi
+        ;;
+    purge)
+        rm -rf "$CONF_DIR" "$DATA_DIR" "$LOG_DIR"
+        if getent passwd "$SERVICE_USER" >/dev/null 2>&1; then
+            deluser --system "$SERVICE_USER" >/dev/null 2>&1 || true
+        fi
+        if getent group "$SERVICE_GROUP" >/dev/null 2>&1; then
+            delgroup --system "$SERVICE_GROUP" >/dev/null 2>&1 || true
+        fi
+        if [ -d /run/systemd/system ]; then
+            systemctl daemon-reload || true
+        fi
+        ;;
+esac
+
+exit 0

@@ -1,39 +1,37 @@
 # 🗄️ KAGURA DB
 
 > Rust で一から実装したオリジナルのデータベースエンジン。  
-> 列指向ストレージ・ラベル検索・KDB暗号化バイナリ形式・SQL SELECT/INSERT・REST API・Web管理UI を備えたフルスタックな DB システムです。  
+> 列指向ストレージ・ラベル検索・KDB暗号化バイナリ形式・SQL SELECT/INSERT/UPDATE/DELETE・REST API・認証機能（複数ユーザー対応）・Web管理UI を備えたフルスタックな DB システムです。  
 > バージョンの情報については以下の補足を確認ください。  
 > 補足  
 > ・メジャーバージョンが異なると互換性は無くなります。  
 > ・メジャーバージョンが一致し、マイナーバージョンだけが異なる場合問題なく移行ができ互換性を保ちます。
 
-**バージョン: `1.6.0`**
+**バージョン: `4.0.0`**
 
 | 区分 | 説明 |
 |------|------|
-| **A = 1** (メジャー) | KDB 暗号化バイナリ形式導入による旧 JSON 形式との破壊的変更 |
-| **B = 6** (マイナー) | Web管理UI・DB Info API・SQL SELECT・テストデータ生成・SQL INSERT・設定管理(HTTPリクエスト受付オンオフ) の 6 機能追加 |
-| **C = 0** (ビルド) | 1.6系での修正なし |
+| **A = 4** (メジャー) | **【破壊的変更】** 一般ユーザーの `privileges` を実際に強制するようになった。`/sql` の SELECT/INSERT/UPDATE/DELETE と `/records`・`/labels` 系 REST API は、ログイン中ユーザーが対応する権限（`SELECT`/`INSERT`/`UPDATE`/`DELETE`）を持たない場合 `403 Forbidden` を返す（管理者ロール `kagura` は常に全権限。既存の一般ユーザーは作成時の既定で4種すべてを保持するため挙動は変わらない）。あわせて権限を付与・剥奪する SQL 文 `GRANT <権限>[, ...] TO <ユーザー>[, ...]` / `REVOKE <権限>[, ...] FROM <ユーザー>[, ...]` を追加（`MANAGE_USERS` 権限が必要。指定できる権限は `SELECT`/`INSERT`/`UPDATE`/`DELETE`/`MANAGE_USERS` と、まとめ指定用の `ALL`=データ操作4種・`SUPER`=4種+`MANAGE_USERS`）。3.0.0 で導入した「`/ui` と `POST /auth/login` を除く全エンドポイントがログイン必須」は継続。`.kdb` バイナリフォーマット・`auth.json` フォーマットは変更なし |
+| **B = 0** (マイナー) | （今回のメジャー更新でリセット） |
+| **C = 0** (ビルド) | （今回のメジャー更新でリセット） |
 
 ---
 
-## 📋 目次
+## 📚 ドキュメント
 
-- [概要](#概要)
-- [アーキテクチャ](#アーキテクチャ)
-- [機能一覧](#機能一覧)
-- [プロジェクト構成](#プロジェクト構成)
-- [クイックスタート](#クイックスタート)
-- [KDB ストレージフォーマット](#kdb-ストレージフォーマット)
-- [SQL 機能](#sql-機能)
-- [各クレートの詳細](#各クレートの詳細)
-- [API リファレンス](#api-リファレンス)
-- [Web 管理UI](#web-管理ui)
-- [テストデータ生成](#テストデータ生成)
-- [Python バインディング](#python-バインディング)
-- [テスト](#テスト)
-- [技術スタック](#技術スタック)
-- [バージョン履歴](#バージョン履歴)
+この README は全体像とクイックスタートに絞っています。各機能の詳細は `docs/` を参照してください。
+
+| ドキュメント | 内容 |
+|--------------|------|
+| [docs/features.md](docs/features.md) | 機能一覧（クレートごとの詳細） |
+| [docs/authentication.md](docs/authentication.md) | 認証機能（Bearer トークン・パスワード変更・ロックアウト） |
+| [docs/cli.md](docs/cli.md) | `kdb` コマンドラインクライアント（login/logout/whoami・シェルプロンプト連携） |
+| [docs/sql.md](docs/sql.md) | SQL 機能（SELECT / INSERT / UPDATE / DELETE 構文と例・性能測定） |
+| [docs/api.md](docs/api.md) | API リファレンス・Web 管理UI・ログ機能 |
+| [docs/storage-format.md](docs/storage-format.md) | KDB 暗号化バイナリ形式の仕様 |
+| [docs/installation.md](docs/installation.md) | 本番運用向けインストール（Linux systemd / Windows タスクスケジューラ） |
+| [docs/development.md](docs/development.md) | テスト・テストデータ生成・Python バインディング |
+| [packaging/README.md](packaging/README.md) | パッケージ成果物の生成方法（メンテナー向け） |
 
 ---
 
@@ -49,7 +47,7 @@ KAGURA DB は Rust で一から実装したデータベースエンジンです�
 | **スキーマレス** | レコードごとに任意のカラムを持てる |
 | **KDB 暗号化ストレージ** | XChaCha20-Poly1305 AEAD による暗号化バイナリ形式（`.kdb`） |
 | **WAL 高速挿入** | Write-Ahead Log 追記方式で INSERT が O(1)（ファイル全体の再書き込みなし） |
-| **SQL SELECT/INSERT** | `FROM label.xxx` / `INTO (label.xxx)` 構文による独自拡張 SQL クエリ |
+| **SQL SELECT/INSERT/UPDATE/DELETE** | `FROM label.xxx` / `INTO (label.xxx)` / `UPDATE label.xxx SET ...` / `DELETE FROM label.xxx` 構文による独自拡張 SQL クエリ |
 | **多言語対応** | REST API と C FFI（Python 向け）の 2 種インターフェース |
 
 ---
@@ -60,9 +58,10 @@ KAGURA DB は Rust で一から実装したデータベースエンジンです�
 ブラウザ (Web UI)       Python         curl / HTTP クライアント
       |                   |                      |
       +--------+----------+                      |
-               | HTTP                            | HTTP
+               | HTTP (POST /auth/login → Bearer トークンを取得して以後の全リクエストに付与)
     +----------+----------------------------------+----------+
     |              db_client  (axum REST API + Web UI)       |
+    |   auth / auth_handlers (認証・セッション管理)          |
     |   handlers / label_handlers / info_handlers            |
     |   sql_handlers / settings_handlers / app / models / ui |
     +----------------------------+----------------------------+
@@ -85,7 +84,8 @@ KAGURA DB は Rust で一から実装したデータベースエンジンです�
     +----------------------------------------------------------+
 
     +----------------------------------------------------------+
-    |            sql_engine  (SQL SELECT/INSERT エンジン)       |
+    |       sql_engine  (SQL SELECT/INSERT/UPDATE/DELETE       |
+    |                     エンジン)                            |
     |   ast / parser / executor                               |
     |   手書き再帰下降パーサー（外部ライブラリ不使用）         |
     +----------------------------------------------------------+
@@ -93,60 +93,16 @@ KAGURA DB は Rust で一から実装したデータベースエンジンです�
 
 ---
 
-## 機能一覧
+## 機能概要
 
-### db_engine（コアエンジン）
-- ✅ CRUD（Insert / Get / Update / Delete）
-- ✅ 列指向ストレージ（`ColumnStore`）
-- ✅ ラベル付与・検索・削除（attach / detach）
-- ✅ ラベル仮想テーブル（`HashMap<String, Vec<usize>>`）による高速検索
-- ✅ 5 種類のデータ型（Text / Integer / Float / Boolean / Null）
-- ✅ **KDB バイナリ暗号化ストレージ**（`.kdb` 形式）
-  - XChaCha20-Poly1305 AEAD による暗号化（外部クレート不使用・純 Rust 実装）
-  - WAL（Write-Ahead Log）追記方式で INSERT が O(1) の高速書き込み
-  - ファイル固有 Salt による鍵派生（`HChaCha20`）
-  - 改ざん検知（Poly1305 MAC）
-- ✅ JSON 形式永続化（後方互换・アトミック書き込み）
-- ✅ `KAGURA_MASTER_KEY` 環境変数によるカスタムマスターキー設定
+各項目の詳細は [docs/features.md](docs/features.md) を参照してください。
 
-### db_client（REST API サーバー）
-- ✅ 17 本のエンドポイント（レコード CRUD・ラベル管理・DB 情報・SQL・設定・Web UI）
-- ✅ KDB モード（`.kdb`）と JSON モードの自動判別・後方互换
-- ✅ 起動時自動ロード・書き込み時自動セーブ
-- ✅ 環境変数による設定（`DB_FILE` / `DB_ADDR` / `KAGURA_MASTER_KEY`）
-- ✅ ブラウザ Web 管理 UI（Records / DB Info / SQL Query / 設定 の 4 ビュー）
-- ✅ `GET /db/info` でバージョン・ストレージ状態・統計を取得
-- ✅ `POST /sql` で SQL SELECT / INSERT クエリを実行
-- ✅ `GET /settings` / `PUT /settings` で HTTPリクエスト（`/records` `/labels` 系 REST API）受付のオンオフを切替可能（**既定は無効**。データ操作は基本 SQL 経由とし、REST API は大量テストデータ投入など用途に応じて有効化する）
-- ✅ Web UI の Records 一覧は `POST /sql`（`SELECT * FROM label.*`）経由で取得するため、REST API が無効でも常に閲覧可能
-
-### sql_engine（SQL SELECT/INSERT エンジン）
-- ✅ 独自拡張 SQL `SELECT ... FROM label.xxx` 構文
-- ✅ `WHERE` 句（`=` `!=` `<` `<=` `>` `>=` `LIKE`）
-- ✅ `AND` / `OR` / `NOT` / 括弧による複合条件
-- ✅ `FROM label.A AND label.B`（ラベル AND 絞り込み）
-- ✅ `FROM label.A OR label.B`（ラベル OR 結合）
-- ✅ `FROM label.*`（全レコード対象）
-- ✅ `ORDER BY col [ASC|DESC]`（複数カラム対応）
-- ✅ `LIMIT n`
-- ✅ カラム指定 `SELECT col1, col2 FROM ...`
-- ✅ 大文字小文字無視・セミコロン対応
-- ✅ `SELECT *` は `id` 列を先頭、`labels` 列（カンマ区切り）を末尾に付与して返す
-- ✅ 独自拡張 SQL `INSERT INTO (label.xxx) VALUE (...)` 構文
-- ✅ `INSERT INTO (label.a, label.b) VALUE (...)`（複数ラベルへの同時付与）
-- ✅ `INTO (label.xxx) (col1, col2, ...)` によるカラム順の明示指定（省略時は既存カラムのソート順に対応）
-- ✅ 存在しないラベルは INSERT 時に自動作成
-
-### dynamic_label_management
-- ✅ ラベルの AND / OR 検索
-- ✅ ラベルのリネーム（DB 全体一括）
-- ✅ ラベルのコピー・差分・グルーピング
-- ✅ ラベル統計情報（件数降順）
-
-### db_ffi
-- ✅ C ABI 互换の共有ライブラリ（`libdb_ffi.so`）
-- ✅ Python `ctypes` ラッパークラス（`DbEngine`）
-- ✅ JSON 文字列による全データ型対応
+- **db_engine（コアエンジン）** — CRUD・列指向ストレージ・ラベル仮想テーブル・5 種のデータ型・KDB 暗号化ストレージ（WAL 方式）・JSON 後方互換
+- **db_client（REST API サーバー）** — Bearer トークン認証・21 本のエンドポイント・KDB/JSON 自動判別・Web 管理UI・ログ出力保管機能
+- **sql_engine** — 独自拡張 SQL `SELECT/INSERT/UPDATE/DELETE ... label.xxx`・`WHERE`/`AND`/`OR`/`NOT`・`ORDER BY`・`LIMIT`・ラベル AND/OR 絞り込み
+- **dynamic_label_management** — ラベルの AND/OR 検索・リネーム・コピー/差分/グルーピング・統計・重複付与の禁止
+- **db_ffi** — C ABI 互換の共有ライブラリと Python `ctypes` ラッパー
+- **kdb_cli** — 専用コマンド `kdb`（login/logout/whoami・シェルプロンプト連携）
 
 ---
 
@@ -156,6 +112,7 @@ KAGURA DB は Rust で一から実装したデータベースエンジンです�
 pudb-project/
 ├── Cargo.toml
 ├── README.md
+├── docs/                                # 詳細ドキュメント（上記「📚 ドキュメント」を参照）
 ├── db_engine/                          # コアエンジン (v1.6.0)
 │   └── src/
 │       ├── lib.rs                      # Database / Record / DataType / 永続化
@@ -167,31 +124,42 @@ pudb-project/
 │   ├── src/
 │   │   ├── main.rs                     # エントリーポイント（KDB/JSON 自動判別）
 │   │   ├── app.rs                      # Router 定義
+│   │   ├── auth.rs                     # 認証状態（複数ユーザー・権限・パスワード強度・セッション・永続化/移行）
+│   │   ├── auth_handlers.rs            # 認証 API ハンドラー（ログイン/ログアウト/パスワード変更）
+│   │   ├── user_sql.rs                 # ユーザー管理 SQL（CREATE/DROP/ALTER USER・SHOW USERS）のパース＆実行
 │   │   ├── handlers.rs                 # レコード CRUD ハンドラー
 │   │   ├── label_handlers.rs           # ラベル管理ハンドラー
 │   │   ├── info_handlers.rs            # DB 情報 API ハンドラー
-│   │   ├── sql_handlers.rs             # SQL 実行ハンドラー（SELECT / INSERT）
+│   │   ├── sql_handlers.rs             # SQL 実行ハンドラー（SELECT / INSERT / UPDATE / DELETE / ユーザー管理）
 │   │   ├── settings_handlers.rs        # 設定 API ハンドラー（HTTPリクエスト受付オンオフ）
 │   │   ├── models.rs                   # JSON DTO
-│   │   └── ui.html                     # 管理画面（HTML/CSS/JS）
+│   │   └── ui.html                     # 管理画面（HTML/CSS/JS、ログイン画面・ユーザー管理を含む）
 │   └── tests/
+│       ├── test_auth.rs                # 認証 API テスト（8件）
+│       ├── test_users.rs               # 一般ユーザー管理テスト（7件）
 │       ├── test_records.rs             # レコード API テスト（12件）
 │       ├── test_labels.rs              # ラベル API テスト（12件）
 │       ├── test_persistence.rs         # 永続化テスト（4件）
-│       ├── test_sql.rs                 # SQL API テスト（9件）
+│       ├── test_sql.rs                 # SQL API テスト（23件）
 │       └── test_settings.rs            # 設定 API テスト（4件）
-├── sql_engine/                         # SQL SELECT/INSERT エンジン (v1.6.0)
+├── sql_engine/                         # SQL SELECT/INSERT/UPDATE/DELETE エンジン (v1.6.0)
 │   └── src/
 │       ├── ast.rs / parser.rs / executor.rs
-│       └── lib.rs                      # 公開 API（run_select・run_insert）
+│       └── lib.rs                      # 公開 API（run_select・run_insert・run_update・run_delete）
 ├── dynamic_label_management/           # ラベル管理ライブラリ (v1.6.0)
 │   └── src/lib.rs + tests.rs           # ユニットテスト（24件）
 ├── db_ffi/                             # C FFI バインディング (v1.6.0)
 │   └── src/lib.rs                      # FFI 関数（13本）＋テスト（10件）
+├── kdb_cli/                             # コマンドラインクライアント (v3.3.0, バイナリ名: kdb)
+│   └── src/
+│       ├── main.rs                      # CLI定義（login/logout/whoami）とエントリーポイント
+│       ├── client.rs                    # REST API クライアント（/auth/login /auth/logout /db/info）
+│       └── session.rs                   # セッション永続化（~/.config/kdb/session.json）
+├── packaging/                           # Linux/Windows パッケージング一式
 └── examples/python/
     ├── db_engine.py                    # Python ctypes ラッパー
     ├── demo.py                         # デモスクリプト
-    └── generate_testdata.py            # 10,000件テストデータ自動生成スクリプト
+    └── generate_testdata.py           # 10,000件テストデータ自動生成スクリプト
 ```
 
 ---
@@ -221,257 +189,48 @@ DB_FILE=mydata.json cargo run -p db_client
 cargo build --release -p db_client && ./target/release/db_client
 ```
 
+本番運用向けのインストール（systemd / タスクスケジューラ）は [docs/installation.md](docs/installation.md) を参照してください。
+
 ### 動作確認
 
 ```bash
+# まずログインしてトークンを取得する（既定: username=kagura, password=root）
+# /db/info /sql /records /labels /settings /logs はすべてログイン必須（詳細は docs/authentication.md を参照）
+TOKEN=$(curl -s -X POST http://localhost:3000/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username": "kagura", "password": "root"}' | python3 -c 'import json,sys;print(json.load(sys.stdin)["token"])')
+
 # バージョン・状態確認
-curl http://localhost:3000/db/info
+curl http://localhost:3000/db/info -H "Authorization: Bearer $TOKEN"
 
 # SQL でレコード作成（既定の状態でそのまま使える）
 curl -X POST http://localhost:3000/sql \
-  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d "{\"query\": \"INSERT INTO (label.employee) (name, age) VALUE ('田中', 35)\"}"
 
 # SQL で検索
 curl -X POST http://localhost:3000/sql \
-  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"query": "SELECT * FROM label.employee WHERE age > 30"}'
 
 # HTTPリクエスト(REST API)は既定で無効。大量テストデータ投入などで使う場合は先に有効化する
 curl -X PUT http://localhost:3000/settings \
-  -H 'Content-Type: application/json' -d '{"http_api_enabled": true}'
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"http_api_enabled": true}'
 
 curl -X POST http://localhost:3000/records \
-  -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"columns":{"name":{"type":"text","value":"田中"},"age":{"type":"integer","value":35}},"labels":["employee"]}'
 
-# Web UI（Records一覧はSQL経由のため、HTTPリクエストが無効でも閲覧可能）
+# 至急、初期パスワードを変更する（成功すると上で取得した $TOKEN を含む全セッションが失効するので、以後は新パスワードで再ログインする）
+curl -X PUT http://localhost:3000/auth/password \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"current_password": "root", "new_password": "your-new-strong-password"}'
+
+# Web UI（未ログインの場合はログイン画面が表示される。Records一覧はSQL経由のため、HTTPリクエストが無効でも閲覧可能）
 open http://localhost:3000/ui
 ```
 
----
-
-## KDB ストレージフォーマット
-
-`.kdb` 拡張子のファイルは KAGURA DB 独自の暗号化バイナリ形式です。
-
-### ファイル構造
-
-```
-┌──────────────────────────────────────────────────┐
-│  HEADER  (64 bytes, 平文)                         │
-│  magic[4]="KGDB"  version[2]  flags[2]           │
-│  salt[16]  next_id[8]  record_count[8]            │
-│  wal_entries[8]  reserved[16]                     │
-├──────────────────────────────────────────────────┤
-│  WAL ENTRIES (暗号化・追記ログ)                   │
-│  [entry_len: u32][nonce: 24B][ciphertext + MAC]   │
-│  ↑ レコード1件ずつ繰り返し                        │
-└──────────────────────────────────────────────────┘
-```
-
-### 暗号化仕様
-
-| 項目 | 仕様 |
-|------|------|
-| 暗号アルゴリズム | XChaCha20-Poly1305 AEAD |
-| 鍵長 | 256 bit（32 bytes） |
-| Nonce | 192 bit（24 bytes）・毎回ランダム生成 |
-| 認証タグ | Poly1305 MAC（16 bytes）・改ざん検知 |
-| 鍵導出 | HChaCha20(master_key, file_salt) |
-| Salt | ファイル作成時に `/dev/urandom` から生成（16 bytes） |
-| 実装 | 外部クレート不使用・純 Rust 手実装 |
-
-### INSERT 高速化（WAL 方式）
-
-```
-従来の JSON 方式: O(n) → 10,000件目: 約600秒超・平均 5 req/s
-KDB WAL 方式: O(1) → 10,000件目でも ~1,200 req/s（10,000件を 8.1秒で完了）
-```
-
-### セキュリティ特性
-
-- テキストエディタで開いても内容は読めない（バイナリ）
-- `strings` コマンドで意味のある文字列が抽出されない
-- ファイル先頭 4 bytes は `KGDB` マジックナンバーのみ平文
-- Poly1305 MAC により 1 bit の改ざんも検知可能
-- マスターキーを変えれば同一ファイルを別環境で開けない
-
----
-
-## SQL 機能
-
-`POST /sql` エンドポイントで SQL SELECT / INSERT クエリを実行できます。
-通常の SQL とは異なり、テーブル名の代わりに `label.xxx` でラベルを指定する独自拡張構文です。
-
-### SELECT 構文
-
-```sql
-SELECT * FROM label.employee
-SELECT * FROM label.*
-SELECT * FROM label.employee AND label.manager
-SELECT * FROM label.employee OR label.developer
-SELECT * FROM label.employee WHERE name = '田中'
-SELECT * FROM label.employee WHERE age > 30 AND city = 'Tokyo'
-SELECT * FROM label.employee WHERE name LIKE '田%'
-SELECT * FROM label.employee ORDER BY salary DESC LIMIT 10
-```
-
-### INSERT 構文
-
-```sql
--- カラム順を明示（推奨）: ラベル指定の直後に (col1, col2, ...) を置く
--- （標準SQLの INSERT INTO table (col1, col2) VALUES (...) に準じた語順）
-INSERT INTO (label.employee) (employee_name, employee_age, employee_department) VALUE ('田中', 24, 'developer')
-
--- 複数ラベルを同時に付与
-INSERT INTO (label.employee, label.manager) (employee_name, employee_age, employee_department) VALUE ('田中', 24, 'developer')
-
--- カラム順省略時: DB内の既存カラムをソート順に対応付ける（1件も既存カラムが無い場合はエラー）
-INSERT INTO (label.employee) VALUE ('田中', 24, 'developer')
-
--- ラベル名は 'label.xxx' の文字列リテラル形式でも指定可能
-INSERT INTO ('label.employee') (employee_name, employee_age, employee_department) VALUE ('田中', 24, 'developer')
-```
-
-補足:
-- `INTO` の後のラベル名は必須で、`label.*` や空文字列は指定できない（無ラベル・全ラベル一括付与は不可）。
-- 指定したラベルが未作成の場合、INSERT 実行時に自動作成される。
-- `id` は自動採番のみで、INSERT 文からは指定できない。
-
-### リクエスト例
-
-```bash
-curl -X POST http://localhost:3000/sql \
-  -H 'Content-Type: application/json' \
-  -d '{"query": "SELECT employee_name, age, salary FROM label.employee WHERE age > 30 ORDER BY salary DESC LIMIT 10"}'
-
-curl -X POST http://localhost:3000/sql \
-  -H 'Content-Type: application/json' \
-  -d "{\"query\": \"INSERT INTO (label.employee) (employee_name, employee_age, employee_department) VALUE ('田中', 24, 'developer')\"}"
-```
-
-### 10,000件での性能測定
-
-| クエリ | 応答時間 |
-|--------|-------|
-| `SELECT * FROM label.* LIMIT 100` | **9.7 ms** |
-| `WHERE 等値検索` | **9.7 ms** |
-| `WHERE LIKE` | **10.6 ms** |
-| `WHERE 複合 AND` | **12.7 ms** |
-| `FROM label.A AND label.B` | **30.9 ms** |
-| `ORDER BY LIMIT 50` | **33.9 ms** |
-| `WHERE 範囲検索` | **88.7 ms** |
-| `SELECT * FROM label.employee`（2000件） | **154.8 ms** |
-| `FROM label.A OR label.B`（3200件） | **252.9 ms** |
-| `SELECT * FROM label.*`（全 10,000件） | **750.4 ms** |
-
----
-
-## API リファレンス
-
-### エンドポイント一覧
-
-HTTPリクエスト欄が「要HTTP API」の行は、既定では無効な `/records` `/labels` 系 REST API に属し、
-`PUT /settings` で `http_api_enabled: true` にするまで `403 Forbidden` を返す（詳細は [設定](#web-管理ui) を参照）。
-
-| メソッド | パス | 説明 | 要HTTP API |
-|---------|------|------|:---:|
-| `GET`    | `/ui` | Web 管理 UI | - |
-| `GET`    | `/records` | 全レコード取得 | ✅ |
-| `POST`   | `/records` | レコード作成 | ✅ |
-| `GET`    | `/records/{id}` | ID で取得 | ✅ |
-| `PUT`    | `/records/{id}` | レコード更新 | ✅ |
-| `DELETE` | `/records/{id}` | レコード削除 | ✅ |
-| `GET`    | `/records/label/{label}` | ラベルで絞り込み取得 | ✅ |
-| `GET`    | `/records/{id}/labels` | レコードのラベル一覧 | ✅ |
-| `POST`   | `/records/{id}/labels` | ラベル追加 | ✅ |
-| `DELETE` | `/records/{id}/labels/{label}` | ラベル削除 | ✅ |
-| `GET`    | `/labels` | 全ラベル一覧+統計 | ✅ |
-| `POST`   | `/labels/search` | AND/OR ラベル検索 | ✅ |
-| `PUT`    | `/labels/rename` | ラベルリネーム | ✅ |
-| `GET`    | `/db/info` | DB バージョン・統計情報 | - |
-| `POST`   | `/sql` | SQL SELECT / INSERT 実行 | - |
-| `GET`    | `/settings` | 現在の設定取得 | - |
-| `PUT`    | `/settings` | 設定更新（HTTPリクエスト受付オンオフ） | - |
-
-### GET /db/info レスポンス例
-
-```json
-{
-  "engine_name":    "KAGURA DB Engine",
-  "app_version":    "1.6.0",
-  "storage_mode":   "kdb",
-  "storage_format": "KDB Binary (WAL + XChaCha20-Poly1305 encrypted)",
-  "encrypted":      true,
-  "db_file_path":   "db_data.kdb",
-  "record_count":   10000,
-  "label_count":    87,
-  "column_count":   68,
-  "next_id":        10001
-}
-```
-
----
-
-## Web 管理UI
-
-`http://localhost:3000/ui` でブラウザから DB を操作できます。
-
-| ビュー | 説明 |
-|--------|------|
-| **📋 Records** | レコード一覧（`POST /sql` の `SELECT * FROM label.*` 経由で取得。HTTPリクエストが無効でも閲覧可能）・検索・ラベルフィルター・自動更新（10秒）。作成・編集・削除は REST API（`/records`）を使うため、これらの操作には設定で HTTPリクエストを有効化する必要がある |
-| **ℹ️ DB Info** | バージョン・ストレージモード・暗号化状態・統計カード・カラム一覧 |
-| **🔍 SQL Query** | SQL SELECT / INSERT 実行・テーブル形式結果表示・ Ctrl+Enter 対応 |
-| **⚙️ 設定** | HTTPリクエスト（`/records` `/labels` 系 REST API）受付のオンオフを切替（既定は無効）。大量テストデータ投入など HTTP 経由の操作が必要なときに有効化する |
-
----
-
-## テストデータ生成
-
-```bash
-# 10,000件生成 + 性能テスト
-python3 examples/python/generate_testdata.py --bench
-
-# 性能テストのみ
-python3 examples/python/generate_testdata.py --bench-only --repeat 5
-```
-
-**依存**: Python 3.6+ 標準ライブラリのみ（pip 不要）
-
----
-
-## Python バインディング
-
-```bash
-cargo build --release -p db_ffi
-cd examples/python && python3 demo.py
-```
-
-```python
-from db_engine import DbEngine
-db = DbEngine()
-id = db.insert({"name": "Alice", "age": 30}, labels=["dept:engineering"])
-print(db.get(id))
-db.save("/tmp/kagura.json")
-```
-
----
-
-## テスト
-
-```bash
-cargo test --workspace
-```
-
-| クレート | テスト数 | 内容 |
-|----------|----------|---------|
-| `db_engine` | 38 | CRUD・ラベル操作・KDB暗号化・バイナリコーデック |
-| `dynamic_label_management` | 24 | AND/OR 検索・リネーム・差分 |
-| `db_ffi` | 10 | FFI 関数・メモリ管理 |
-| `db_client`（統合テスト） | 41 | HTTP API・ラベル操作・永続化・SQL SELECT/INSERT・設定（HTTPリクエスト受付オンオフ） |
-| `sql_engine` | 28 | パーサー・実行エンジン（SELECT・INSERT・WHERE・ORDER BY・LIKE） |
-| **合計** | **141** | |
+SQL 構文の詳細は [docs/sql.md](docs/sql.md)、全エンドポイントは [docs/api.md](docs/api.md) を参照してください。
 
 ---
 
@@ -483,12 +242,16 @@ cargo test --workspace
 | HTTP フレームワーク | [axum](https://github.com/tokio-rs/axum) 0.8 |
 | 非同期ランタイム | [tokio](https://tokio.rs/) 1.x |
 | シリアライゼーション | [serde](https://serde.rs/) + serde_json |
-| 暗号化 | XChaCha20-Poly1305 AEAD（純 Rust 手実装・外部クレートなし） |
+| 暗号化（KDBストレージ） | XChaCha20-Poly1305 AEAD（純 Rust 手実装・外部クレートなし） |
+| 認証（パスワードハッシュ） | [argon2](https://docs.rs/argon2) クレート（Argon2id） |
 | SQL パーサー | 手書き再帰下降パーサー（外部ライブラリなし） |
 | FFI | Rust `extern "C"` + Python `ctypes` |
 | フロントエンド | バニラ HTML / CSS / JavaScript（外部依存なし） |
 | テスト（HTTP） | [reqwest](https://github.com/seanmonstar/reqwest) 0.12 |
 | テストデータ生成 | Python 3.6+ 標準ライブラリのみ |
+| ログ | JSON Lines 形式でファイル保存（[chrono](https://github.com/chronotope/chrono) でタイムスタンプ生成） |
+
+テスト（`cargo test --workspace`・合計 254 件）の内訳は [docs/development.md](docs/development.md) を参照してください。
 
 ---
 
@@ -504,6 +267,24 @@ cargo test --workspace
 
 | バージョン | 主な変更内容 |
 |-----------|-------------|
+| **4.0.0** | **【破壊的変更】** 一般ユーザーの `privileges` を実際に強制するようになり、あわせて権限付与・剥奪の SQL 文 `GRANT` / `REVOKE` を新規追加。`GRANT <権限>[, ...] TO <ユーザー>[, ...]` / `REVOKE <権限>[, ...] FROM <ユーザー>[, ...]`（`MANAGE_USERS` 権限が必要。指定できる権限は `SELECT`/`INSERT`/`UPDATE`/`DELETE`/`MANAGE_USERS` と、まとめ指定用の `ALL`=データ操作4種・`SUPER`=4種+`MANAGE_USERS`。複数権限・複数ユーザーをカンマ区切りで同時指定可。`ALL PRIVILEGES` 表記も許容）。`SUPER` / `ALL` は付与時に個別権限へ展開して `auth.json` へ永続化する。これらの文は他のユーザー管理文と同じく `db_client/src/user_sql.rs` の専用パーサーで処理（トークナイザに `,` を追加）。強制（enforce）は3か所: (1) `db_client/src/sql_handlers.rs` の `execute_sql` で SELECT→`SELECT` / INSERT→`INSERT` / UPDATE→`UPDATE` / DELETE→`DELETE` を要求、(2) `db_client/src/app.rs` に新ミドルウェア `require_data_privilege` を追加し `/records`・`/labels` 系 REST API をメソッド（GET/`POST /labels/search`→`SELECT`、POST→`INSERT`、PUT→`UPDATE`、DELETE→`DELETE`）で判定、(3) ユーザー管理文は従来どおり `MANAGE_USERS`。いずれも不足時は `403 Forbidden`（必要な権限名をメッセージに含む）。管理者ロール `kagura` は常に全権限。既存の一般ユーザーは作成時の既定で `SELECT`/`INSERT`/`UPDATE`/`DELETE` の4種を保持するため実挙動は変わらない。Web UI（設定→ユーザー管理）のユーザー一覧に権限チェックボックスを追加し、切り替えで `GRANT` / `REVOKE` を実行できるようにした。`.kdb` バイナリフォーマット・`auth.json` フォーマット・`kdb` CLI の挙動には影響しない。全クレートの `Cargo.toml` バージョンを `4.0.0` に同期 |
+| **3.4.0** | 一般ユーザー管理機能を新規追加。管理者ユーザー `kagura` のみが `POST /sql` 経由で `CREATE USER 'name' IDENTIFIED BY 'password'` を実行して一般ユーザーを発行できる（`DROP USER 'name' [IF EXISTS]` / `ALTER USER 'name' IDENTIFIED BY 'pw'` / `SHOW USERS` にも対応）。これらの文はレコードストアではなく認証状態を操作するため `sql_engine` には手を入れず、`db_client/src/user_sql.rs`（新規）の専用パーサーで処理し `db_client/src/sql_handlers.rs` の `execute_sql` 冒頭でディスパッチする。簡単なパスワード（`1234` `aaa` / 8文字未満 / 単一文字種 / 連番 / よくある語）の場合は要件どおり `Warning: The password strength is too weak. Do you want to proceed?\n\nPlease enter 'yes' to proceed or 'no' to cancel.` を返す。`/sql` は `{"ok":false,"needs_confirmation":true,"warning":...}` を返し、クライアントは `confirm_weak_password: true` を付けて再送すると作成を続行、`false` で中止（エラー）。Web UI（`/ui` 設定画面）に「ユーザー管理」セクションを追加し、作成フォーム・`SHOW USERS` 一覧・削除ボタンを提供、脆弱パスワード時は `prompt` で yes/no を確認する。認証情報ファイル `auth.json`（`KAGURA_AUTH_FILE`）は単一ユーザー形式から複数ユーザー対応形式 `{"schema_version":2,"users":[{username,password_hash,role,privileges,created_at,disabled}]}` へ拡張。旧形式のファイルは起動時に自動で新形式へ移行する（ユーザー操作不要）。一般ユーザーには将来の GRANT/REVOKE を見据えた `privileges`（既定 `select,insert,update,delete`）を保持し、現バージョンで enforce するのは `manage_users`（ユーザー管理操作の可否）のみ。`PUT /auth/password` はトークンからログイン中ユーザーを解決して本人のパスワードを変更するよう変更。`.kdb` バイナリフォーマット（`VERSION`）は不変で、既存の REST API・Web UI・`kagura`/`root` ログイン・`kdb` CLI の挙動には影響しない。全クレートの `Cargo.toml` バージョンを `3.4.0` に同期 |
+| **3.3.1** | 肥大化した `README.md`（約990行）を整理。認証・`kdb` CLI・インストール（Linux/Windows）・SQL 機能・KDB ストレージフォーマット・API リファレンス/Web UI/ログ機能・テスト/テストデータ生成/Python バインディングの各詳細セクションを `docs/` 配下の個別ファイル（`features.md` `authentication.md` `cli.md` `sql.md` `api.md` `storage-format.md` `installation.md` `development.md`）へ分割し、README 本体は概要・アーキテクチャ・機能概要・プロジェクト構成・クイックスタート・技術スタック・各ドキュメントへの入口・バージョン履歴に再編した。ドキュメントのみの変更でありコードの挙動・互換性には一切影響しない |
+| **3.3.0** | `kdb shell-init bash`/`zsh`（シェル連携スクリプト出力）と `kdb prompt`（ログイン状態タグ出力。`shell-init`が内部的に利用）を新規追加。ログインしたことがOSのシェルプロンプト上からは分からず、`kdb login` を打ったあとも `[ec2-user@ip-10-0-0-5 scripts]$` のまま変化しないのが分かりにくいという指摘を受けて対応。`kdb login` 自体は子プロセスのため親シェルの `PS1`/`PROMPT` を直接書き換えることはできないので、`kube-ps1` 等と同様に「シェル設定ファイルに1行追加 → プロンプト描画のたびに `$(__kdb_ps1)` が `kdb prompt` を呼び出し、ローカルのセッションファイル（`~/.config/kdb/session.json`）の有無に応じてタグの表示/非表示を切り替える」方式を採用。ホスト名・カレントディレクトリ等の既存プロンプト情報は保持したまま、先頭に `(kdb:ユーザー名@接続先) ` タグを付加する。サーバーへの通信は行わずローカルのセッションファイルの有無のみで判定するため、トークンの期限切れ・サーバー側失効は反映されない（正確な有効性確認は `kdb whoami` を使う） |
+| **3.2.1** | `kdb` バイナリのパッケージング不備を修正。`packaging/scripts/install.sh` を `cargo build --release -p db_client -p kdb_cli` でビルドし `/usr/bin/kdb` にも配置するよう変更（`uninstall.sh` も対応して削除）。`db_client/Cargo.toml` の `[package.metadata.deb]` / `[package.metadata.generate-rpm]` の `assets` に `target/release/kdb` → `/usr/bin/kdb` を追加し、`.deb`/`.rpm` パッケージにも同梱されるようにした。3.2.0時点ではworkspaceにクレートを追加しただけでいずれのインストール手順にも組み込んでおらず、`cargo build -p kdb_cli` を手動実行しない限り `kdb` コマンドが `PATH` 上に存在せず `command not found` になっていたため |
+| **3.2.0** | KAGURA DB インストール後に使える専用コマンドラインクライアント `kdb`（新規クレート `kdb_cli`、バイナリ名 `kdb`。workspace members に追加）を新規追加。`kdb login -u <ユーザー名> -p <パスワード> -a <接続先>` で `POST /auth/login` を叩き、成功したらセッション（トークン・ユーザー名・接続先）を `~/.config/kdb/session.json`（パーミッション600）へ保存する。`-u` / `-p` / `-a` は `KDB_USER` / `KDB_PASSWORD` / `KDB_ADDR` 環境変数でも指定可能。`-p` を省略した場合は `rpassword` クレートによる非表示入力（シェル履歴・`ps`への平文パスワード漏えい回避）で対話的にプロンプトする一般的なDBクライアント（mysql/psql等）の慣習に合わせた。`-a` はスキーム省略時（`host:port`）に `http://` を自動補完し、`https://` も指定可能（`-k`/`--insecure` で自己署名証明書向けにTLS証明書検証をスキップ可能）。`kdb logout`（`POST /auth/logout` でサーバー側トークンを失効させローカルセッションを削除）、`kdb whoami`（保存済みセッションのユーザー名・接続先表示と `GET /db/info` によるトークン有効性確認）を追加。既存の REST API・Web UI・認証の挙動には影響しない |
+| **3.1.0** | ログ出力保管機能に認証専用の `category: "auth"` を追加。従来ログイン成功/失敗・ログアウト・パスワード変更は `category: "db"` のログに `auth: ...` という接頭辞付きメッセージとして混在させて記録していたが、他のサブシステム（`sql` `http` `hardware`）と同様に独立したカテゴリへ分離し、`GET /logs` の絞り込みや Web UI ログビューのカテゴリセレクトから `auth` を選んで認証イベントだけを追えるようにした。`Logger` に `auth_info` / `auth_warn` を追加し、`auth_handlers.rs` のログイン・ログアウト・パスワード変更ハンドラーをこれらへ切り替え |
+| **3.0.0** | **【破壊的変更】** 認証機能を新規追加。管理者（マスター）ユーザー `kagura`（初期パスワード `root`）による Bearer トークン認証を実装し、`/ui`（Web UI のHTMLシェル）と `POST /auth/login` を除く全エンドポイント（`/db/info` `/sql` `/settings` `/logs` `/records` `/labels` 系すべて）が既定でログイン必須になった。認証情報（ユーザー名・Argon2idハッシュ化されたパスワード）は環境変数 `KAGURA_AUTH_FILE`（既定 `auth.json`）に永続化し、ファイルが存在しない初回起動時のみ初期管理者を自動作成する。追加した認証 API は `POST /auth/login`（ログイン・トークン発行）、`POST /auth/logout`（トークン失効）、`PUT /auth/password`（パスワード変更。成功すると全セッションを失効させ再ログインを必須化）の3本。セッショントークンはメモリ上でのみ管理し有効期限は24時間、同一ユーザー名で5回連続ログイン失敗すると15分間ロックする（`423 Locked`）。Web UI にログイン画面・ログアウトボタン・パスワード変更フォームを追加。影響範囲: (1) 認証を追加する前提で書かれていない既存クライアント（curlスクリプト・`examples/python/generate_testdata.py` 等）は事前ログインが必要になる（`generate_testdata.py` は自動でログインするよう追随済み）。(2) 全クレートの `Cargo.toml` バージョンをこのREADMEと同期させた |
+| **2.5.1** | Web UI「Records」画面の不具合修正。`SELECT * FROM label.*` で取得した全レコードを1つのHTML文字列に連結してから描画していたため、数万〜10万件規模のデータでは連結後の文字列がJavaScriptの文字列長上限を超え `RangeError: Invalid string length` が発生していた。この例外が `loadAll()` の汎用catchに捕捉され、実際はサーバーへの通信自体は成功しているにもかかわらず「Connection failed」と誤表示される（サーバーダウンしたかのように見える）事象があったため、Records一覧の描画件数に上限（1,000件）を設け、超過時は超過件数と絞り込み方法を通知する行を表示するよう変更。あわせて `loadAll()` の catch 側も、原因を問わず固定文言を出すのをやめ、実際のエラーメッセージを表示するように修正。また、2.4.0以降 `db_client`／`db_engine`／`db_ffi`／`dynamic_label_management`／`sql_engine` の `Cargo.toml` の `version` が `2.4.0` のまま更新されておらず、DB Info画面が参照する `CARGO_PKG_VERSION` がREADME上のバージョン表記（2.5.0）と食い違っていた（再ビルドしてもDB Infoの表示が古いまま変わらない不具合）ため、全クレートのバージョンをREADMEと同期させた |
+| **2.5.0** | Windows 向けインストール機能を新規追加。Windows のサービス制御マネージャーへの正規登録には実行ファイル側の対応が必要なため、代わりにタスクスケジューラ（PC起動時に自動実行、異常終了時は自動再起動）で常駐運用する方式を採用。導入方法として (1) 追加ツール不要の `packaging/windows/install.ps1`／`uninstall.ps1`（ソースビルド＋`%ProgramFiles%\KaguraDB`・`%ProgramData%\KaguraDB`への配置＋タスク登録）、(2) [Inno Setup](https://jrsoftware.org/isinfo.php) による `.exe` インストーラー（`packaging/windows/installer.iss`。アンインストーラーは自動生成され「プログラムと機能」に登録される）の2種を用意。`KAGURA_MASTER_KEY` はインストール時にランダム生成し `%ProgramData%\KaguraDB\config\kagura.env` へ保存する運用とし、Linux版と同様の挙動（既存ファイルは上書きしない）とした |
+| **2.4.0** | `examples/python/generate_testdata.py` に `--dump-json PATH`（サーバー接続不要でPOST /records用のJSON配列をファイルへ書き出し）と `--load-json PATH`（ランダム生成せずファイルから読み込んで投入）を追加。インストールし直した後などにランダム再生成せず同じテストデータを再投入できるように、事前生成済みの10,000件JSON配列 `examples/testdata/kagura_testdata_10000.json` を同梱（各要素は `{"columns": {...}, "labels": [...]}` の形式で `POST /records` にそのまま投入可能） |
+| **2.3.0** | Linux 向けインストール機能を新規追加。一般的な Linux パッケージ（nginx・PostgreSQL 等）と同様に、専用の非rootシステムユーザー（`kagura`）で動作する systemd サービスとして導入可能に。`systemctl start/stop/restart/enable` によるプロセス管理、`journalctl` によるログ確認、FHS準拠のディレクトリ配置（`/usr/bin`・`/etc/kagura-db`・`/var/lib/kagura-db`・`/var/log/kagura-db`）に対応。導入方法として (1) 追加ツール不要の `packaging/scripts/install.sh`／`uninstall.sh`、(2) `cargo-deb` による `.deb` パッケージ、(3) `cargo-generate-rpm` による `.rpm` パッケージの3種を用意。`KAGURA_MASTER_KEY`（KDB暗号化マスターキー）はインストール時にランダム生成し `/etc/kagura-db/kagura.env` に600番台権限で保存するようにし、既定の固定キーへのフォールバックに頼らない運用を可能にした |
+| **2.2.0** | SQL `DELETE` 文を新規追加。`DELETE FROM label.xxx [WHERE ...]`（対象ラベルのレコードをデータごと完全に削除。`WHERE`省略時は対象ラベル内の全レコードを一括削除、`label.*`でDB全体を対象化可能）と、`DELETE LABEL FROM label.xxx [WHERE ...]`（レコード自体は削除せず指定ラベルのみを対象レコードから外す）の2構文に対応。`POST /sql` が DELETE 文を受け付けるようになり、レスポンスに削除件数 `deleted_count` を追加 |
+| **2.1.0** | SQL `UPDATE LABEL label.old SET label.new` に `WHERE` 句対応を追加。従来は `old` ラベルが付いた全レコードが常に一括でリネームされていたが、`WHERE` で条件を指定すると一致したレコードだけを対象にでき、一括変更を避けられるようになった（`WHERE` 省略時は従来通り全レコードが対象） |
+| **2.0.0** | **【破壊的変更】** ラベルの重複付与を禁止。従来 `db_engine::Database::attach_label`（および `dynamic_label_management::LabelManager::add_label`）は既に付与済みのラベルを再付与しても何もせず成功していた（冪等）が、変更せず `DuplicateLabel` エラーを返す仕様に変更。影響範囲: (1) `POST /records/{id}/labels` は重複時に `409 Conflict` を返すようになる（以前は `200 OK`）。(2) SQL `INSERT INTO (label.a, label.a) ...` のように同一文内で同じラベルを複数指定した場合はエラーになる。(3) SQL `UPDATE LABEL label.old SET label.new` はリネーム先 `new` が既にDB内の他レコードで使われている場合エラーとし、何も変更しない（自己リネームも同様）。副作用として `dynamic_label_management` の `copy_labels`／`rename_label` は、コピー先／対象レコードが既に同名ラベルを持つ場合は重複エラーを避けるためスキップするよう防御的に修正 |
+| **1.8.0** | SQL `UPDATE` 機能追加。`UPDATE label.xxx SET col=val, ... WHERE ...` によるデータ更新（SET対象外のカラム・ラベルは維持）と、`UPDATE LABEL label.old SET label.new` によるラベル名リネーム（DB全体一括）の2構文に対応。`POST /sql` が UPDATE 文を受け付けるようになり、レスポンスに更新件数 `updated_count` を追加 |
+| **1.7.1** | SQL `INSERT` のパフォーマンス改善。従来は書き込みのたびに全レコードを読み直して再暗号化・全件書き直す方式（コンパクション）だったため件数に比例して遅くなっていたが、REST `/records` と同じ WAL 追記方式（`insert_fast`）に統一し O(1) 化。検証では約32,000件時点で 189ms → 0.4ms（約470倍）高速化 |
+| **1.7.0** | ログ出力保管機能を追加。起動/停止時刻・停止理由（正常/エラー/HW異常）・SQL/HTTPリクエストの成功失敗・Webクライアントの応答時間・DB操作を JSON Lines 形式でファイルへ永続保存。`GET /logs` エンドポイントと Web UI「ログ」ビューを追加 |
 | **1.6.0** | Web UI に「設定」ビューを追加し `GET`/`PUT /settings` で HTTPリクエスト（`/records` `/labels` 系 REST API）受付のオンオフを切替可能に（**既定を無効化**）。Web UI の Records 一覧を REST から SQL（`SELECT * FROM label.*`）経由の取得に変更し、REST API 無効時も閲覧可能に。`SELECT *` の結果に `labels` 列（カンマ区切り）を追加 |
 | **1.5.0** | SQL INSERT 機能追加（`INSERT INTO (label.xxx) (col, ...) VALUE (...)`、複数ラベル同時付与、ラベル自動作成）、`POST /sql` の INSERT 対応 |
 | **1.4.1** | DB Info UI のバージョン・ストレージ表示修正、全クレートバージョン統一 |

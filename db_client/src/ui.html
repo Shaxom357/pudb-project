@@ -130,7 +130,16 @@ tbody td { padding: 10px 14px; vertical-align: middle; }
 .switch input:checked + .slider { background: #4f6ef7; }
 .switch input:checked + .slider:before { transform: translateX(20px); }
 .toggle-status { margin-top: 14px; font-size: 12px; color: #888; }
-
+/* Login */
+.login-overlay { position: fixed; inset: 0; background: #1a1a2e; z-index: 300; display: flex; align-items: center; justify-content: center; }
+.login-overlay.hidden { display: none; }
+.login-box { background: #fff; border-radius: 12px; padding: 36px 32px; width: 340px; max-width: 90vw; box-shadow: 0 20px 60px rgba(0,0,0,.4); }
+.login-box h1 { font-size: 18px; margin-bottom: 4px; }
+.login-box .sub { font-size: 12px; color: #888; margin-bottom: 22px; }
+.login-error { font-size: 12px; color: #e03131; margin-top: 4px; min-height: 16px; }
+.header .logout-btn { background: transparent; border: 1px solid #444; color: #ccc; border-radius: 6px; padding: 5px 12px; font-size: 12px; cursor: pointer; margin-left: 12px; }
+.header .logout-btn:hover { background: #2a2a44; }
+.header .whoami { font-size: 12px; color: #aaa; margin-left: 16px; }
 </style>
 </head>
 <body>
@@ -139,21 +148,41 @@ tbody td { padding: 10px 14px; vertical-align: middle; }
   <span class="badge" id="headerCount">0 records</span>
   <div class="spacer"></div>
   <span class="stats">localhost:3000</span>
+  <span class="whoami" id="whoami"></span>
+  <button class="logout-btn" onclick="doLogout()">Logout</button>
+</div>
+
+<div class="login-overlay hidden" id="loginOverlay">
+  <div class="login-box">
+    <h1>&#x1F5C4;&#xFE0F; KAGURA DB Admin</h1>
+    <div class="sub">ログインしてください</div>
+    <div class="form-group">
+      <label>Username</label>
+      <input type="text" id="loginUsername" autocomplete="username">
+    </div>
+    <div class="form-group">
+      <label>Password</label>
+      <input type="password" id="loginPassword" autocomplete="current-password">
+    </div>
+    <div class="login-error" id="loginError"></div>
+    <button class="btn btn-primary" style="width:100%;margin-top:6px" onclick="doLogin()">Login</button>
+  </div>
 </div>
 <div class="layout">
   <div class="sidebar">
     <div class="sidebar-section">Views</div>
-    <div class="sidebar-nav active" id="navRecords" onclick="showView('records')">&#x1F4CB; Records</div>
-    <div class="sidebar-nav" id="navDbInfo" onclick="showView('dbinfo')">&#x2139;&#xFE0F; DB Info</div>
+    <div class="sidebar-nav" id="navRecords" onclick="showView('records')">&#x1F4CB; Records</div>
+    <div class="sidebar-nav active" id="navDbInfo" onclick="showView('dbinfo')">&#x2139;&#xFE0F; DB Info</div>
     <div class="sidebar-nav" id="navSql" onclick="showView('sql')">&#x1F50D; SQL Query</div>
     <div class="sidebar-nav" id="navSettings" onclick="showView('settings')">&#x2699;&#xFE0F; 設定</div>
+    <div class="sidebar-nav" id="navLogs" onclick="showView('logs')">&#x1F4DC; ログ</div>
     <div class="sidebar-section" style="margin-top:8px">Filter by Label</div>
     <div class="sidebar-all" onclick="filterByLabel(null)">&#x1F4CB; All records</div>
     <div id="labelList"></div>
   </div>
   <div class="main">
     <!-- Records View -->
-    <div id="viewRecords">
+    <div id="viewRecords" style="display:none">
       <div class="toolbar">
         <input type="text" id="searchInput" placeholder="Search columns / labels..." oninput="renderTable()">
         <button class="btn btn-primary" onclick="openCreateModal()">+ New Record</button>
@@ -173,7 +202,7 @@ tbody td { padding: 10px 14px; vertical-align: middle; }
       </div>
     </div>
     <!-- DB Info View -->
-    <div id="viewDbInfo" style="display:none;flex:1;overflow:hidden;display:none;flex-direction:column">
+    <div id="viewDbInfo" style="flex:1;overflow:hidden;flex-direction:column">
       <div class="toolbar">
         <span style="font-weight:700;font-size:15px">&#x2139;&#xFE0F; DB Version &amp; Info</span>
         <span style="flex:1"></span>
@@ -226,6 +255,64 @@ tbody td { padding: 10px 14px; vertical-align: middle; }
           </div>
           <div class="toggle-status" id="httpApiStatus"></div>
         </div>
+        <div class="info-section-title" style="margin-top:24px">パスワード変更</div>
+        <div class="settings-card">
+          <div class="form-group">
+            <label>現在のパスワード</label>
+            <input type="password" id="curPassword" autocomplete="current-password">
+          </div>
+          <div class="form-group">
+            <label>新しいパスワード（8文字以上）</label>
+            <input type="password" id="newPassword" autocomplete="new-password">
+          </div>
+          <button class="btn btn-primary" onclick="doChangePassword()">パスワードを変更</button>
+          <div class="toggle-status" id="passwordStatus"></div>
+        </div>
+        <div class="info-section-title" style="margin-top:24px">ユーザー管理（管理者のみ）</div>
+        <div class="settings-card" id="userMgmtCard">
+          <div class="toggle-desc" style="margin-bottom:12px">一般ユーザーを作成します（SQL の <code>CREATE USER 'name' IDENTIFIED BY 'password'</code> と同じ）。簡単なパスワードの場合は確認を求めます。管理者以外でログインしている場合、この操作は行えません。<br>一覧の権限チェックボックスで <code>GRANT</code> / <code>REVOKE</code> を実行できます（<code>MANAGE_USERS</code> はユーザー管理操作の可否、<code>SUPER</code> はデータ操作4種＋<code>MANAGE_USERS</code>）。</div>
+          <div class="form-group">
+            <label>ユーザー名</label>
+            <input type="text" id="newUserName" autocomplete="off" spellcheck="false">
+          </div>
+          <div class="form-group">
+            <label>パスワード</label>
+            <input type="password" id="newUserPassword" autocomplete="new-password">
+          </div>
+          <button class="btn btn-primary" onclick="doCreateUser()">ユーザーを作成</button>
+          <div class="toggle-status" id="userMgmtStatus"></div>
+          <div id="userListWrap" style="margin-top:16px;overflow-x:auto"></div>
+        </div>
+      </div>
+    </div>
+    <!-- Logs View -->
+    <div id="viewLogs" style="display:none;flex:1;overflow:hidden;flex-direction:column">
+      <div class="toolbar">
+        <span style="font-weight:700;font-size:15px">&#x1F4DC; ログ</span>
+        <select id="logsCategoryFilter" onchange="renderLogs()" style="border:1px solid #ddd;border-radius:6px;padding:6px 10px;font-size:13px">
+          <option value="">全カテゴリ</option>
+          <option value="lifecycle">lifecycle（起動/停止）</option>
+          <option value="http">http</option>
+          <option value="sql">sql</option>
+          <option value="db">db</option>
+          <option value="auth">auth（認証）</option>
+          <option value="hardware">hardware</option>
+        </select>
+        <span style="flex:1"></span>
+        <button class="btn btn-ghost" onclick="loadLogs()">&#x21BA; Refresh</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr>
+            <th style="width:210px">Timestamp</th>
+            <th style="width:70px">Level</th>
+            <th style="width:100px">Category</th>
+            <th>Message</th>
+            <th style="width:90px">Status</th>
+            <th style="width:90px">Duration</th>
+          </tr></thead>
+          <tbody id="logsTableBody"></tbody>
+        </table>
       </div>
     </div>
   </div>
@@ -268,10 +355,15 @@ tbody td { padding: 10px 14px; vertical-align: middle; }
 
 <script>
 let allRecords=[], allLabels=[], activeLabel=null, deleteTarget=null;
-let currentView='records';
+let currentView='dbinfo';
+let authToken = null;
+try{ authToken = localStorage.getItem('kagura_token'); }catch(_){}
+
+function authHeaders(){ return authToken ? {'Authorization':'Bearer '+authToken} : {}; }
 
 async function checkOk(r){
   if(!r.ok){
+    if(r.status===401){ showLogin('セッションの有効期限が切れました。再度ログインしてください。'); }
     let msg = 'HTTP '+r.status;
     try{ const body = await r.clone().json(); if(body && body.error) msg = body.error; }catch(_){}
     const e = new Error(msg); e.status = r.status; throw e;
@@ -280,11 +372,176 @@ async function checkOk(r){
 }
 
 const api = {
-  async get(p){ return (await checkOk(await fetch(p))).json(); },
-  async post(p,b){ return (await checkOk(await fetch(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}))).json(); },
-  async put(p,b){ return (await checkOk(await fetch(p,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)}))).json(); },
-  async delete(p){ return checkOk(await fetch(p,{method:'DELETE'})); },
+  async get(p){ return (await checkOk(await fetch(p,{headers:{...authHeaders()}}))).json(); },
+  async post(p,b){ return (await checkOk(await fetch(p,{method:'POST',headers:{'Content-Type':'application/json',...authHeaders()},body:JSON.stringify(b)}))).json(); },
+  async put(p,b){ return (await checkOk(await fetch(p,{method:'PUT',headers:{'Content-Type':'application/json',...authHeaders()},body:JSON.stringify(b)}))).json(); },
+  async delete(p){ return checkOk(await fetch(p,{method:'DELETE',headers:{...authHeaders()}})); },
 };
+
+// ---- ログイン ----
+function showLogin(errorMsg){
+  authToken = null;
+  try{ localStorage.removeItem('kagura_token'); }catch(_){}
+  document.getElementById('loginOverlay').classList.remove('hidden');
+  document.getElementById('loginError').textContent = errorMsg||'';
+  document.getElementById('loginPassword').value = '';
+}
+
+function hideLogin(){ document.getElementById('loginOverlay').classList.add('hidden'); }
+
+async function doLogin(){
+  const username = document.getElementById('loginUsername').value.trim();
+  const password = document.getElementById('loginPassword').value;
+  const errEl = document.getElementById('loginError');
+  errEl.textContent = 'ログイン中...';
+  try{
+    const resp = await fetch('/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username,password})});
+    const data = await resp.json();
+    if(!resp.ok){ errEl.textContent = data.error || 'ログインに失敗しました'; return; }
+    authToken = data.token;
+    try{ localStorage.setItem('kagura_token', authToken); localStorage.setItem('kagura_username', data.username); }catch(_){}
+    hideLogin();
+    document.getElementById('whoami').textContent = data.username;
+    showView(currentView);
+  }catch(e){
+    errEl.textContent = 'ネットワークエラー: '+(e && e.message ? e.message : String(e));
+  }
+}
+
+async function doLogout(){
+  try{ await fetch('/auth/logout',{method:'POST',headers:{...authHeaders()}}); }catch(_){}
+  try{ localStorage.removeItem('kagura_username'); }catch(_){}
+  showLogin('');
+}
+
+async function doChangePassword(){
+  const current_password = document.getElementById('curPassword').value;
+  const new_password = document.getElementById('newPassword').value;
+  const statusEl = document.getElementById('passwordStatus');
+  statusEl.textContent = '更新中...';
+  try{
+    const resp = await fetch('/auth/password',{method:'PUT',headers:{'Content-Type':'application/json',...authHeaders()},body:JSON.stringify({current_password,new_password})});
+    if(resp.status===204){
+      showToast('パスワードを変更しました。再度ログインしてください','success');
+      document.getElementById('curPassword').value='';
+      document.getElementById('newPassword').value='';
+      showLogin('パスワードを変更しました。新しいパスワードでログインしてください。');
+      return;
+    }
+    const data = await resp.json().catch(()=>({}));
+    statusEl.textContent = data.error || '更新に失敗しました';
+  }catch(e){
+    statusEl.textContent = 'ネットワークエラー';
+  }
+}
+
+document.getElementById('loginPassword').addEventListener('keydown', e=>{ if(e.key==='Enter') doLogin(); });
+document.getElementById('loginUsername').addEventListener('keydown', e=>{ if(e.key==='Enter') doLogin(); });
+
+// ---- ユーザー管理（設定画面） ----
+// SQL 文字列リテラル用に ' を '' へエスケープして 'foo' の形にする
+function sqlQuote(s){ return "'" + String(s).replace(/'/g, "''") + "'"; }
+
+async function doCreateUser(){
+  const name = document.getElementById('newUserName').value.trim();
+  const pw   = document.getElementById('newUserPassword').value;
+  const statusEl = document.getElementById('userMgmtStatus');
+  if(!name || !pw){ statusEl.textContent = 'ユーザー名とパスワードを入力してください'; return; }
+  statusEl.textContent = '作成中...';
+  try{
+    const data = await sqlRequest('CREATE USER ' + sqlQuote(name) + ' IDENTIFIED BY ' + sqlQuote(pw));
+    if(data===null) return;
+    if(data.ok){
+      showToast("ユーザー '" + name + "' を作成しました",'success');
+      statusEl.textContent = '';
+      document.getElementById('newUserName').value = '';
+      document.getElementById('newUserPassword').value = '';
+      loadUsers();
+    } else {
+      statusEl.textContent = data.error || '作成に失敗しました';
+    }
+  }catch(e){
+    statusEl.textContent = 'ネットワークエラー';
+  }
+}
+
+async function loadUsers(){
+  const wrap = document.getElementById('userListWrap');
+  if(!wrap) return;
+  try{
+    const data = await sqlRequest('SHOW USERS');
+    if(data===null) return;
+    if(!data.ok){
+      wrap.innerHTML = '<div class="toggle-status">' + esc(data.error||'ユーザー一覧を取得できませんでした') + '</div>';
+      return;
+    }
+    const cols = data.columns || [];
+    const rows = data.rows || [];
+    let html = '<table class="sql-result-table" style="width:100%;border-collapse:collapse;font-size:13px">'
+      + '<thead><tr>' + cols.map(c=>'<th style="text-align:left;padding:6px 10px;border-bottom:2px solid #4f6ef7">'+esc(c)+'</th>').join('') + '<th></th></tr></thead><tbody>';
+    const GRANTABLE = ['SELECT','INSERT','UPDATE','DELETE','MANAGE_USERS'];
+    for(const r of rows){
+      const obj = {}; cols.forEach((c,i)=>obj[c]=r[i]);
+      const isAdmin = String(obj.role) === 'admin';
+      const uname = String(obj.username);
+      html += '<tr>';
+      cols.forEach((c,i)=>{
+        const raw = (r[i]===null||r[i]===undefined) ? '' : String(r[i]);
+        if(c === 'privileges' && !isAdmin){
+          const have = new Set(raw.split(',').map(s=>s.trim().toUpperCase()).filter(Boolean));
+          const boxes = GRANTABLE.map(p=>'<label style="margin-right:10px;white-space:nowrap;font-size:12px">'
+            + '<input type="checkbox" data-priv-user="'+esc(uname)+'" data-priv="'+p+'"'
+            + (have.has(p)?' checked':'') + '> ' + p + '</label>').join('');
+          html += '<td style="padding:6px 10px;border-bottom:1px solid #eee">'+boxes+'</td>';
+        } else {
+          html += '<td style="padding:6px 10px;border-bottom:1px solid #eee">'+esc(raw)+'</td>';
+        }
+      });
+      html += '<td style="padding:6px 10px;border-bottom:1px solid #eee">'
+        + (isAdmin ? '' : '<button class="btn btn-danger btn-sm" data-dropuser="'+esc(uname)+'">削除</button>')
+        + '</td></tr>';
+    }
+    html += '</tbody></table>';
+    wrap.innerHTML = html;
+    wrap.querySelectorAll('button[data-dropuser]').forEach(btn=>{
+      btn.addEventListener('click', ()=>doDropUser(btn.getAttribute('data-dropuser')));
+    });
+    wrap.querySelectorAll('input[data-priv-user]').forEach(cb=>{
+      cb.addEventListener('change', ()=>doSetPrivilege(cb.getAttribute('data-priv-user'), cb.getAttribute('data-priv'), cb.checked, cb));
+    });
+  }catch(e){
+    wrap.innerHTML = '<div class="toggle-status">ユーザー一覧の取得に失敗しました</div>';
+  }
+}
+
+async function doSetPrivilege(user, priv, grant, cb){
+  try{
+    const sql = (grant ? 'GRANT ' : 'REVOKE ') + priv + (grant ? ' TO ' : ' FROM ') + sqlQuote(user);
+    const data = await sqlRequest(sql);
+    if(data===null){ if(cb) cb.checked = !grant; return; }
+    if(data.ok){
+      showToast((grant?'付与':'剥奪')+'しました: '+user+' / '+priv,'success');
+    } else {
+      showToast(data.error || '権限の変更に失敗しました','error');
+      if(cb) cb.checked = !grant;
+    }
+  }catch(e){
+    showToast('ネットワークエラー','error');
+    if(cb) cb.checked = !grant;
+  }
+}
+
+async function doDropUser(name){
+  if(!confirm("ユーザー '" + name + "' を削除しますか？")) return;
+  try{
+    const data = await sqlRequest('DROP USER ' + sqlQuote(name));
+    if(data===null) return;
+    if(data.ok){ showToast("ユーザー '" + name + "' を削除しました",'success'); loadUsers(); }
+    else showToast(data.error || '削除に失敗しました','error');
+  }catch(e){
+    showToast('ネットワークエラー','error');
+  }
+}
 
 function showView(name){
   currentView = name;
@@ -292,12 +549,16 @@ function showView(name){
   document.getElementById('viewDbInfo').style.display   = name==='dbinfo'   ? '' : 'none';
   document.getElementById('viewSql').style.display      = name==='sql'      ? '' : 'none';
   document.getElementById('viewSettings').style.display = name==='settings' ? '' : 'none';
+  document.getElementById('viewLogs').style.display     = name==='logs'     ? '' : 'none';
   document.getElementById('navRecords').classList.toggle('active', name==='records');
   document.getElementById('navDbInfo').classList.toggle('active',  name==='dbinfo');
   document.getElementById('navSql').classList.toggle('active',     name==='sql');
   document.getElementById('navSettings').classList.toggle('active',name==='settings');
+  document.getElementById('navLogs').classList.toggle('active',    name==='logs');
+  if(name==='records') loadAll();
   if(name==='dbinfo') loadDbInfo();
   if(name==='settings') loadSettings();
+  if(name==='logs') loadLogs();
 }
 
 // SQLクエリ結果 ({columns, rows}) を Records一覧が期待する {id, columns, labels} の形に変換する。
@@ -321,7 +582,8 @@ function sqlRowsToRecords(data){
 // 設定でオフにできるため、一覧表示自体はそれに依存させない。
 async function loadAll(){
   try{
-    const resp = await fetch('/sql',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:'SELECT * FROM label.*'})});
+    const resp = await fetch('/sql',{method:'POST',headers:{'Content-Type':'application/json',...authHeaders()},body:JSON.stringify({query:'SELECT * FROM label.*'})});
+    if(resp.status===401){ showLogin('セッションの有効期限が切れました。再度ログインしてください。'); return; }
     const data = await resp.json();
     if(!data.ok) throw new Error(data.error || 'query failed');
     allRecords = sqlRowsToRecords(data);
@@ -330,7 +592,11 @@ async function loadAll(){
     allLabels = Array.from(labelSet).sort();
     renderSidebar(); renderTable(); updateHeader();
     setStatus(allRecords.length+' records | '+allLabels.length+' labels (via SQL)');
-  } catch(e){ setStatus('Cannot connect to server'); showToast('Connection failed','error'); }
+  } catch(e){
+    const msg = e && e.message ? e.message : String(e);
+    setStatus('Error: '+msg);
+    showToast(msg,'error');
+  }
 }
 
 function renderSidebar(){
@@ -344,6 +610,11 @@ function renderSidebar(){
 
 function filterByLabel(l){ activeLabel=l; showView('records'); renderSidebar(); renderTable(); }
 
+// 一度に描画する行数の上限。大量データ(数万〜数十万件)を1つのHTML文字列に
+// まとめてinnerHTMLへ流し込むとJSの文字列長上限(RangeError: Invalid string length)
+// に達してレンダリングが例外で落ちるため、表示件数を区切って安全に描画する。
+const MAX_RENDER_ROWS = 1000;
+
 function renderTable(){
   const q = document.getElementById('searchInput').value.toLowerCase();
   let rows = allRecords;
@@ -354,7 +625,12 @@ function renderTable(){
     const msg = activeLabel?'No records with label: '+esc(activeLabel):'No records';
     body.innerHTML='<tr><td colspan="4" class="empty"><div style="font-size:48px">&#x1F4ED;</div><div style="margin-top:12px">'+msg+'</div></td></tr>'; return;
   }
-  body.innerHTML = rows.map(r=>{
+  const truncated = rows.length > MAX_RENDER_ROWS;
+  const shown = truncated ? rows.slice(0, MAX_RENDER_ROWS) : rows;
+  const noticeRow = truncated
+    ? '<tr><td colspan="4" style="padding:10px 12px;color:#8a6d00;background:#fff8e1">Showing first '+MAX_RENDER_ROWS.toLocaleString()+' of '+rows.length.toLocaleString()+' matching records. Narrow the results with a label filter or the search box to see the rest.</td></tr>'
+    : '';
+  const bodyRows = shown.map(r=>{
     const cols = Object.entries(r.columns||{}).map(([k,v])=>{
       // v は {type:"text", value:"太郎"} 形式のオブジェクト
       const display = (v && typeof v === 'object') ? (v.value ?? 'NULL') : (v ?? '');
@@ -363,6 +639,7 @@ function renderTable(){
     const labels = (r.labels||[]).map(l=>'<span class="label-tag" onclick="filterByLabel(\''+esc(l)+'\')">' + esc(l)+'</span>').join('')||'-';
     return '<tr><td class="id-cell">#'+r.id+'</td><td>'+cols+'</td><td>'+labels+'</td><td class="actions"><button class="btn btn-ghost btn-sm" onclick="openEditModal('+r.id+')">Edit</button> <button class="btn btn-danger btn-sm" onclick="openDeleteModal('+r.id+')">Del</button></td></tr>';
   }).join('');
+  body.innerHTML = noticeRow + bodyRows;
 }
 
 function updateHeader(){ document.getElementById('headerCount').textContent=allRecords.length+' records'; }
@@ -374,6 +651,7 @@ async function loadDbInfo(){
   try{
     const info = await api.get('/db/info');
     container.innerHTML = renderDbInfo(info);
+    document.getElementById('headerCount').textContent = info.record_count+' records';
   }catch(e){
     container.innerHTML = '<div class="empty"><div style="font-size:36px">&#x274C;</div><div style="margin-top:10px">Failed to load DB info</div></div>';
     showToast('DB info load failed','error');
@@ -434,6 +712,7 @@ async function loadSettings(){
     statusEl.textContent = '設定の読み込みに失敗しました';
     showToast('設定の読み込みに失敗しました','error');
   }
+  loadUsers();
 }
 
 async function onHttpApiToggle(){
@@ -452,6 +731,44 @@ async function onHttpApiToggle(){
     statusEl.textContent = '更新に失敗しました';
     showToast('設定の更新に失敗しました','error');
   }
+}
+
+// ---- Logs ----
+let allLogs=[];
+async function loadLogs(){
+  const body = document.getElementById('logsTableBody');
+  try{
+    allLogs = await api.get('/logs?lines=300');
+    renderLogs();
+  }catch(e){
+    body.innerHTML = '<tr><td colspan="6" class="empty"><div style="font-size:36px">&#x274C;</div><div style="margin-top:10px">ログの読み込みに失敗しました</div></td></tr>';
+  }
+}
+
+function renderLogs(){
+  const cat = document.getElementById('logsCategoryFilter').value;
+  const body = document.getElementById('logsTableBody');
+  const rows = cat ? allLogs.filter(l=>l.category===cat) : allLogs;
+  if(!rows.length){
+    body.innerHTML = '<tr><td colspan="6" class="empty"><div style="font-size:48px">&#x1F4ED;</div><div style="margin-top:12px">ログがありません</div></td></tr>';
+    return;
+  }
+  const levelBadge = lvl => {
+    const cls = lvl==='error' ? 'red' : lvl==='warn' ? 'orange' : 'green';
+    return '<span class="info-badge '+(cls==='red'?'warn':cls==='orange'?'warn':'ok')+'" style="'+(cls==='red'?'background:#ffe3e3;color:#e03131':'')+'">'+lvl.toUpperCase()+'</span>';
+  };
+  body.innerHTML = rows.map(l=>{
+    const status = l.status_code!=null ? l.status_code : (l.stop_reason ? l.stop_reason : '-');
+    const duration = l.duration_ms!=null ? l.duration_ms+' ms' : '-';
+    return '<tr>'
+      +'<td style="font-family:monospace;font-size:12px">'+esc(l.timestamp)+'</td>'
+      +'<td>'+levelBadge(l.level)+'</td>'
+      +'<td><span class="tag">'+esc(l.category)+'</span></td>'
+      +'<td style="font-family:monospace;font-size:12px;white-space:pre-wrap;word-break:break-all">'+esc(l.message)+'</td>'
+      +'<td>'+esc(String(status))+'</td>'
+      +'<td>'+esc(duration)+'</td>'
+      +'</tr>';
+  }).join('');
 }
 
 function openCreateModal(){
@@ -541,6 +858,9 @@ const SQL_EXAMPLES = [
   "SELECT * FROM label.* LIMIT 5",
   "INSERT INTO (label.employee) (employee_name, employee_age, employee_department) VALUE ('田中', 24, 'developer')",
   "INSERT INTO (label.employee, label.manager) (employee_name, employee_age, employee_department) VALUE ('鈴木', 41, 'lead')",
+  "DELETE FROM label.employee WHERE employee_name = '田中'",
+  "DELETE FROM label.employee",
+  "DELETE LABEL FROM label.employee WHERE employee_department = 'sales'",
 ];
 let sqlExampleIdx = 0;
 
@@ -555,6 +875,26 @@ function clearSql(){
   document.getElementById('sqlStatus').textContent='';
 }
 
+// /sql を実行する共通関数。
+// サーバーが needs_confirmation（脆弱パスワード）を返した場合は要件どおりの文言を
+// 表示して yes/no を尋ね、yes なら confirm_weak_password:true で再送する。
+// 401 はログイン画面へ遷移して null を返す。
+async function sqlRequest(query, confirmWeak){
+  const body = { query };
+  if(confirmWeak!==undefined) body.confirm_weak_password = confirmWeak;
+  const resp = await fetch('/sql',{method:'POST',headers:{'Content-Type':'application/json',...authHeaders()},body:JSON.stringify(body)});
+  if(resp.status===401){ showLogin('セッションの有効期限が切れました。再度ログインしてください。'); return null; }
+  const data = await resp.json();
+  if(data && data.needs_confirmation){
+    const ans = prompt(data.warning || "Warning: The password strength is too weak. Do you want to proceed?\n\nPlease enter 'yes' to proceed or 'no' to cancel.");
+    if(ans!==null && ans.trim().toLowerCase()==='yes'){
+      return await sqlRequest(query, true);
+    }
+    return { ok:false, error:'操作をキャンセルしました（パスワードが脆弱です）', query };
+  }
+  return data;
+}
+
 async function runSql(){
   const query = document.getElementById('sqlInput').value.trim();
   if(!query){ showToast('Please enter a SQL query','error'); return; }
@@ -563,11 +903,16 @@ async function runSql(){
   statusEl.textContent = 'Running...';
   resultEl.innerHTML = '<div class="empty" style="padding:40px"><div style="font-size:28px">&#x23F3;</div></div>';
   try{
-    const resp = await fetch('/sql',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query})});
-    const data = await resp.json();
+    const data = await sqlRequest(query);
+    if(data===null) return;
     if(data.ok){
       if(data.inserted_id!==undefined && data.inserted_id!==null){
         statusEl.innerHTML = '<span class="ok">&#x2714; inserted id='+data.inserted_id+'</span>';
+      } else if((!data.columns||data.columns.length===0) && (data.returned===undefined||data.returned===null)){
+        // CREATE / DROP / ALTER USER 等、行を返さない成功
+        statusEl.innerHTML = '<span class="ok">&#x2714; OK</span>';
+        resultEl.innerHTML = '<div class="sql-meta"><span class="ok">Query executed successfully</span></div>';
+        return;
       } else {
         const total = data.total_matched ?? 0;
         const ret   = data.returned    ?? 0;
@@ -617,8 +962,20 @@ function showToast(msg,type='success'){ const t=document.getElementById('toast')
 document.getElementById('modal').addEventListener('click',e=>{ if(e.target.id==='modal')closeModal(); });
 document.getElementById('deleteModal').addEventListener('click',e=>{ if(e.target.id==='deleteModal')closeDeleteModal(); });
 
-loadAll();
-setInterval(loadAll,10000);
+// 未ログインならログイン画面を表示する。ログイン済みなら軽量な DB Info から表示する
+// （Records一覧は全件取得＋巨大テーブル再描画になるため、実際にRecordsビューを開いたときにだけ取得する）。
+if(authToken){
+  let savedUsername = '';
+  try{ savedUsername = localStorage.getItem('kagura_username') || ''; }catch(_){}
+  document.getElementById('whoami').textContent = savedUsername;
+  showView('dbinfo');
+} else {
+  showLogin('');
+}
+// Records一覧の自動更新もRecordsビュー表示中のみ行う。
+// 他の画面（DB Info/SQL/設定/ログ）を見ている間はこの重いポーリングを止め、操作性を優先する。
+setInterval(()=>{ if(currentView==='records' && authToken) loadAll(); },10000);
+setInterval(()=>{ if(currentView==='logs' && authToken) loadLogs(); },10000);
 </script>
 </body>
 </html>
