@@ -34,13 +34,17 @@
 ## sql_engine（SQL SELECT/INSERT/UPDATE/DELETE エンジン）
 - ✅ 独自拡張 SQL `SELECT ... FROM label.xxx` 構文
 - ✅ `WHERE` 句（`=` `!=` `<` `<=` `>` `>=` `LIKE`）
+- ✅ `WHERE column IS NULL` / `IS NOT NULL`
+- ✅ `WHERE column IN (v1, v2, ...)` / `NOT IN`
+- ✅ `WHERE column BETWEEN low AND high` / `NOT BETWEEN`
 - ✅ `AND` / `OR` / `NOT` / 括弧による複合条件
 - ✅ `FROM label.A AND label.B`（ラベル AND 絞り込み）
 - ✅ `FROM label.A OR label.B`（ラベル OR 結合）
 - ✅ `FROM label.*`（全レコード対象）
-- ✅ `ORDER BY col [ASC|DESC]`（複数カラム対応）
-- ✅ `LIMIT n`
-- ✅ カラム指定 `SELECT col1, col2 FROM ...`
+- ✅ `label.` を省略した糖衣構文（`FROM employee` = `FROM label.employee`。`UPDATE`/`DELETE`の対象ラベル指定でも同様。`label.*`は対象外）
+- ✅ `ORDER BY col [ASC|DESC]`（複数カラム対応。`SELECT ... AS alias` で付けた別名でも指定可能）
+- ✅ `LIMIT n` / `LIMIT n OFFSET m` / `OFFSET m` 単独指定（ページング）
+- ✅ カラム指定 `SELECT col1, col2 FROM ...`、`AS` によるカラムの別名指定
 - ✅ 大文字小文字無視・セミコロン対応
 - ✅ `SELECT *` は `id` 列を先頭、`labels` 列（カンマ区切り）を末尾に付与して返す
 - ✅ 独自拡張 SQL `INSERT INTO (label.xxx) VALUE (...)` 構文

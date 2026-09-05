@@ -14,6 +14,8 @@ pub struct SelectStatement {
     pub order_by: Vec<OrderByItem>,
     /// LIMIT句（省略可）
     pub limit: Option<u64>,
+    /// OFFSET句（省略可。LIMITと組み合わせても単独でも指定できる）
+    pub offset: Option<u64>,
 }
 
 /// SELECT で取得するカラムの指定
@@ -21,8 +23,15 @@ pub struct SelectStatement {
 pub enum SelectColumns {
     /// SELECT *
     All,
-    /// SELECT col1, col2, ...
-    Named(Vec<String>),
+    /// SELECT col1, col2 AS alias2, ...
+    Named(Vec<SelectItem>),
+}
+
+/// SELECT で指定する1カラム（`AS` によるエイリアス指定は省略可）
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelectItem {
+    pub column: String,
+    pub alias: Option<String>,
 }
 
 /// FROM句：ラベル条件の組み合わせ
@@ -50,12 +59,39 @@ pub enum LabelTarget {
 pub enum WhereExpr {
     /// 単純な比較: column = 'value'
     Comparison(Comparison),
+    /// column IN (v1, v2, ...)（`NOT IN` は Not で包んで表現する）
+    In(InExpr),
+    /// column BETWEEN low AND high（`NOT BETWEEN` は Not で包んで表現する）
+    Between(BetweenExpr),
+    /// column IS NULL（`IS NOT NULL` は Not で包んで表現する）
+    IsNull(IsNullExpr),
     /// AND結合
     And(Box<WhereExpr>, Box<WhereExpr>),
     /// OR結合
     Or(Box<WhereExpr>, Box<WhereExpr>),
     /// NOT
     Not(Box<WhereExpr>),
+}
+
+/// column IN (v1, v2, ...)
+#[derive(Debug, Clone, PartialEq)]
+pub struct InExpr {
+    pub column: String,
+    pub values: Vec<LiteralValue>,
+}
+
+/// column BETWEEN low AND high（low <= column <= high と同義）
+#[derive(Debug, Clone, PartialEq)]
+pub struct BetweenExpr {
+    pub column: String,
+    pub low: LiteralValue,
+    pub high: LiteralValue,
+}
+
+/// column IS NULL
+#[derive(Debug, Clone, PartialEq)]
+pub struct IsNullExpr {
+    pub column: String,
 }
 
 /// 比較式: column op value

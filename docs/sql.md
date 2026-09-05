@@ -19,6 +19,28 @@ SELECT * FROM label.employee ORDER BY salary DESC LIMIT 10
 -- ':' など識別子に使えない文字を含むラベルは文字列リテラル形式で指定する
 SELECT * FROM 'label.country:Japan'
 SELECT * FROM label.customer AND 'label.category:drink'
+
+-- 'label.' を省略した糖衣構文（標準SQLのテーブル名感覚で書ける）
+SELECT * FROM employee WHERE age > 30
+
+-- カラムに別名を付ける（ORDER BY からも別名で参照できる）
+SELECT employee_name, employee_age AS age FROM label.employee ORDER BY age DESC
+
+-- IS NULL / IS NOT NULL
+SELECT * FROM label.employee WHERE department IS NULL
+SELECT * FROM label.employee WHERE department IS NOT NULL
+
+-- IN / NOT IN
+SELECT * FROM label.employee WHERE department IN ('sales', 'dev')
+SELECT * FROM label.employee WHERE department NOT IN ('sales')
+
+-- BETWEEN / NOT BETWEEN（低い方 <= カラム <= 高い方 と同義）
+SELECT * FROM label.employee WHERE age BETWEEN 20 AND 30
+SELECT * FROM label.employee WHERE age NOT BETWEEN 20 AND 30
+
+-- LIMIT と組み合わせたページング、OFFSET 単独指定も可能
+SELECT * FROM label.employee ORDER BY age LIMIT 10 OFFSET 20
+SELECT * FROM label.employee OFFSET 5
 ```
 
 補足:
@@ -29,6 +51,19 @@ SELECT * FROM label.customer AND 'label.category:drink'
   `UPDATE`（`UPDATE 'label.xxx' SET ...`・`UPDATE LABEL 'label.old' SET 'label.new'`）・
   `DELETE`（`DELETE FROM 'label.xxx'`・`DELETE LABEL FROM 'label.xxx'`）でも同様。
   `INSERT INTO ('label.xxx')` は元から対応済み（[INSERT 構文](#insert-構文)を参照）。
+- `label.` は `SELECT`/`UPDATE`/`DELETE` のラベル指定では省略でき、`FROM employee` は `FROM label.employee`
+  と同じ意味になる（`UPDATE employee SET ...`・`DELETE FROM employee` も同様）。`label.*`（全レコード対象）は
+  この糖衣構文の対象外で、引き続き `label.*` と明示する必要がある。
+- `SELECT col AS alias` でカラムに別名を付けられる。出力の列名が別名に変わり、`ORDER BY alias` のように
+  別名でソート対象を指定することもできる（`SELECT *` には別名を付けられない）。
+- `WHERE column IS NULL` / `IS NOT NULL` は、カラムが未設定または `NULL` かどうかを判定する（従来からある
+  `column = NULL` / `column != NULL` の特殊扱いと同じ判定を、標準SQLに近い構文で書けるようにしたもの）。
+- `WHERE column IN (v1, v2, ...)` / `NOT IN` は、既存の `=` 比較を複数値に対して繰り返すのと同じ判定になる
+  （型の混在の扱いも `=` に準じる）。
+- `WHERE column BETWEEN low AND high` / `NOT BETWEEN` は `column >= low AND column <= high` と同義
+  （数値・文字列の比較規則は既存の `>=`/`<=` に準じる）。
+- `LIMIT n OFFSET m` で取得開始位置をずらせる（ページング用）。`OFFSET` は `LIMIT` を省略して単独でも指定できる。
+  `total_matched`（`WHERE` 後・`LIMIT`/`OFFSET` 前の一致件数）は `OFFSET`/`LIMIT` の影響を受けない。
 
 ## INSERT 構文
 

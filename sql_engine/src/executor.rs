@@ -59,7 +59,15 @@ pub fn execute_select(db: &Database, stmt: &SelectStatement) -> QueryResult {
 
     let total_matched = records.len();
 
-    if !stmt.order_by.is_empty() { sort_records(&mut records, &stmt.order_by); }
+    // ORDER BY はカラム名のほか、SELECT ... AS で付けたエイリアスでも指定できるようにする
+    // （元のカラム名に解決してから並べ替える）。
+    let order_by = resolve_order_by_aliases(&stmt.columns, &stmt.order_by);
+    if !order_by.is_empty() { sort_records(&mut records, &order_by); }
+
+    if let Some(offset) = stmt.offset {
+        let skip = (offset as usize).min(records.len());
+        records.drain(0..skip);
+    }
     if let Some(limit) = stmt.limit { records.truncate(limit as usize); }
 
     // SELECT するカラムを決定
@@ -78,7 +86,10 @@ pub fn execute_select(db: &Database, stmt: &SelectStatement) -> QueryResult {
                 .collect();
             (display, internal)
         }
-        SelectColumns::Named(names) => (names.clone(), names.clone()),
+        SelectColumns::Named(items) => (
+            items.iter().map(|it| it.alias.clone().unwrap_or_else(|| it.column.clone())).collect(),
+            items.iter().map(|it| it.column.clone()).collect(),
+        ),
     };
 
     let rows: Vec<Vec<CellValue>> = records.iter().map(|r| {
@@ -134,10 +145,34 @@ fn filter_by_target<'a>(db: &'a Database, target: &LabelTarget) -> Vec<&'a Recor
 fn eval_where(r: &Record, expr: &WhereExpr) -> bool {
     match expr {
         WhereExpr::Comparison(cmp) => eval_comparison(r, cmp),
+        WhereExpr::In(e)           => eval_in(r, e),
+        WhereExpr::Between(e)      => eval_between(r, e),
+        WhereExpr::IsNull(e)       => eval_is_null(r, e),
         WhereExpr::And(l, rr)      => eval_where(r, l) && eval_where(r, rr),
         WhereExpr::Or(l, rr)       => eval_where(r, l) || eval_where(r, rr),
         WhereExpr::Not(e)          => !eval_where(r, e),
     }
+}
+
+/// `column IN (v1, v2, ...)`: いずれかの値と等価かどうかを、既存の `=` 比較（NULL特殊扱い込み）
+/// に委譲して判定する。
+fn eval_in(r: &Record, e: &InExpr) -> bool {
+    e.values.iter().any(|v| {
+        eval_comparison(r, &Comparison { column: e.column.clone(), op: CompareOp::Eq, value: v.clone() })
+    })
+}
+
+/// `column BETWEEN low AND high`: `column >= low AND column <= high` と同義。
+/// 数値・文字列の型混在の扱いは既存の `>=`/`<=` 比較にそのまま委譲する。
+fn eval_between(r: &Record, e: &BetweenExpr) -> bool {
+    let ge_low = eval_comparison(r, &Comparison { column: e.column.clone(), op: CompareOp::Ge, value: e.low.clone() });
+    let le_high = eval_comparison(r, &Comparison { column: e.column.clone(), op: CompareOp::Le, value: e.high.clone() });
+    ge_low && le_high
+}
+
+/// `column IS NULL`: 既存の `= NULL` 特殊扱い（カラム未設定 or DataType::Null で真）に委譲する。
+fn eval_is_null(r: &Record, e: &IsNullExpr) -> bool {
+    eval_comparison(r, &Comparison { column: e.column.clone(), op: CompareOp::Eq, value: LiteralValue::Null })
 }
 
 fn eval_comparison(r: &Record, cmp: &Comparison) -> bool {
@@ -201,6 +236,20 @@ fn like_match(text: &str, pattern: &str) -> bool {
 // ---------------------------------------------------------------------------
 // ORDER BY
 // ---------------------------------------------------------------------------
+
+/// `ORDER BY` の各項目が `SELECT ... AS alias` のエイリアス名を指している場合、
+/// 元のカラム名に解決した新しい Vec を返す（該当しない項目はそのまま）。
+fn resolve_order_by_aliases(columns: &SelectColumns, order_by: &[OrderByItem]) -> Vec<OrderByItem> {
+    let SelectColumns::Named(items) = columns else { return order_by.to_vec(); };
+    let alias_map: std::collections::HashMap<&str, &str> = items.iter()
+        .filter_map(|it| it.alias.as_deref().map(|alias| (alias, it.column.as_str())))
+        .collect();
+    if alias_map.is_empty() { return order_by.to_vec(); }
+    order_by.iter().map(|item| OrderByItem {
+        column: alias_map.get(item.column.as_str()).map(|c| c.to_string()).unwrap_or_else(|| item.column.clone()),
+        direction: item.direction.clone(),
+    }).collect()
+}
 
 fn sort_records(records: &mut Vec<&Record>, order_by: &[OrderByItem]) {
     records.sort_by(|a, b| {
@@ -488,6 +537,118 @@ fn cmp_dt(a: Option<&DataType>, b: Option<&DataType>) -> std::cmp::Ordering {
                 x.partial_cmp(&(*y as f64)).unwrap_or(Equal),
             _ => Equal,
         }
+    }
+}
+
+#[cfg(test)]
+mod select_tests {
+    use super::*;
+    use crate::parser::{parse_insert, parse_select};
+
+    fn insert(db: &mut Database, sql: &str) -> InsertResult {
+        execute_insert(db, &parse_insert(sql).expect("parse should succeed")).unwrap()
+    }
+    fn select(db: &Database, sql: &str) -> QueryResult {
+        execute_select(db, &parse_select(sql).expect("parse should succeed"))
+    }
+
+    /// 田中(24, dev) / 鈴木(30, sales) / 佐藤(40, department未設定) の3件を持つDBを用意する
+    fn setup() -> Database {
+        let mut db = Database::new();
+        insert(&mut db, "INSERT INTO (label.employee) (name, age, department) VALUE ('田中', 24, 'dev')");
+        insert(&mut db, "INSERT INTO (label.employee) (name, age, department) VALUE ('鈴木', 30, 'sales')");
+        insert(&mut db, "INSERT INTO (label.employee) (name, age) VALUE ('佐藤', 40)");
+        db
+    }
+
+    #[test]
+    fn test_select_in_matches_any_listed_value() {
+        let db = setup();
+        let r = select(&db, "SELECT name FROM label.employee WHERE department IN ('dev', 'sales')");
+        assert_eq!(r.rows.len(), 2);
+    }
+
+    #[test]
+    fn test_select_not_in_treats_missing_column_as_not_equal() {
+        let db = setup();
+        // NOT IN は既存の `!=` 相当の二値ロジックに委譲しているため、department未設定の佐藤も
+        // 「'dev'ではない」として一致する（標準SQLの三値論理とは異なる。既存の `!=`/`=` の NULL
+        // 特殊扱いと挙動を揃えるための仕様）。
+        let r = select(&db, "SELECT name FROM label.employee WHERE department NOT IN ('dev')");
+        assert_eq!(r.rows.len(), 2);
+    }
+
+    #[test]
+    fn test_select_between_range() {
+        let db = setup();
+        let r = select(&db, "SELECT name FROM label.employee WHERE age BETWEEN 25 AND 35");
+        assert_eq!(r.rows.len(), 1);
+        assert_eq!(r.rows[0][0], CellValue::Text("鈴木".into()));
+    }
+
+    #[test]
+    fn test_select_not_between_excludes_range() {
+        let db = setup();
+        let r = select(&db, "SELECT name FROM label.employee WHERE age NOT BETWEEN 25 AND 35");
+        assert_eq!(r.rows.len(), 2);
+    }
+
+    #[test]
+    fn test_select_is_null_matches_missing_column() {
+        let db = setup();
+        let r = select(&db, "SELECT name FROM label.employee WHERE department IS NULL");
+        assert_eq!(r.rows.len(), 1);
+        assert_eq!(r.rows[0][0], CellValue::Text("佐藤".into()));
+    }
+
+    #[test]
+    fn test_select_is_not_null_excludes_missing_column() {
+        let db = setup();
+        let r = select(&db, "SELECT name FROM label.employee WHERE department IS NOT NULL");
+        assert_eq!(r.rows.len(), 2);
+    }
+
+    #[test]
+    fn test_select_alias_changes_output_column_name() {
+        let db = setup();
+        let r = select(&db, "SELECT age AS employee_age FROM label.employee WHERE name='田中'");
+        assert_eq!(r.columns, vec!["employee_age".to_string()]);
+        assert_eq!(r.rows[0][0], CellValue::Integer(24));
+    }
+
+    #[test]
+    fn test_select_order_by_alias_resolves_to_underlying_column() {
+        let db = setup();
+        let r = select(&db, "SELECT name, age AS a FROM label.employee ORDER BY a DESC");
+        let names: Vec<&CellValue> = r.rows.iter().map(|row| &row[0]).collect();
+        assert_eq!(names, vec![
+            &CellValue::Text("佐藤".into()), &CellValue::Text("鈴木".into()), &CellValue::Text("田中".into()),
+        ]);
+    }
+
+    #[test]
+    fn test_select_limit_offset_pages_through_results() {
+        let db = setup();
+        let r = select(&db, "SELECT name FROM label.employee ORDER BY age ASC LIMIT 1 OFFSET 1");
+        assert_eq!(r.rows.len(), 1);
+        assert_eq!(r.rows[0][0], CellValue::Text("鈴木".into()));
+        // total_matched は LIMIT/OFFSET を適用する前の件数
+        assert_eq!(r.total_matched, 3);
+    }
+
+    #[test]
+    fn test_select_offset_beyond_result_count_returns_empty() {
+        let db = setup();
+        let r = select(&db, "SELECT name FROM label.employee OFFSET 100");
+        assert_eq!(r.rows.len(), 0);
+    }
+
+    #[test]
+    fn test_select_bare_label_name_sugar_matches_label_dot_form() {
+        let db = setup();
+        let r = select(&db, "SELECT name FROM employee WHERE age = 24");
+        assert_eq!(r.rows.len(), 1);
+        assert_eq!(r.rows[0][0], CellValue::Text("田中".into()));
     }
 }
 
