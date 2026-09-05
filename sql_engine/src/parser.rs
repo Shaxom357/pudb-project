@@ -12,7 +12,8 @@ pub enum Token {
     // キーワード
     Select, From, Where, And, Or, Not,
     OrderBy, // ORDER BY は2語だが1トークンとして扱う
-    Limit, Like, Asc, Desc, Null, True, False,
+    Limit, Offset, Like, Asc, Desc, Null, True, False,
+    Is, In, Between, As,
     Insert, Into, Value,
     Update, Set,
     Delete,
@@ -142,13 +143,18 @@ impl<'a> Lexer<'a> {
                 if kw.to_uppercase() == "BY" { Token::OrderBy }
                 else { self.pos = saved; Token::Ident(s) }
             }
-            "LIMIT"  => Token::Limit,
-            "LIKE"   => Token::Like,
-            "ASC"    => Token::Asc,
-            "DESC"   => Token::Desc,
-            "NULL"   => Token::Null,
-            "TRUE"   => Token::True,
-            "FALSE"  => Token::False,
+            "LIMIT"   => Token::Limit,
+            "OFFSET"  => Token::Offset,
+            "LIKE"    => Token::Like,
+            "ASC"     => Token::Asc,
+            "DESC"    => Token::Desc,
+            "NULL"    => Token::Null,
+            "TRUE"    => Token::True,
+            "FALSE"   => Token::False,
+            "IS"      => Token::Is,
+            "IN"      => Token::In,
+            "BETWEEN" => Token::Between,
+            "AS"      => Token::As,
             "INSERT" => Token::Insert,
             "INTO"   => Token::Into,
             "VALUE" | "VALUES" => Token::Value,
@@ -268,14 +274,32 @@ impl Parser {
                     got: format!("{:?}", o), expected: "positive integer".into() }),
             }
         } else { None };
-        Ok(SelectStatement { columns, from, where_clause, order_by, limit })
+        let offset = if self.peek() == &Token::Offset {
+            self.advance();
+            match self.advance() {
+                Token::IntLit(n) if n >= 0 => Some(n as u64),
+                o => return Err(ParseError::UnexpectedToken {
+                    got: format!("{:?}", o), expected: "non-negative integer".into() }),
+            }
+        } else { None };
+        Ok(SelectStatement { columns, from, where_clause, order_by, limit, offset })
     }
 
     fn parse_select_columns(&mut self) -> Result<SelectColumns, ParseError> {
         if self.peek() == &Token::Star { self.advance(); return Ok(SelectColumns::All); }
-        let mut cols = vec![self.expect_ident()?];
-        while self.peek() == &Token::Comma { self.advance(); cols.push(self.expect_ident()?); }
-        Ok(SelectColumns::Named(cols))
+        let mut items = vec![self.parse_select_item()?];
+        while self.peek() == &Token::Comma { self.advance(); items.push(self.parse_select_item()?); }
+        Ok(SelectColumns::Named(items))
+    }
+
+    /// `col` または `col AS alias` の1項目をパースする
+    fn parse_select_item(&mut self) -> Result<SelectItem, ParseError> {
+        let column = self.expect_ident()?;
+        let alias = if self.peek() == &Token::As {
+            self.advance();
+            Some(self.expect_ident()?)
+        } else { None };
+        Ok(SelectItem { column, alias })
     }
 
     fn parse_from_clause(&mut self) -> Result<FromClause, ParseError> {
@@ -295,6 +319,10 @@ impl Parser {
     /// `label.name`（識別子形式）と `'label.name'` / `'label.*'`（文字列リテラル形式）の
     /// 両方を受理する。識別子は英数字・`_` しか許容しないため、`:` などラベルによく使う
     /// 区切り文字（例: `country:Japan`）を含む名前は文字列リテラル形式でのみ指定できる。
+    /// `label.name`（識別子形式）、`'label.name'` / `'label.*'`（文字列リテラル形式）、
+    /// および `name`（`label.` を省略した糖衣構文。標準SQLのテーブル名感覚で書ける）の
+    /// いずれも受理する。識別子は英数字・`_`しか許容しないため、`:` などラベルによく使う
+    /// 区切り文字（例: `country:Japan`）を含む名前は文字列リテラル形式でのみ指定できる。
     fn parse_label_target(&mut self) -> Result<LabelTarget, ParseError> {
         if let Token::StringLit(_) = self.peek() {
             let s = match self.advance() { Token::StringLit(s) => s, _ => unreachable!() };
@@ -303,16 +331,20 @@ impl Parser {
                     else { Ok(LabelTarget::LabelName(validate_label_name(&name)?)) };
         }
         match self.advance() {
-            Token::Ident(s) if s.to_lowercase() == "label" => {}
-            o => return Err(ParseError::UnexpectedToken {
-                got: format!("{:?}", o), expected: "'label' or 'label.<name>' string".into() }),
-        }
-        self.expect(Token::Dot)?;
-        match self.advance() {
-            Token::Star        => Ok(LabelTarget::All),
+            // `label.name` / `label.*` 形式（"label" の直後が "." のときだけこちらとして扱う）
+            Token::Ident(s) if s.to_lowercase() == "label" && self.peek() == &Token::Dot => {
+                self.advance(); // "."
+                match self.advance() {
+                    Token::Star        => Ok(LabelTarget::All),
+                    Token::Ident(name) => Ok(LabelTarget::LabelName(name)),
+                    o => Err(ParseError::UnexpectedToken {
+                        got: format!("{:?}", o), expected: "label name or *".into() }),
+                }
+            }
+            // `label.` を省略した糖衣構文: FROM race は FROM label.race と同義
             Token::Ident(name) => Ok(LabelTarget::LabelName(name)),
             o => Err(ParseError::UnexpectedToken {
-                got: format!("{:?}", o), expected: "label name or *".into() }),
+                got: format!("{:?}", o), expected: "label name".into() }),
         }
     }
 
@@ -349,11 +381,47 @@ impl Parser {
             self.advance(); let e = self.parse_where_expr()?;
             self.expect(Token::RParen)?; return Ok(e);
         }
-        Ok(WhereExpr::Comparison(self.parse_comparison()?))
+        self.parse_predicate()
     }
 
-    fn parse_comparison(&mut self) -> Result<Comparison, ParseError> {
+    /// `column op value` / `column IS [NOT] NULL` / `column [NOT] IN (...)` /
+    /// `column [NOT] BETWEEN low AND high` のいずれか1つの述語をパースする。
+    /// `NOT IN` / `NOT BETWEEN` / `IS NOT NULL` は `WhereExpr::Not` で包んで表現する
+    /// （`WHERE NOT (...)` の先頭 NOT と同じ評価経路に乗せ、評価器側の重複を避けるため）。
+    fn parse_predicate(&mut self) -> Result<WhereExpr, ParseError> {
         let column = self.expect_ident()?;
+
+        if self.peek() == &Token::Is {
+            self.advance();
+            let negate = if self.peek() == &Token::Not { self.advance(); true } else { false };
+            self.expect(Token::Null)?;
+            let expr = WhereExpr::IsNull(IsNullExpr { column });
+            return Ok(if negate { WhereExpr::Not(Box::new(expr)) } else { expr });
+        }
+
+        let negate = if self.peek() == &Token::Not { self.advance(); true } else { false };
+
+        if self.peek() == &Token::In {
+            self.advance();
+            self.expect(Token::LParen)?;
+            let values = self.parse_value_list()?;
+            self.expect(Token::RParen)?;
+            let expr = WhereExpr::In(InExpr { column, values });
+            return Ok(if negate { WhereExpr::Not(Box::new(expr)) } else { expr });
+        }
+        if self.peek() == &Token::Between {
+            self.advance();
+            let low = self.parse_literal()?;
+            self.expect(Token::And)?;
+            let high = self.parse_literal()?;
+            let expr = WhereExpr::Between(BetweenExpr { column, low, high });
+            return Ok(if negate { WhereExpr::Not(Box::new(expr)) } else { expr });
+        }
+        if negate {
+            return Err(ParseError::UnexpectedToken {
+                got: format!("{:?}", self.peek()), expected: "IN or BETWEEN after NOT".into() });
+        }
+
         let op = match self.advance() {
             Token::Eq   => CompareOp::Eq,  Token::Ne   => CompareOp::Ne,
             Token::Lt   => CompareOp::Lt,  Token::Le   => CompareOp::Le,
@@ -363,7 +431,7 @@ impl Parser {
                 got: format!("{:?}", o), expected: "comparison operator".into() }),
         };
         let value = self.parse_literal()?;
-        Ok(Comparison { column, op, value })
+        Ok(WhereExpr::Comparison(Comparison { column, op, value }))
     }
 
     fn parse_literal(&mut self) -> Result<LiteralValue, ParseError> {
@@ -521,14 +589,18 @@ impl Parser {
             return validate_label_name(&name);
         }
         match self.advance() {
-            Token::Ident(s) if s.to_lowercase() == "label" => {}
-            o => return Err(ParseError::UnexpectedToken {
-                got: format!("{:?}", o), expected: "'label' or 'label.<name>' string".into() }),
-        }
-        self.expect(Token::Dot)?;
-        match self.advance() {
-            Token::Star => Err(ParseError::UnsupportedSyntax(
-                "UPDATE LABEL name cannot be '*'".into())),
+            // `label.name` 形式（"label" の直後が "." のときだけこちらとして扱う）
+            Token::Ident(s) if s.to_lowercase() == "label" && self.peek() == &Token::Dot => {
+                self.advance(); // "."
+                match self.advance() {
+                    Token::Star => Err(ParseError::UnsupportedSyntax(
+                        "UPDATE LABEL name cannot be '*'".into())),
+                    Token::Ident(name) => Ok(name),
+                    o => Err(ParseError::UnexpectedToken {
+                        got: format!("{:?}", o), expected: "label name".into() }),
+                }
+            }
+            // `label.` を省略した糖衣構文
             Token::Ident(name) => Ok(name),
             o => Err(ParseError::UnexpectedToken {
                 got: format!("{:?}", o), expected: "label name".into() }),
@@ -729,7 +801,17 @@ mod tests {
     #[test]
     fn test_select_named_columns() {
         let s = parse_select("SELECT name, age FROM label.employee").unwrap();
-        assert_eq!(s.columns, SelectColumns::Named(vec!["name".into(), "age".into()]));
+        assert_eq!(s.columns, SelectColumns::Named(vec![
+            SelectItem { column: "name".into(), alias: None },
+            SelectItem { column: "age".into(), alias: None },
+        ]));
+    }
+    #[test]
+    fn test_select_column_alias() {
+        let s = parse_select("SELECT age AS employee_age FROM label.employee").unwrap();
+        assert_eq!(s.columns, SelectColumns::Named(vec![
+            SelectItem { column: "age".into(), alias: Some("employee_age".into()) },
+        ]));
     }
     #[test]
     fn test_select_order_by_limit() {
@@ -739,6 +821,70 @@ mod tests {
         assert_eq!(s.order_by.len(), 1);
         assert_eq!(s.order_by[0].direction, OrderDirection::Desc);
         assert_eq!(s.limit, Some(10));
+        assert_eq!(s.offset, None);
+    }
+    #[test]
+    fn test_select_limit_offset() {
+        let s = parse_select("SELECT * FROM label.employee LIMIT 10 OFFSET 20").unwrap();
+        assert_eq!(s.limit, Some(10));
+        assert_eq!(s.offset, Some(20));
+    }
+    #[test]
+    fn test_select_offset_without_limit() {
+        let s = parse_select("SELECT * FROM label.employee OFFSET 5").unwrap();
+        assert_eq!(s.limit, None);
+        assert_eq!(s.offset, Some(5));
+    }
+    #[test]
+    fn test_select_from_bare_label_name_sugar() {
+        // `label.` を省略した糖衣構文: FROM race は FROM label.race と同義
+        let s = parse_select("SELECT * FROM employee").unwrap();
+        assert_eq!(s.from, FromClause::Label(LabelTarget::LabelName("employee".into())));
+    }
+    #[test]
+    fn test_select_where_is_null() {
+        let s = parse_select("SELECT * FROM label.employee WHERE department IS NULL").unwrap();
+        assert_eq!(s.where_clause, Some(WhereExpr::IsNull(IsNullExpr { column: "department".into() })));
+    }
+    #[test]
+    fn test_select_where_is_not_null() {
+        let s = parse_select("SELECT * FROM label.employee WHERE department IS NOT NULL").unwrap();
+        assert_eq!(s.where_clause, Some(WhereExpr::Not(Box::new(
+            WhereExpr::IsNull(IsNullExpr { column: "department".into() })
+        ))));
+    }
+    #[test]
+    fn test_select_where_in() {
+        let s = parse_select("SELECT * FROM label.employee WHERE department IN ('sales', 'dev')").unwrap();
+        assert_eq!(s.where_clause, Some(WhereExpr::In(InExpr {
+            column: "department".into(),
+            values: vec![LiteralValue::Text("sales".into()), LiteralValue::Text("dev".into())],
+        })));
+    }
+    #[test]
+    fn test_select_where_not_in() {
+        let s = parse_select("SELECT * FROM label.employee WHERE department NOT IN ('sales')").unwrap();
+        assert_eq!(s.where_clause, Some(WhereExpr::Not(Box::new(
+            WhereExpr::In(InExpr { column: "department".into(), values: vec![LiteralValue::Text("sales".into())] })
+        ))));
+    }
+    #[test]
+    fn test_select_where_between() {
+        let s = parse_select("SELECT * FROM label.employee WHERE age BETWEEN 20 AND 30").unwrap();
+        assert_eq!(s.where_clause, Some(WhereExpr::Between(BetweenExpr {
+            column: "age".into(), low: LiteralValue::Integer(20), high: LiteralValue::Integer(30),
+        })));
+    }
+    #[test]
+    fn test_select_where_not_between() {
+        let s = parse_select("SELECT * FROM label.employee WHERE age NOT BETWEEN 20 AND 30").unwrap();
+        assert_eq!(s.where_clause, Some(WhereExpr::Not(Box::new(
+            WhereExpr::Between(BetweenExpr { column: "age".into(), low: LiteralValue::Integer(20), high: LiteralValue::Integer(30) })
+        ))));
+    }
+    #[test]
+    fn test_select_where_not_in_without_in_is_error() {
+        assert!(parse_select("SELECT * FROM label.employee WHERE age NOT 30").is_err());
     }
     #[test]
     fn test_select_case_insensitive() {
@@ -946,6 +1092,15 @@ mod tests {
     }
 
     #[test]
+    fn test_update_data_target_bare_name_sugar() {
+        let s = parse_update("UPDATE employee SET active=true").unwrap();
+        match s {
+            UpdateStatement::Data(d) => assert_eq!(d.target, LabelTarget::LabelName("employee".into())),
+            _ => panic!("expected UpdateStatement::Data"),
+        }
+    }
+
+    #[test]
     fn test_update_rejects_trailing_tokens() {
         assert!(parse_update("UPDATE label.employee SET age=30 GARBAGE").is_err());
     }
@@ -1023,6 +1178,15 @@ mod tests {
         let s = parse_delete("DELETE FROM 'label.country:Japan'").unwrap();
         match s {
             DeleteStatement::Data(d) => assert_eq!(d.target, LabelTarget::LabelName("country:Japan".into())),
+            _ => panic!("expected DeleteStatement::Data"),
+        }
+    }
+
+    #[test]
+    fn test_delete_data_target_bare_name_sugar() {
+        let s = parse_delete("DELETE FROM employee").unwrap();
+        match s {
+            DeleteStatement::Data(d) => assert_eq!(d.target, LabelTarget::LabelName("employee".into())),
             _ => panic!("expected DeleteStatement::Data"),
         }
     }
