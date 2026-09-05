@@ -182,7 +182,7 @@ tbody td { padding: 10px 14px; vertical-align: middle; }
   </div>
   <div class="main">
     <!-- Records View -->
-    <div id="viewRecords" style="display:none">
+    <div id="viewRecords" style="display:none;flex:1;overflow:hidden;flex-direction:column">
       <div class="toolbar">
         <input type="text" id="searchInput" placeholder="Search columns / labels..." oninput="renderTable()">
         <button class="btn btn-primary" onclick="openCreateModal()">+ New Record</button>
@@ -213,7 +213,7 @@ tbody td { padding: 10px 14px; vertical-align: middle; }
       </div>
     </div>
     <!-- SQL Query View -->
-    <div id="viewSql" style="display:none;flex:1;overflow:hidden;flex-direction:column;display:none">
+    <div id="viewSql" style="display:none;flex:1;overflow:hidden;flex-direction:column">
       <div class="toolbar">
         <span style="font-weight:700;font-size:15px">&#x1F50D; SQL Query</span>
         <span style="flex:1"></span>
@@ -772,11 +772,11 @@ async function doValidateLabel(label){
 
 function showView(name){
   currentView = name;
-  document.getElementById('viewRecords').style.display  = name==='records'  ? '' : 'none';
-  document.getElementById('viewDbInfo').style.display   = name==='dbinfo'   ? '' : 'none';
-  document.getElementById('viewSql').style.display      = name==='sql'      ? '' : 'none';
-  document.getElementById('viewSettings').style.display = name==='settings' ? '' : 'none';
-  document.getElementById('viewLogs').style.display     = name==='logs'     ? '' : 'none';
+  document.getElementById('viewRecords').style.display  = name==='records'  ? 'flex' : 'none';
+  document.getElementById('viewDbInfo').style.display   = name==='dbinfo'   ? 'flex' : 'none';
+  document.getElementById('viewSql').style.display      = name==='sql'      ? 'flex' : 'none';
+  document.getElementById('viewSettings').style.display = name==='settings' ? 'flex' : 'none';
+  document.getElementById('viewLogs').style.display     = name==='logs'     ? 'flex' : 'none';
   document.getElementById('navRecords').classList.toggle('active', name==='records');
   document.getElementById('navDbInfo').classList.toggle('active',  name==='dbinfo');
   document.getElementById('navSql').classList.toggle('active',     name==='sql');
