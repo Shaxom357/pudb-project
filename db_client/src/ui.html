@@ -329,6 +329,34 @@ tbody td { padding: 10px 14px; vertical-align: middle; }
           <div class="toggle-status" id="schemaMgmtStatus"></div>
           <div id="schemaListWrap" style="margin-top:16px;overflow-x:auto"></div>
         </div>
+
+        <div class="info-section-title" style="margin-top:24px">全データオンメモリ（管理者のみ・.kdb モード限定）</div>
+        <div class="settings-card" id="memoryCard">
+          <div class="toggle-row">
+            <div>
+              <div class="toggle-label">全データをメモリに保持する</div>
+              <div class="toggle-desc">既定では有効（全レコードをメモリに常駐＝最速）。オフにすると下の「上限」の範囲でメモリ使用量を制限し、あふれた分は直近使われていない行から <code>.kdb</code> へ退避します（アクセス時に読み直し。再アクセスで立ち退き順が更新されます）。この設定は再起動をまたいで保持されます。</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="memoryAllInMemoryToggle" onchange="onMemoryModeToggle()">
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="toggle-status" id="memoryModeStatus"></div>
+          <div class="form-group" style="margin-top:14px">
+            <label>オンメモリ容量の上限（全データオンメモリが無効のときに有効）</label>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <input type="number" id="memoryLimitValue" min="0" step="1" style="width:120px" placeholder="5">
+              <select id="memoryLimitUnit" style="width:90px">
+                <option value="MB">MB</option>
+                <option value="GB">GB</option>
+                <option value="%">%（搭載メモリ比）</option>
+              </select>
+              <button class="btn btn-primary" onclick="doSetMemoryLimit()">上限を設定</button>
+            </div>
+          </div>
+          <div class="toggle-status" id="memoryLimitStatus"></div>
+        </div>
       </div>
     </div>
     <!-- Logs View -->
@@ -913,6 +941,7 @@ async function loadSettings(){
     schemaStatusEl.textContent = s.schema_enforcement_enabled
       ? 'スキーマ強制は現在有効です（各ラベルの設定に従います）。'
       : 'スキーマ強制は現在全体で無効です（有効化したラベルも検証されません）。';
+    applyMemorySettings(s);
   }catch(e){
     statusEl.textContent = '設定の読み込みに失敗しました';
     schemaStatusEl.textContent = '設定の読み込みに失敗しました';
@@ -920,6 +949,70 @@ async function loadSettings(){
   }
   loadUsers();
   loadSchemas();
+}
+
+function fmtMB(bytes){
+  if(bytes === null || bytes === undefined) return '不明';
+  return (bytes / (1024*1024)).toFixed(2) + ' MB';
+}
+
+function applyMemorySettings(s){
+  const toggle = document.getElementById('memoryAllInMemoryToggle');
+  const modeStatus = document.getElementById('memoryModeStatus');
+  const limitStatus = document.getElementById('memoryLimitStatus');
+  toggle.checked = !!s.all_in_memory;
+  if(s.all_in_memory){
+    modeStatus.textContent = '全データオンメモリは現在有効です（全レコードをメモリに常駐・無制限）。';
+  }else{
+    modeStatus.textContent = '容量制限モードです。常駐 '+fmtMB(s.memory_resident_bytes)
+      +'（'+s.memory_resident_rows+' / '+s.memory_total_rows+' 行）。上限に収まらない行はアクセス時に .kdb から読み直します。';
+  }
+  const lim = s.memory_limit || {};
+  const valEl = document.getElementById('memoryLimitValue');
+  const unitEl = document.getElementById('memoryLimitUnit');
+  if(lim.kind === 'percent'){
+    valEl.value = lim.value;
+    unitEl.value = '%';
+  }else if(lim.kind === 'bytes'){
+    const gb = lim.value / (1024*1024*1024);
+    if(Number.isInteger(gb) && gb >= 1){ valEl.value = gb; unitEl.value = 'GB'; }
+    else { valEl.value = Math.round(lim.value / (1024*1024)); unitEl.value = 'MB'; }
+  }
+  limitStatus.textContent = '現在の上限: '
+    + (s.memory_limit_bytes !== null && s.memory_limit_bytes !== undefined ? fmtMB(s.memory_limit_bytes) : '無制限（搭載メモリ量を取得できず）');
+}
+
+async function onMemoryModeToggle(){
+  const checkbox = document.getElementById('memoryAllInMemoryToggle');
+  const enabled = checkbox.checked;
+  const statusEl = document.getElementById('memoryModeStatus');
+  statusEl.textContent = '更新中...';
+  try{
+    const s = await api.put('/settings', {all_in_memory: enabled});
+    applyMemorySettings(s);
+    showToast(enabled ? '全データオンメモリを有効化しました' : '容量制限モードに切り替えました','success');
+  }catch(e){
+    checkbox.checked = !enabled;
+    statusEl.textContent = '更新に失敗しました（管理者ロール kagura でログインしているか確認してください）';
+    showToast('設定の更新に失敗しました: '+e.message,'error');
+  }
+}
+
+async function doSetMemoryLimit(){
+  const val = document.getElementById('memoryLimitValue').value.trim();
+  const unit = document.getElementById('memoryLimitUnit').value;
+  const statusEl = document.getElementById('memoryLimitStatus');
+  if(val === ''){ showToast('上限値を入力してください','error'); return; }
+  const spec = unit === '%' ? (val + '%') : (val + unit);
+  statusEl.textContent = '更新中...';
+  try{
+    const s = await api.put('/settings', {memory_limit_spec: spec});
+    applyMemorySettings(s);
+    showToast('オンメモリ上限を設定しました','success');
+  }catch(e){
+    statusEl.textContent = '更新に失敗しました';
+    showToast('上限の設定に失敗しました: '+e.message,'error');
+  }
 }
 
 async function onSchemaEnforcementToggle(){

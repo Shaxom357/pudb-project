@@ -8,6 +8,7 @@ pub mod info_handlers;
 pub mod label_handlers;
 pub mod logging;
 pub mod logging_handlers;
+pub mod memory_settings;
 pub mod models;
 pub mod schema_sql;
 pub mod settings_handlers;

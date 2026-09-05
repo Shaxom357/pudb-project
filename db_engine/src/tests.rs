@@ -1,6 +1,8 @@
 // db_engine/src/tests.rs
 
 use crate::{ColumnSchema, Database, DataType, DatabaseError, Record, SchemaType};
+use crate::{MemoryPolicy, MemorySizeSpec};
+use crate::kdb_store::KdbFile;
 
 // ---------------------------------------------------------------------------
 // insert / get
@@ -898,4 +900,175 @@ fn test_validate_label_no_violations_when_data_conforms() {
     insert_race(&mut db, Some("2026-01-01")).unwrap();
     db.define_column("race", "date", not_null_text()).unwrap();
     assert!(db.validate_label("race").is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// 「全データオンメモリ」 ON/OFF・オンメモリ容量制限（FIFO/LRU）
+// ---------------------------------------------------------------------------
+
+fn unique_kdb_path(tag: &str) -> String {
+    let p = std::env::temp_dir().join(format!(
+        "db_engine_mem_{}_{}_{}.kdb",
+        tag,
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    p.to_string_lossy().into_owned()
+}
+
+fn cleanup_kdb(path: &str) {
+    let _ = std::fs::remove_file(path);
+}
+
+/// `.kdb` バックエンド付きのDBに、1件あたりおよそ `payload_len` バイトの列を持つ
+/// レコードを `n` 件 insert する。戻り値は発行された ID 一覧。
+fn seed_kdb_db(path: &str, n: usize, payload_len: usize) -> (Database, Vec<u64>) {
+    let mut db = Database::load_or_new_kdb(path).unwrap();
+    let mut kdb = KdbFile::open_or_create(path).unwrap();
+    let mut ids = Vec::new();
+    for i in 0..n {
+        let mut r = Record::new(0);
+        r.add_label("bulk");
+        r.set("i", DataType::Integer(i as i64));
+        r.set("data", DataType::Text("x".repeat(payload_len)));
+        ids.push(db.insert_fast(r, Some(&mut kdb)).unwrap());
+    }
+    (db, ids)
+}
+
+#[test]
+fn test_memory_default_is_all_in_memory_unlimited() {
+    let db = Database::new();
+    assert!(db.memory_policy().all_in_memory);
+    let s = db.memory_stats();
+    assert!(s.all_in_memory);
+    assert_eq!(s.resident_bytes, 0);
+}
+
+#[test]
+fn test_memory_all_in_memory_keeps_everything_resident() {
+    let path = unique_kdb_path("all");
+    let (db, ids) = seed_kdb_db(&path, 30, 500);
+    // 既定（all_in_memory=true）では追い出しは一切起きない
+    let s = db.memory_stats();
+    assert!(s.all_in_memory);
+    assert_eq!(s.resident_bytes, 0); // all_in_memory 中はキャッシュ未使用
+    for &id in &ids {
+        assert!(db.get(id).unwrap().columns.contains_key("data"));
+    }
+    drop(db);
+    cleanup_kdb(&path);
+}
+
+#[test]
+fn test_memory_bounded_mode_evicts_and_reloads_from_kdb() {
+    let path = unique_kdb_path("bounded");
+    let (mut db, ids) = seed_kdb_db(&path, 40, 1000);
+
+    // 上限 5KB へ切り替え → 大半の行がメモリから追い出される
+    db.set_memory_policy(MemoryPolicy {
+        all_in_memory: false,
+        limit: MemorySizeSpec::Bytes(5_000),
+    });
+    let s = db.memory_stats();
+    assert!(!s.all_in_memory);
+    assert!(s.resident_bytes <= 5_000, "resident_bytes={} should be within budget", s.resident_bytes);
+    assert!(s.resident_rows < ids.len(), "some rows must have been evicted");
+
+    // 追い出された行も get() で正しく読み直せる（.kdb から復元）
+    for &id in &ids {
+        let rec = db.get(id).unwrap();
+        assert_eq!(rec.columns.get("data").unwrap(), &DataType::Text("x".repeat(1000)));
+    }
+    // 読み直しても上限は保たれている
+    assert!(db.memory_stats().resident_bytes <= 5_000 + 2_000);
+
+    drop(db);
+    cleanup_kdb(&path);
+}
+
+#[test]
+fn test_memory_bounded_mode_reaccess_protects_from_eviction() {
+    let path = unique_kdb_path("lru");
+    let (mut db, ids) = seed_kdb_db(&path, 20, 1000);
+    db.set_memory_policy(MemoryPolicy {
+        all_in_memory: false,
+        limit: MemorySizeSpec::Bytes(4_000),
+    });
+
+    // 先頭の行を繰り返しアクセスして「最近使った」状態にする
+    let hot = ids[0];
+    for _ in 0..5 {
+        let _ = db.get(hot).unwrap();
+        // 別の行も触れてキャッシュを回す
+        for &id in &ids[1..] {
+            let _ = db.get(id).unwrap();
+        }
+        let _ = db.get(hot).unwrap();
+    }
+    // hot は直近アクセスされているので、他の行より追い出されにくい（LRU）
+    // （厳密な検証は難しいので、hot が読めること＋上限が守られていることを確認）
+    assert_eq!(db.get(hot).unwrap().columns.get("i").unwrap(), &DataType::Integer(0));
+    assert!(db.memory_stats().resident_bytes <= 6_000);
+
+    drop(db);
+    cleanup_kdb(&path);
+}
+
+#[test]
+fn test_memory_toggle_off_then_on_restores_inline() {
+    let path = unique_kdb_path("toggle");
+    let (mut db, ids) = seed_kdb_db(&path, 15, 300);
+
+    db.set_memory_policy(MemoryPolicy { all_in_memory: false, limit: MemorySizeSpec::Bytes(2_000) });
+    assert!(db.memory_stats().resident_bytes <= 2_000);
+
+    // 全データオンメモリへ戻す（一括ロードはしないが、読めば復元される）
+    db.set_memory_policy(MemoryPolicy { all_in_memory: true, limit: MemorySizeSpec::Bytes(2_000) });
+    assert!(db.memory_policy().all_in_memory);
+    for &id in &ids {
+        assert!(db.get(id).unwrap().columns.contains_key("data"));
+    }
+
+    drop(db);
+    cleanup_kdb(&path);
+}
+
+#[test]
+fn test_memory_bounded_mode_update_and_delete_still_work() {
+    let path = unique_kdb_path("upd");
+    let (mut db, ids) = seed_kdb_db(&path, 12, 800);
+    db.set_memory_policy(MemoryPolicy { all_in_memory: false, limit: MemorySizeSpec::Bytes(2_500) });
+
+    let target = ids[3];
+    let mut updated = Record::new(target);
+    updated.add_label("bulk");
+    updated.set("i", DataType::Integer(999));
+    updated.set("data", DataType::Text("updated".to_string()));
+    db.update(target, updated).unwrap();
+    assert_eq!(db.get(target).unwrap().columns.get("i").unwrap(), &DataType::Integer(999));
+
+    db.delete(ids[0]).unwrap();
+    assert!(db.get(ids[0]).is_err());
+    // 他の行は影響を受けない
+    assert!(db.get(ids[5]).unwrap().columns.contains_key("data"));
+
+    drop(db);
+    cleanup_kdb(&path);
+}
+
+#[test]
+fn test_memory_bounded_mode_secondary_index_search_reloads() {
+    let path = unique_kdb_path("idx");
+    let (mut db, _ids) = seed_kdb_db(&path, 25, 600);
+    db.create_index("i").unwrap();
+    db.set_memory_policy(MemoryPolicy { all_in_memory: false, limit: MemorySizeSpec::Bytes(3_000) });
+
+    // インデックス経由の検索でも、追い出された行を .kdb から読み直して返す
+    let hits = db.get_by_index("i", &DataType::Integer(20)).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].columns.get("data").unwrap(), &DataType::Text("x".repeat(600)));
+
+    drop(db);
+    cleanup_kdb(&path);
 }

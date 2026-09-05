@@ -96,6 +96,31 @@ impl Client {
         }
     }
 
+    /// PUT /settings に任意のJSONボディを送り、レスポンスJSONを返す。
+    pub async fn put_settings(
+        &self,
+        token: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, ApiError> {
+        let url = format!("{}/settings", self.base_url);
+        let resp = self
+            .http
+            .put(&url)
+            .bearer_auth(token)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| ApiError(format!("サーバー '{}' に接続できませんでした: {}", self.base_url, e)))?;
+
+        if resp.status().is_success() {
+            resp.json::<serde_json::Value>()
+                .await
+                .map_err(|e| ApiError(format!("応答の解析に失敗しました: {}", e)))
+        } else {
+            Err(Self::parse_error(resp).await)
+        }
+    }
+
     pub async fn db_info(&self, token: &str) -> Result<DbInfoResponse, ApiError> {
         let url = format!("{}/db/info", self.base_url);
         let resp = self
