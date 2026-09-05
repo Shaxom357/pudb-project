@@ -63,6 +63,10 @@ pub enum DatabaseError {
     ColumnNotFound(String),
     /// レコードに既に付与されているラベルを重複して付与しようとした
     DuplicateLabel(String),
+    /// 既にそのカラムに二次インデックスが存在する
+    IndexAlreadyExists(String),
+    /// そのカラムに二次インデックスが存在しない
+    IndexNotFound(String),
 }
 
 impl std::fmt::Display for DatabaseError {
@@ -73,6 +77,10 @@ impl std::fmt::Display for DatabaseError {
             DatabaseError::ColumnNotFound(col) => write!(f, "Column '{}' not found", col),
             DatabaseError::DuplicateLabel(label) =>
                 write!(f, "Label '{}' is already attached to this record", label),
+            DatabaseError::IndexAlreadyExists(col) =>
+                write!(f, "Index on column '{}' already exists", col),
+            DatabaseError::IndexNotFound(col) =>
+                write!(f, "Index on column '{}' does not exist", col),
         }
     }
 }
@@ -99,12 +107,58 @@ impl ColumnStore {
     }
 }
 
+/// 二次インデックス（あるカラムの値 → そのカラムがその値を持つ行番号一覧）。
+/// `label_index` と同じ発想で、キーがラベル名の代わりにカラムの値になったもの。
+/// ラベルをまたいで、そのカラム名を持つ全レコードが対象になる（スキーマレスな
+/// 設計に合わせ、インデックスは「ラベル単位」ではなく「カラム単位」で持つ）。
+/// `NULL`・未設定の値は対象外（等値検索のみ対応。IS NULL の高速化は対象外）。
+#[derive(Debug, Default)]
+struct SecondaryIndex {
+    entries: HashMap<String, Vec<usize>>,
+}
+
+/// カラムの値を二次インデックスのキー用に正規化する（`Text("1")` と `Integer(1)` を
+/// 別物として区別するため、型ごとにタグを付ける）。sql_engine 側の GROUP BY キー生成
+/// （`group_key`）と同じ発想だが、クレートが違う（db_engine → sql_engine の一方向依存）ため
+/// 個別に実装している。
+fn index_value_key(v: &DataType) -> String {
+    match v {
+        DataType::Text(s)    => format!("T:{}", s),
+        DataType::Integer(n) => format!("I:{}", n),
+        DataType::Float(f)   => format!("F:{}", f),
+        DataType::Boolean(b) => format!("B:{}", b),
+        DataType::Null       => "\u{0}NULL".to_string(),
+    }
+}
+
+/// 二次インデックスへ1行分の値を追加する（`NULL` は対象外）。対象カラムにインデックスが
+/// 無ければ何もしない。
+fn secondary_index_add(indexes: &mut HashMap<String, SecondaryIndex>, col: &str, val: &DataType, row_idx: usize) {
+    if matches!(val, DataType::Null) { return; }
+    if let Some(idx) = indexes.get_mut(col) {
+        idx.entries.entry(index_value_key(val)).or_default().push(row_idx);
+    }
+}
+
+/// 二次インデックスから1行分の値を除去する（UPDATE/DELETE で古い値を外すのに使う）。
+fn secondary_index_remove(indexes: &mut HashMap<String, SecondaryIndex>, col: &str, val: &DataType, row_idx: usize) {
+    if matches!(val, DataType::Null) { return; }
+    if let Some(idx) = indexes.get_mut(col) {
+        if let Some(v) = idx.entries.get_mut(&index_value_key(val)) {
+            v.retain(|&i| i != row_idx);
+        }
+    }
+}
+
 /// DBエンジン本体
 pub struct Database {
     records: Vec<Option<Record>>,
     id_to_index: HashMap<u64, usize>,
     store: ColumnStore,
     next_id: u64,
+    /// カラム名 → 二次インデックス（`CREATE INDEX` で作成。永続化はせず、
+    /// 起動時に呼び出し側が定義を読み直して `create_index` で再構築する想定）
+    secondary_indexes: HashMap<String, SecondaryIndex>,
 }
 
 impl Database {
@@ -114,6 +168,7 @@ impl Database {
             id_to_index: HashMap::new(),
             store: ColumnStore::new(),
             next_id: 1,
+            secondary_indexes: HashMap::new(),
         }
     }
 
@@ -159,6 +214,9 @@ impl Database {
                 .or_insert_with(Vec::new)
                 .push(row_idx);
         }
+        for (col, val) in &record.columns {
+            secondary_index_add(&mut self.secondary_indexes, col, val, row_idx);
+        }
 
         self.id_to_index.insert(id, row_idx);
         self.records.push(Some(record));
@@ -202,12 +260,20 @@ impl Database {
 
         let current_rows = self.records.len();
         for (col, val) in &new_record.columns {
-            let column = self.store.columns.entry(col.clone()).or_insert_with(|| {
-                vec![None; current_rows]
-            });
-            if let Some(cell) = column.get_mut(row_idx) {
-                *cell = Some(val.clone());
+            // 二次インデックスを更新するため、上書きする前に旧い値を控えておく
+            let old_val = self.store.columns.get(col).and_then(|c| c.get(row_idx)).and_then(|c| c.clone());
+            {
+                let column = self.store.columns.entry(col.clone()).or_insert_with(|| {
+                    vec![None; current_rows]
+                });
+                if let Some(cell) = column.get_mut(row_idx) {
+                    *cell = Some(val.clone());
+                }
             }
+            if let Some(old) = &old_val {
+                secondary_index_remove(&mut self.secondary_indexes, col, old, row_idx);
+            }
+            secondary_index_add(&mut self.secondary_indexes, col, val, row_idx);
         }
 
         for label in &new_record.labels {
@@ -237,10 +303,18 @@ impl Database {
             }
         }
 
+        // 二次インデックスから外すため、消す前に現在の値を控えておく
+        let old_values: Vec<(String, DataType)> = self.store.columns.iter()
+            .filter_map(|(col, vec)| vec.get(row_idx).and_then(|c| c.clone()).map(|v| (col.clone(), v)))
+            .collect();
+
         for column in self.store.columns.values_mut() {
             if let Some(cell) = column.get_mut(row_idx) {
                 *cell = None;
             }
+        }
+        for (col, val) in &old_values {
+            secondary_index_remove(&mut self.secondary_indexes, col, val, row_idx);
         }
 
         self.records[row_idx] = None;
@@ -340,6 +414,62 @@ impl Database {
     /// 論理削除されたレコード数
     pub fn deleted_count(&self) -> usize {
         self.records.iter().filter(|r| r.is_none()).count()
+    }
+
+    // -----------------------------------------------------------------
+    // 二次インデックス（CREATE INDEX / DROP INDEX）
+    // -----------------------------------------------------------------
+
+    /// `column` に対する等値検索用の二次インデックスを作成する。
+    /// 既存の全レコード（論理削除済みを除く）を1回走査して構築する
+    /// （`label_index` と同様、中身は永続化せず必要に応じて再構築する想定）。
+    /// 既にそのカラムにインデックスが存在する場合はエラーを返す。
+    pub fn create_index(&mut self, column: &str) -> Result<(), DatabaseError> {
+        if self.secondary_indexes.contains_key(column) {
+            return Err(DatabaseError::IndexAlreadyExists(column.to_string()));
+        }
+        let mut index = SecondaryIndex::default();
+        if let Some(col_vec) = self.store.columns.get(column) {
+            for (row_idx, cell) in col_vec.iter().enumerate() {
+                if let Some(v) = cell {
+                    if !matches!(v, DataType::Null) {
+                        index.entries.entry(index_value_key(v)).or_default().push(row_idx);
+                    }
+                }
+            }
+        }
+        self.secondary_indexes.insert(column.to_string(), index);
+        Ok(())
+    }
+
+    /// `column` の二次インデックスを削除する。存在しない場合はエラーを返す。
+    pub fn drop_index(&mut self, column: &str) -> Result<(), DatabaseError> {
+        if self.secondary_indexes.remove(column).is_none() {
+            return Err(DatabaseError::IndexNotFound(column.to_string()));
+        }
+        Ok(())
+    }
+
+    /// `column` に二次インデックスが存在するか
+    pub fn has_index(&self, column: &str) -> bool {
+        self.secondary_indexes.contains_key(column)
+    }
+
+    /// インデックスが張られているカラム名の一覧（ソート済み）
+    pub fn list_indexes(&self) -> Vec<String> {
+        let mut cols: Vec<String> = self.secondary_indexes.keys().cloned().collect();
+        cols.sort();
+        cols
+    }
+
+    /// 二次インデックスを使って `column = value` に一致するレコードを取得する。
+    /// `column` にインデックスが無ければ `None`（呼び出し側は全件走査にフォールバックする）。
+    /// インデックスはあるが一致するレコードが無ければ `Some(vec![])`。
+    pub fn get_by_index(&self, column: &str, value: &DataType) -> Option<Vec<&Record>> {
+        let index = self.secondary_indexes.get(column)?;
+        let key = index_value_key(value);
+        let indices: &[usize] = index.entries.get(&key).map(|v| v.as_slice()).unwrap_or(&[]);
+        Some(indices.iter().filter_map(|&i| self.records.get(i).and_then(|r| r.as_ref())).collect())
     }
 }
 
@@ -555,6 +685,9 @@ impl Database {
         }
         for label in &record.labels {
             self.store.label_index.entry(label.clone()).or_default().push(row_idx);
+        }
+        for (col, val) in &record.columns {
+            secondary_index_add(&mut self.secondary_indexes, col, val, row_idx);
         }
         self.id_to_index.insert(id, row_idx);
         self.records.push(Some(record.clone()));

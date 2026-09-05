@@ -14,6 +14,7 @@ mod app;
 mod auth;
 mod auth_handlers;
 mod handlers;
+mod index_sql;
 mod info_handlers;
 mod label_handlers;
 mod logging;
@@ -123,6 +124,15 @@ async fn main() {
 
     use tokio::sync::RwLock;
     use crate::handlers::AppStateInner;
+
+    // 二次インデックスは .kdb/JSON 本体には永続化していないため、サイドカーファイル
+    // `<DB_FILE>.indexes.json` に保存された定義を読み、既存レコードから中身を再構築する
+    // （label_index 等の既存インデックスと同じ「定義だけ残し、実体は起動時に作り直す」方式）。
+    let mut db = db;
+    index_sql::rebuild_indexes_from_sidecar(&db_path, &mut db);
+    if !db.list_indexes().is_empty() {
+        println!("[INFO] Rebuilt secondary index(es): {}", db.list_indexes().join(", "));
+    }
 
     let state = Arc::new(RwLock::new(AppStateInner {
         mgr:     LabelManager::from_db(db),

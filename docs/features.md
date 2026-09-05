@@ -15,18 +15,24 @@
   - 改ざん検知（Poly1305 MAC）
 - ✅ JSON 形式永続化（後方互换・アトミック書き込み）
 - ✅ `KAGURA_MASTER_KEY` 環境変数によるカスタムマスターキー設定
+- ✅ **二次インデックス**: `Database::create_index`/`drop_index` によるカラム単位の等値検索インデックス（`HashMap<値, Vec<行番号>>`。ラベルの検索索引と同じ発想）。`.kdb`/JSON 本体には実体を永続化せず、呼び出し側が定義を再投入して再構築する
+
+## sql_engine（簡易プランナ / EXPLAIN）
+- ✅ `WHERE` 句全体がちょうど1つの等値比較で、対象カラムに二次インデックスがあれば自動的に使用（`AND`/`OR`/`NOT` を含む複合条件では現状未対応）
+- ✅ `EXPLAIN <SELECT文>` でクエリを実行せず実行計画（インデックス使用の有無）だけを確認可能
 
 ## db_client（REST API サーバー）
 - ✅ **認証機能**: 管理者ユーザー（既定 `kagura` / 初期パスワード `root`）による Bearer トークン認証。`/ui`（Web UI の殻）と `POST /auth/login` を除く全エンドポイントがログイン必須（詳細は [authentication.md](authentication.md) を参照）
 - ✅ **一般ユーザー管理**: 管理者が SQL 文 `CREATE USER 'name' IDENTIFIED BY 'password'`（`DROP USER` / `ALTER USER` / `SHOW USERS` も対応）で一般ユーザーを発行。脆弱なパスワードは yes/no 確認を求める。Web UI の設定画面からも操作可能
 - ✅ **権限管理 (GRANT / REVOKE)**: `GRANT <権限>[, ...] TO <ユーザー>[, ...]` / `REVOKE ... FROM ...` で一般ユーザーの `privileges` を付与・剥奪。権限は `SELECT` / `INSERT` / `UPDATE` / `DELETE` / `MANAGE_USERS` と、まとめ指定用の `ALL` / `SUPER`。一般ユーザーの `/sql`・`/records`・`/labels` 操作は付与された権限の範囲に制限され、不足時は `403`（管理者ロールは常に全権限）
+- ✅ **二次インデックス管理 (CREATE INDEX / DROP INDEX / SHOW INDEXES)**: `MANAGE_USERS` 権限を持つユーザーが SQL 文でカラム単位の等値検索インデックスを作成・削除。定義はサイドカーファイル `<DB_FILE>.indexes.json` へ保存し起動時に再構築（`.kdb`/JSON 本体のフォーマットは不変）
 - ✅ 21 本のエンドポイント（認証・レコード CRUD・ラベル管理・DB 情報・SQL・設定・ログ・Web UI。詳細は [api.md](api.md) を参照）
 - ✅ KDB モード（`.kdb`）と JSON モードの自動判別・後方互换
 - ✅ 起動時自動ロード・書き込み時自動セーブ
 - ✅ 環境変数による設定（`DB_FILE` / `DB_ADDR` / `KAGURA_MASTER_KEY` / `KAGURA_AUTH_FILE`）
 - ✅ ブラウザ Web 管理 UI（Records / DB Info / SQL Query / 設定 の 4 ビュー）
 - ✅ `GET /db/info` でバージョン・ストレージ状態・統計を取得
-- ✅ `POST /sql` で SQL SELECT / INSERT / UPDATE / DELETE クエリを実行
+- ✅ `POST /sql` で SQL SELECT / INSERT / UPDATE / DELETE / EXPLAIN クエリ、および二次インデックス管理文を実行
 - ✅ `GET /settings` / `PUT /settings` で HTTPリクエスト（`/records` `/labels` 系 REST API）受付のオンオフを切替可能（**既定は無効**。データ操作は基本 SQL 経由とし、REST API は大量テストデータ投入など用途に応じて有効化する）
 - ✅ Web UI の Records 一覧は `POST /sql`（`SELECT * FROM label.*`）経由で取得するため、REST API が無効でも常に閲覧可能
 - ✅ **ログ出力保管機能**: 起動/停止時刻、停止理由（正常 / エラー / HW・ストレージ障害）、SQL・HTTPリクエストの成功/失敗、Webクライアントの応答時間、DB保存・レコード/ラベル操作などを JSON Lines 形式でファイルへ永続保存（詳細は [api.md](api.md#ログ機能) を参照）。`GET /logs` および Web UI の「ログ」ビューから閲覧可能
@@ -82,7 +88,7 @@
 - ✅ JSON 文字列による全データ型対応
 - ✅ 暗号化 `.kdb` セッション（`KdbSession` 不透明ポインタ）: `kdb_open`/`kdb_close`/`kdb_save`（チェックポイント）/`kdb_count`
 - ✅ WAL 追記 INSERT（`kdb_insert` = O(1)）／一括バックフィル（`kdb_insert_many`、JSON 配列を 1 件ずつ追記し成功件数を返す）
-- ✅ `kdb_sql`: SELECT / INSERT / UPDATE / DELETE を文字列で実行し JSON で返す（WHERE・ORDER BY・LIMIT・ラベル AND-OR・`DELETE FROM label.x WHERE ...` 対応。JOIN・GROUP BY 非対応。UPDATE/DELETE は自動チェックポイント）
+- ✅ `kdb_sql`: SELECT / INSERT / UPDATE / DELETE / EXPLAIN を文字列で実行し JSON で返す。`run_select`/`run_explain`（sql_engine）をそのまま呼ぶため、WHERE（IS NULL/IN/BETWEEN 等含む）・ORDER BY・LIMIT/OFFSET・ラベル AND-OR・集計関数・GROUP BY/HAVING・DISTINCT・算術演算/CASE/COALESCE/CAST/スカラ関数・二次インデックスを使った実行計画（EXPLAIN）まで REST API（`/sql`）と同じ SQL 構文が使える（JOIN のみ非対応）。UPDATE/DELETE は自動チェックポイント。**`CREATE`/`DROP INDEX` 自体はこの FFI からはまだ作成できない**（現時点では REST API 経由のみ。インデックス定義はサイドカーファイル `<DB_FILE>.indexes.json` に保存されるが `kdb_open` はこれを読まないため、db_client 側で作成したインデックスは `KdbEngine` セッションでは有効にならない。単一ライター制約により両者が同時に同じ `.kdb` を開くことは無いが、順番に使う場合でも今のところ引き継がれない）
 - ✅ `kdb_get_by_label`（型情報付き）／`kdb_get_by_label_ndjson`（`SELECT *` 相当のフラット NDJSON をファイルへ書き出し。`polars.scan_ndjson` 向け）
 - ✅ 単一ライター制約を補助する advisory lock ファイル（`<path>.lock` の排他作成）
 

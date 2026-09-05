@@ -3,6 +3,7 @@ pub mod app;
 pub mod auth;
 pub mod auth_handlers;
 pub mod handlers;
+pub mod index_sql;
 pub mod info_handlers;
 pub mod label_handlers;
 pub mod logging;
