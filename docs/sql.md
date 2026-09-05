@@ -337,6 +337,37 @@ ALTER LABEL race DROP COLUMN date
   詳細表示・検証ができる。「スキーマ強制（全体設定）」セクションに `schema_enforcement_enabled` の
   トグルもある。
 
+## トランザクション (BEGIN / COMMIT / ROLLBACK)
+
+複数の `INSERT` / `UPDATE` / `DELETE` を1つの単位としてまとめ、「全部確定」または「全部取り消し」できる。
+
+```sql
+BEGIN;                 -- BEGIN TRANSACTION / START TRANSACTION も可
+UPDATE label.inventory SET stock = stock - 1 WHERE id = 42;
+INSERT INTO (label.orders) (item_id, qty) VALUE (42, 1);
+COMMIT;                -- ここで初めて .kdb / JSON に永続化される
+-- 途中でやめる場合は ROLLBACK（BEGIN 直後の状態に戻る）
+```
+
+- **同時に開けるトランザクションは1つだけ。** `BEGIN` を実行したログインユーザーが所有者になり、
+  トランザクションが開いている間、**他ユーザーの `INSERT`/`UPDATE`/`DELETE` と別の `BEGIN` は
+  `409 Conflict`** を返す。所有者以外の `COMMIT`/`ROLLBACK` も `409`。
+- トランザクション中の `SELECT` は、所有者・他ユーザーを問わず **未コミットの変更が見える**
+  （read-your-writes。分離レベルは低い＝ read uncommitted 相当）。
+- **トランザクション中は DDL（`CREATE USER` などのユーザー管理・`CREATE INDEX` などのインデックス
+  管理・`ALTER LABEL` などのスキーマ管理）を実行できない**（`409`）。先に `COMMIT`/`ROLLBACK` する。
+- `BEGIN`〜`COMMIT` の間は `.kdb`/JSON を一切書き換えない。`COMMIT` 時に一度だけまとめて永続化する。
+  `ROLLBACK` はディスクから読み直すだけ（＝ BEGIN 前の状態に戻る）。
+- **無操作タイムアウト**: 最後の文から 300 秒操作が無いと、次の書き込み系リクエスト（他ユーザー含む）を
+  受けた時点で自動的に `ROLLBACK` される（ハングしたクライアントがサーバー全体の書き込みを
+  止め続けるのを防ぐため）。サーバー停止時も未永続化のため実質ロールバックされる。
+- 「全データオンメモリ」の容量制限モードでも、トランザクション中はメモリからの追い出しを止める
+  （まだ永続化されていない行が失われないようにするため）。`COMMIT`/`ROLLBACK` 後に上限まで削り直す。
+- **v1 の制限**: `/sql`（＝Web UI の SQL Query ビュー）からのみ利用可能。`kdb` CLI・`db_ffi`
+  （Python バインディング）のトランザクション対応は未実装。`COMMIT` 時の `.kdb` 書き込みは
+  既存の `UPDATE`/`DELETE` と同じ全書き直し（compact）方式で、途中クラッシュに対する原子性は
+  既存の書き込みと同レベル。
+
 ## リクエスト例
 
 ```bash

@@ -1,6 +1,7 @@
 // src/lib.rs
 pub mod app;
 pub mod auth;
+pub mod bootstrap;
 pub mod auth_handlers;
 pub mod handlers;
 pub mod index_sql;

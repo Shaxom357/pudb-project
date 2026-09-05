@@ -1072,3 +1072,34 @@ fn test_memory_bounded_mode_secondary_index_search_reloads() {
     drop(db);
     cleanup_kdb(&path);
 }
+
+#[test]
+fn test_transaction_suppresses_eviction_until_end() {
+    let path = unique_kdb_path("txn");
+    let (mut db, _ids) = seed_kdb_db(&path, 10, 500);
+    db.set_memory_policy(MemoryPolicy { all_in_memory: false, limit: MemorySizeSpec::Bytes(3_000) });
+    assert!(db.memory_stats().resident_bytes <= 3_000);
+
+    // トランザクション中は、上限を超えても追い出さない（未永続化の行を失わないため）
+    db.begin_transaction();
+    let mut ids = Vec::new();
+    for i in 0..15 {
+        let mut r = Record::new(0);
+        r.add_label("bulk");
+        r.set("t", DataType::Integer(i));
+        r.set("data", DataType::Text("y".repeat(500)));
+        ids.push(db.insert_fast(r, None).unwrap()); // .kdb には書かない（トランザクション扱い）
+    }
+    assert!(db.memory_stats().resident_bytes > 3_000, "eviction should be suppressed during a transaction");
+    for &id in &ids {
+        assert_eq!(db.get(id).unwrap().columns.get("data").unwrap(), &DataType::Text("y".repeat(500)));
+    }
+
+    // トランザクション終了で上限まで削り直す
+    db.end_transaction();
+    assert!(!db.in_transaction());
+    assert!(db.memory_stats().resident_bytes <= 3_000);
+
+    drop(db);
+    cleanup_kdb(&path);
+}

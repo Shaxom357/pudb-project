@@ -13,6 +13,7 @@
 mod app;
 mod auth;
 mod auth_handlers;
+mod bootstrap;
 mod handlers;
 mod index_sql;
 mod info_handlers;
@@ -174,6 +175,7 @@ async fn main() {
         http_api_enabled: false,
         logger: logger.clone(),
         auth,
+        active_txn: None,
     }));
 
     let (router, _) = app::build_app_with_state(state);
