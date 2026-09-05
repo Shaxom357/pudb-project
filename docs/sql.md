@@ -278,6 +278,65 @@ EXPLAIN SELECT * FROM label.race WHERE venue = 'edogawa'
 - `EXPLAIN <SELECT文>` は実際にはクエリを実行せず、`"index scan: <column> (equality) — N candidate row(s) ..."`
   または `"full scan — N row(s) scanned ..."` の1行を返す。権限は元の `SELECT` と同じ（`SELECT`）。
 
+## 任意スキーマ層 (ALTER LABEL ... DEFINE COLUMN / ENABLE|DISABLE SCHEMA / DESCRIBE / SHOW SCHEMAS / VALIDATE LABEL)
+
+`POST /sql` では、ラベルのカラムに型・`NOT NULL`・`DEFAULT`・`UNIQUE` を宣言し、`INSERT`/`UPDATE`
+時に検証させることもできます（**`MANAGE_USERS` 権限が必要**。`CREATE USER`/`CREATE INDEX` 等と
+同様、レコードストアの構造を操作する管理操作として扱う）。KAGURA DB は既定でスキーマレスのままで、
+このスキーマは宣言したラベル・カラムにだけオプトインで効きます。
+
+```sql
+-- 1. スキーマを定義する（この時点ではまだ INSERT/UPDATE に影響しない）
+ALTER LABEL race DEFINE COLUMN date TYPE text NOT NULL
+ALTER LABEL race DEFINE COLUMN odds TYPE float DEFAULT 0.0
+ALTER LABEL racer DEFINE COLUMN racer_id TYPE integer NOT NULL UNIQUE
+
+-- 2. 定義を確認する
+DESCRIBE label.race
+SHOW SCHEMAS
+
+-- 3. 既存データが定義に沿っているか、有効化する前に確認する（任意）
+VALIDATE LABEL race
+
+-- 4. 有効化する。ここで初めて race ラベルの INSERT/UPDATE が検証され始める
+ALTER LABEL race ENABLE SCHEMA
+
+-- 一時的に無効化することもできる（定義自体は消えない）
+ALTER LABEL race DISABLE SCHEMA
+
+-- 不要になった列定義を削除する（データそのものは削除しない）
+ALTER LABEL race DROP COLUMN date
+```
+
+補足:
+- **`DEFINE COLUMN` しただけでは強制されない**。`ENABLE SCHEMA` して初めて、そのラベルの
+  `INSERT`/`UPDATE` が検証され始める。「定義してすぐ既存データが壊れる」事故を避けるため、
+  定義と有効化を意図的に分けている。`DISABLE SCHEMA` すれば定義を残したまま検証だけ止められる。
+  新しく `DEFINE COLUMN` したラベルは既定で無効（`DISABLE`）の状態から始まる。
+- `TYPE` は `TEXT`（別名 `STRING`/`VARCHAR`）/`INTEGER`（別名 `INT`）/`FLOAT`（別名 `DOUBLE`/`REAL`）/
+  `BOOLEAN`（別名 `BOOL`）。`Integer` の値は `Float` 宣言にも適合する（数値の自動昇格）。
+- `NOT NULL` はそのカラムが未設定・`NULL` の `INSERT`/`UPDATE` を拒否する。`DEFAULT` が指定されていれば
+  未設定時は自動的に補完されるため拒否されない。
+- `UNIQUE` は同じラベルを持つレコード同士でのみ重複を禁止する（ラベルが違えば同じ値を持てる）。
+  `UNIQUE` を指定すると、まだ二次インデックスが無ければ自動的に作成される（`CREATE INDEX` と同じ仕組みを
+  再利用して重複チェックを高速に行うため）。
+- `VALIDATE LABEL <label>` は、`ENABLE SCHEMA` する前に「今のデータが定義に沿っているか」を確認する
+  診断コマンドで、何も変更しない（`ENABLE SCHEMA` 自体は既存データを自動チェックしないため、
+  事前にこれで確認しておくことを推奨する）。違反が無ければ空の結果を返す。
+- `DESCRIBE label.<label>` は定義済みのカラム一覧（型・`NOT NULL`・`DEFAULT`・`UNIQUE`・有効/無効）を、
+  `SHOW SCHEMAS` はスキーマが定義されているラベルの一覧（有効/無効・カラム数）を返す。
+  スキーマが未定義のラベルへの `DESCRIBE` は `404` を返す。
+- スキーマ定義の実体は `.kdb`/JSON 本体には保存されない。定義だけをサイドカーファイル
+  `<DB_FILE>.schema.json` に保存し、サーバー起動時にそのファイルを読んで再構築する
+  （二次インデックスと同じ方式）。
+- `PUT /settings` の `schema_enforcement_enabled`（既定 `true`）で、DB全体のスキーマ強制を
+  一時停止できる。`false` にすると、個々のラベルの `ENABLE SCHEMA` 状態に関わらず全ての
+  スキーマ検証が止まる（大量バックフィル時などに、ラベルごとの設定を変えずに一時退避する用途）。
+  この設定はサーバー再起動のたびに `true` へ戻る（永続化しない）。
+- Web UI（`/ui` 設定画面）の「スキーマ管理」セクションからも、カラムの定義・有効化/無効化・
+  詳細表示・検証ができる。「スキーマ強制（全体設定）」セクションに `schema_enforcement_enabled` の
+  トグルもある。
+
 ## リクエスト例
 
 ```bash

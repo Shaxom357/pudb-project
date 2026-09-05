@@ -16,6 +16,7 @@
 - ✅ JSON 形式永続化（後方互换・アトミック書き込み）
 - ✅ `KAGURA_MASTER_KEY` 環境変数によるカスタムマスターキー設定
 - ✅ **二次インデックス**: `Database::create_index`/`drop_index` によるカラム単位の等値検索インデックス（`HashMap<値, Vec<行番号>>`。ラベルの検索索引と同じ発想）。`.kdb`/JSON 本体には実体を永続化せず、呼び出し側が定義を再投入して再構築する
+- ✅ **任意スキーマ層**: `Database::define_column`/`enable_schema`/`disable_schema` によるラベル単位・カラム単位の任意スキーマ（型・`NOT NULL`・`DEFAULT`・`UNIQUE`）。既定でスキーマレスのまま、宣言＋`ENABLE SCHEMA` したラベルだけ `INSERT`/`UPDATE` 時に検証する。`UNIQUE` 指定時は二次インデックスを自動作成して重複チェックに利用。`validate_label` で既存データの整合性を事前確認可能。DB全体の一時停止スイッチ `schema_enforcement_enabled`（既定 `true`）も持つ
 
 ## sql_engine（簡易プランナ / EXPLAIN）
 - ✅ `WHERE` 句全体がちょうど1つの等値比較で、対象カラムに二次インデックスがあれば自動的に使用（`AND`/`OR`/`NOT` を含む複合条件では現状未対応）
@@ -26,14 +27,15 @@
 - ✅ **一般ユーザー管理**: 管理者が SQL 文 `CREATE USER 'name' IDENTIFIED BY 'password'`（`DROP USER` / `ALTER USER` / `SHOW USERS` も対応）で一般ユーザーを発行。脆弱なパスワードは yes/no 確認を求める。Web UI の設定画面からも操作可能
 - ✅ **権限管理 (GRANT / REVOKE)**: `GRANT <権限>[, ...] TO <ユーザー>[, ...]` / `REVOKE ... FROM ...` で一般ユーザーの `privileges` を付与・剥奪。権限は `SELECT` / `INSERT` / `UPDATE` / `DELETE` / `MANAGE_USERS` と、まとめ指定用の `ALL` / `SUPER`。一般ユーザーの `/sql`・`/records`・`/labels` 操作は付与された権限の範囲に制限され、不足時は `403`（管理者ロールは常に全権限）
 - ✅ **二次インデックス管理 (CREATE INDEX / DROP INDEX / SHOW INDEXES)**: `MANAGE_USERS` 権限を持つユーザーが SQL 文でカラム単位の等値検索インデックスを作成・削除。定義はサイドカーファイル `<DB_FILE>.indexes.json` へ保存し起動時に再構築（`.kdb`/JSON 本体のフォーマットは不変）
+- ✅ **任意スキーマ層管理 (ALTER LABEL ... DEFINE COLUMN / ENABLE|DISABLE SCHEMA / DESCRIBE / SHOW SCHEMAS / VALIDATE LABEL)**: `MANAGE_USERS` 権限を持つユーザーが SQL 文でラベルのカラムに型・`NOT NULL`・`DEFAULT`・`UNIQUE` を宣言・削除し、強制の有効/無効を切替。定義しただけでは強制されず `ENABLE SCHEMA` して初めて検証される（既定で無効）。定義はサイドカーファイル `<DB_FILE>.schema.json` へ保存し起動時に再構築。Web UI（設定画面）からも操作可能
 - ✅ 21 本のエンドポイント（認証・レコード CRUD・ラベル管理・DB 情報・SQL・設定・ログ・Web UI。詳細は [api.md](api.md) を参照）
 - ✅ KDB モード（`.kdb`）と JSON モードの自動判別・後方互换
 - ✅ 起動時自動ロード・書き込み時自動セーブ
 - ✅ 環境変数による設定（`DB_FILE` / `DB_ADDR` / `KAGURA_MASTER_KEY` / `KAGURA_AUTH_FILE`）
-- ✅ ブラウザ Web 管理 UI（Records / DB Info / SQL Query / 設定 の 4 ビュー）
+- ✅ ブラウザ Web 管理 UI（Records / DB Info / SQL Query / 設定 の 4 ビュー。設定ビューに「スキーマ管理」「スキーマ強制（全体設定）」セクションを追加）
 - ✅ `GET /db/info` でバージョン・ストレージ状態・統計を取得
-- ✅ `POST /sql` で SQL SELECT / INSERT / UPDATE / DELETE / EXPLAIN クエリ、および二次インデックス管理文を実行
-- ✅ `GET /settings` / `PUT /settings` で HTTPリクエスト（`/records` `/labels` 系 REST API）受付のオンオフを切替可能（**既定は無効**。データ操作は基本 SQL 経由とし、REST API は大量テストデータ投入など用途に応じて有効化する）
+- ✅ `POST /sql` で SQL SELECT / INSERT / UPDATE / DELETE / EXPLAIN クエリ、および二次インデックス・スキーマ管理文を実行
+- ✅ `GET /settings` / `PUT /settings` で HTTPリクエスト（`/records` `/labels` 系 REST API）受付のオンオフ、およびスキーマ強制の全体スイッチ `schema_enforcement_enabled`（**既定は有効**。`false` でラベルごとの `ENABLE SCHEMA` 状態に関わらず一時停止。サーバー再起動のたびに既定へ戻る）を切替可能。`http_api_enabled` の既定は無効（データ操作は基本 SQL 経由とし、REST API は大量テストデータ投入など用途に応じて有効化する）。いずれも指定したフィールドだけを更新し、省略したフィールドは現在値を維持
 - ✅ Web UI の Records 一覧は `POST /sql`（`SELECT * FROM label.*`）経由で取得するため、REST API が無効でも常に閲覧可能
 - ✅ **ログ出力保管機能**: 起動/停止時刻、停止理由（正常 / エラー / HW・ストレージ障害）、SQL・HTTPリクエストの成功/失敗、Webクライアントの応答時間、DB保存・レコード/ラベル操作などを JSON Lines 形式でファイルへ永続保存（詳細は [api.md](api.md#ログ機能) を参照）。`GET /logs` および Web UI の「ログ」ビューから閲覧可能
 

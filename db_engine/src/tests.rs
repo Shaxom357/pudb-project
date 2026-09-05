@@ -1,6 +1,6 @@
 // db_engine/src/tests.rs
 
-use crate::{Database, DataType, DatabaseError, Record};
+use crate::{ColumnSchema, Database, DataType, DatabaseError, Record, SchemaType};
 
 // ---------------------------------------------------------------------------
 // insert / get
@@ -619,4 +619,283 @@ fn test_index_distinguishes_value_types() {
     db.create_index("code").unwrap();
     assert_eq!(db.get_by_index("code", &DataType::Text("1".to_string())).unwrap().len(), 1);
     assert_eq!(db.get_by_index("code", &DataType::Integer(1)).unwrap().len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// 任意スキーマ層（DEFINE COLUMN / ENABLE|DISABLE SCHEMA）
+// ---------------------------------------------------------------------------
+
+fn not_null_text() -> ColumnSchema {
+    ColumnSchema { ty: SchemaType::Text, not_null: true, default: None, unique: false }
+}
+
+fn insert_race(db: &mut Database, date: Option<&str>) -> Result<u64, DatabaseError> {
+    let mut r = Record::new(0);
+    if let Some(d) = date { r.set("date", DataType::Text(d.to_string())); }
+    r.add_label("race");
+    db.insert(r)
+}
+
+#[test]
+fn test_schema_disabled_by_default_does_not_enforce() {
+    let mut db = Database::new();
+    db.define_column("race", "date", not_null_text()).unwrap();
+    // ENABLE SCHEMA していないので、NOT NULL でも date 無しで INSERT できる
+    let id = insert_race(&mut db, None).unwrap();
+    assert!(db.get(id).is_ok());
+}
+
+#[test]
+fn test_schema_enabled_enforces_not_null() {
+    let mut db = Database::new();
+    db.define_column("race", "date", not_null_text()).unwrap();
+    db.enable_schema("race");
+
+    let err = insert_race(&mut db, None).unwrap_err();
+    assert!(matches!(err, DatabaseError::SchemaViolation(_)));
+    assert_eq!(db.count(), 0);
+
+    let id = insert_race(&mut db, Some("2026-01-01")).unwrap();
+    assert!(db.get(id).is_ok());
+}
+
+#[test]
+fn test_schema_enforces_type() {
+    let mut db = Database::new();
+    db.define_column("race", "odds", ColumnSchema {
+        ty: SchemaType::Float, not_null: false, default: None, unique: false,
+    }).unwrap();
+    db.enable_schema("race");
+
+    let mut r = Record::new(0);
+    r.set("odds", DataType::Text("not a number".to_string()));
+    r.add_label("race");
+    let err = db.insert(r).unwrap_err();
+    assert!(matches!(err, DatabaseError::SchemaViolation(_)));
+}
+
+#[test]
+fn test_schema_integer_satisfies_float_type() {
+    // Integer の値は Float 宣言にも適合する（数値の自動昇格）
+    let mut db = Database::new();
+    db.define_column("race", "odds", ColumnSchema {
+        ty: SchemaType::Float, not_null: false, default: None, unique: false,
+    }).unwrap();
+    db.enable_schema("race");
+
+    let mut r = Record::new(0);
+    r.set("odds", DataType::Integer(3));
+    r.add_label("race");
+    assert!(db.insert(r).is_ok());
+}
+
+#[test]
+fn test_schema_float_does_not_satisfy_integer_type() {
+    let mut db = Database::new();
+    db.define_column("race", "n", ColumnSchema {
+        ty: SchemaType::Integer, not_null: false, default: None, unique: false,
+    }).unwrap();
+    db.enable_schema("race");
+
+    let mut r = Record::new(0);
+    r.set("n", DataType::Float(1.5));
+    r.add_label("race");
+    assert!(db.insert(r).is_err());
+}
+
+#[test]
+fn test_schema_default_fills_missing_value() {
+    let mut db = Database::new();
+    db.define_column("race", "odds", ColumnSchema {
+        ty: SchemaType::Float, not_null: false, default: Some(DataType::Float(0.0)), unique: false,
+    }).unwrap();
+    db.enable_schema("race");
+
+    let mut r = Record::new(0);
+    r.add_label("race");
+    let id = db.insert(r).unwrap();
+    assert_eq!(db.get(id).unwrap().get_col("odds"), Some(&DataType::Float(0.0)));
+}
+
+#[test]
+fn test_schema_unique_rejects_duplicate() {
+    let mut db = Database::new();
+    db.define_column("racer", "racer_id", ColumnSchema {
+        ty: SchemaType::Integer, not_null: true, default: None, unique: true,
+    }).unwrap();
+    db.enable_schema("racer");
+    // UNIQUE 指定により自動でインデックスが作られる
+    assert!(db.has_index("racer_id"));
+
+    let mut r1 = Record::new(0);
+    r1.set("racer_id", DataType::Integer(1));
+    r1.add_label("racer");
+    db.insert(r1).unwrap();
+
+    let mut r2 = Record::new(0);
+    r2.set("racer_id", DataType::Integer(1));
+    r2.add_label("racer");
+    let err = db.insert(r2).unwrap_err();
+    assert!(matches!(err, DatabaseError::SchemaViolation(_)));
+    assert_eq!(db.count(), 1);
+}
+
+#[test]
+fn test_schema_unique_allows_update_of_same_record() {
+    let mut db = Database::new();
+    db.define_column("racer", "racer_id", ColumnSchema {
+        ty: SchemaType::Integer, not_null: true, default: None, unique: true,
+    }).unwrap();
+    db.enable_schema("racer");
+
+    let mut r = Record::new(0);
+    r.set("racer_id", DataType::Integer(1));
+    r.add_label("racer");
+    let id = db.insert(r).unwrap();
+
+    // 自分自身の値をそのまま UPDATE しても重複エラーにならない
+    let mut updated = db.get(id).unwrap().clone();
+    updated.set("racer_id", DataType::Integer(1));
+    assert!(db.update(id, updated).is_ok());
+}
+
+#[test]
+fn test_schema_unique_rejects_update_to_existing_value() {
+    let mut db = Database::new();
+    db.define_column("racer", "racer_id", ColumnSchema {
+        ty: SchemaType::Integer, not_null: true, default: None, unique: true,
+    }).unwrap();
+    db.enable_schema("racer");
+
+    let mut r1 = Record::new(0);
+    r1.set("racer_id", DataType::Integer(1));
+    r1.add_label("racer");
+    db.insert(r1).unwrap();
+
+    let mut r2 = Record::new(0);
+    r2.set("racer_id", DataType::Integer(2));
+    r2.add_label("racer");
+    let id2 = db.insert(r2).unwrap();
+
+    let mut updated = db.get(id2).unwrap().clone();
+    updated.set("racer_id", DataType::Integer(1));
+    assert!(db.update(id2, updated).is_err());
+}
+
+#[test]
+fn test_schema_unique_is_scoped_to_label() {
+    // UNIQUE はカラム単位のインデックスを使うが、違反判定は同じラベルを持つ
+    // レコード同士でのみ行う（ラベルが違えば同じ値を持てる）
+    let mut db = Database::new();
+    db.define_column("racer", "code", ColumnSchema {
+        ty: SchemaType::Text, not_null: false, default: None, unique: true,
+    }).unwrap();
+    db.enable_schema("racer");
+
+    let mut other = Record::new(0);
+    other.set("code", DataType::Text("A".to_string()));
+    other.add_label("staff"); // racer ではない
+    db.insert(other).unwrap();
+
+    let mut r = Record::new(0);
+    r.set("code", DataType::Text("A".to_string()));
+    r.add_label("racer");
+    assert!(db.insert(r).is_ok());
+}
+
+#[test]
+fn test_disable_schema_stops_enforcement_but_keeps_definition() {
+    let mut db = Database::new();
+    db.define_column("race", "date", not_null_text()).unwrap();
+    db.enable_schema("race");
+    assert!(insert_race(&mut db, None).is_err());
+
+    db.disable_schema("race");
+    assert!(insert_race(&mut db, None).is_ok());
+
+    // 定義自体は消えていない
+    let (enabled, cols) = db.describe_label("race").unwrap();
+    assert!(!enabled);
+    assert_eq!(cols.len(), 1);
+}
+
+#[test]
+fn test_global_schema_enforcement_switch_overrides_per_label_enable() {
+    let mut db = Database::new();
+    db.define_column("race", "date", not_null_text()).unwrap();
+    db.enable_schema("race");
+    assert!(insert_race(&mut db, None).is_err());
+
+    db.set_schema_enforcement_enabled(false);
+    assert!(insert_race(&mut db, None).is_ok());
+
+    db.set_schema_enforcement_enabled(true);
+    assert!(insert_race(&mut db, None).is_err());
+}
+
+#[test]
+fn test_global_schema_enforcement_defaults_to_enabled() {
+    let db = Database::new();
+    assert!(db.is_schema_enforcement_enabled());
+}
+
+#[test]
+fn test_drop_column_schema_removes_definition() {
+    let mut db = Database::new();
+    db.define_column("race", "date", not_null_text()).unwrap();
+    db.drop_column_schema("race", "date").unwrap();
+    let (_, cols) = db.describe_label("race").unwrap();
+    assert!(cols.is_empty());
+}
+
+#[test]
+fn test_drop_column_schema_nonexistent_is_error() {
+    let mut db = Database::new();
+    // ラベル自体にまだスキーマが無い場合はラベル名でエラーになる
+    assert_eq!(db.drop_column_schema("race", "date"), Err(DatabaseError::SchemaNotFound("race".to_string())));
+    // ラベルにスキーマはあるが、そのカラムは定義されていない場合はラベル.カラムでエラーになる
+    db.define_column("race", "odds", not_null_text()).unwrap();
+    assert_eq!(db.drop_column_schema("race", "date"), Err(DatabaseError::SchemaNotFound("race.date".to_string())));
+}
+
+#[test]
+fn test_describe_label_returns_none_when_undefined() {
+    let db = Database::new();
+    assert_eq!(db.describe_label("race"), None);
+}
+
+#[test]
+fn test_list_schema_labels_sorted() {
+    let mut db = Database::new();
+    db.define_column("race", "date", not_null_text()).unwrap();
+    db.define_column("racer", "name", not_null_text()).unwrap();
+    assert_eq!(db.list_schema_labels(), vec!["race".to_string(), "racer".to_string()]);
+}
+
+#[test]
+fn test_validate_label_reports_existing_violations_even_when_disabled() {
+    let mut db = Database::new();
+    // スキーマ無効のまま date 無しでレコードを作る
+    let id = insert_race(&mut db, None).unwrap();
+    db.define_column("race", "date", not_null_text()).unwrap();
+    // まだ ENABLE していないので INSERT/UPDATE は妨げられないが、
+    // validate_label は「今のデータが定義に沿っているか」を報告する
+    let violations = db.validate_label("race");
+    assert_eq!(violations.len(), 1);
+    assert!(violations[0].contains(&id.to_string()));
+}
+
+#[test]
+fn test_validate_label_empty_when_no_schema_defined() {
+    let mut db = Database::new();
+    insert_race(&mut db, None).unwrap();
+    assert!(db.validate_label("race").is_empty());
+}
+
+#[test]
+fn test_validate_label_no_violations_when_data_conforms() {
+    let mut db = Database::new();
+    insert_race(&mut db, Some("2026-01-01")).unwrap();
+    db.define_column("race", "date", not_null_text()).unwrap();
+    assert!(db.validate_label("race").is_empty());
 }

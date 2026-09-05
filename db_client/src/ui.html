@@ -283,6 +283,52 @@ tbody td { padding: 10px 14px; vertical-align: middle; }
           <div class="toggle-status" id="userMgmtStatus"></div>
           <div id="userListWrap" style="margin-top:16px;overflow-x:auto"></div>
         </div>
+        <div class="info-section-title" style="margin-top:24px">スキーマ強制（全体設定）</div>
+        <div class="settings-card">
+          <div class="toggle-row">
+            <div>
+              <div class="toggle-label">スキーマ強制を有効にする</div>
+              <div class="toggle-desc">既定では有効です。オフにすると、下の「スキーマ管理」で「有効化」したラベルも含めて、一時的に全てのスキーマ検証を止めます（大量データ投入時の緊急退避用）。個々のラベルの有効/無効設定は変更されず、サーバー再起動のたびにこのスイッチ自体は有効へ戻ります。</div>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="schemaEnforcementToggle" onchange="onSchemaEnforcementToggle()">
+              <span class="slider"></span>
+            </label>
+          </div>
+          <div class="toggle-status" id="schemaEnforcementStatus"></div>
+        </div>
+        <div class="info-section-title" style="margin-top:24px">スキーマ管理（管理者のみ）</div>
+        <div class="settings-card" id="schemaMgmtCard">
+          <div class="toggle-desc" style="margin-bottom:12px">ラベルのカラムに型・NOT NULL・DEFAULT・UNIQUE を宣言します（SQL の <code>ALTER LABEL race DEFINE COLUMN date TYPE text NOT NULL</code> と同じ）。<b>定義しただけでは検証されません</b>。一覧の「有効化」ボタンを押すまでは、そのラベルは今までどおりスキーマレスのまま動きます。</div>
+          <div class="form-group">
+            <label>ラベル名</label>
+            <input type="text" id="schemaLabelName" autocomplete="off" spellcheck="false" placeholder="race">
+          </div>
+          <div class="form-group">
+            <label>カラム名</label>
+            <input type="text" id="schemaColumnName" autocomplete="off" spellcheck="false" placeholder="date">
+          </div>
+          <div class="form-group">
+            <label>型</label>
+            <select id="schemaColumnType">
+              <option value="text">text</option>
+              <option value="integer">integer</option>
+              <option value="float">float</option>
+              <option value="boolean">boolean</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>DEFAULT（省略可。text型は引用符なしで入力）</label>
+            <input type="text" id="schemaDefaultValue" autocomplete="off" spellcheck="false" placeholder="例: edogawa / 0 / 0.0 / true">
+          </div>
+          <div class="form-group" style="display:flex;gap:20px">
+            <label style="display:flex;align-items:center;gap:6px;font-weight:400"><input type="checkbox" id="schemaNotNull"> NOT NULL</label>
+            <label style="display:flex;align-items:center;gap:6px;font-weight:400"><input type="checkbox" id="schemaUnique"> UNIQUE</label>
+          </div>
+          <button class="btn btn-primary" onclick="doDefineColumn()">カラムを定義</button>
+          <div class="toggle-status" id="schemaMgmtStatus"></div>
+          <div id="schemaListWrap" style="margin-top:16px;overflow-x:auto"></div>
+        </div>
       </div>
     </div>
     <!-- Logs View -->
@@ -543,6 +589,159 @@ async function doDropUser(name){
   }
 }
 
+// ---- スキーマ管理（設定画面） ----
+// DEFAULT 入力欄は text 型のみ引用符なしで受け取り、SQLリテラルへ変換する
+// （integer/float はそのまま数値として、boolean は TRUE/FALSE へ）
+function formatSchemaDefaultLiteral(raw, ty){
+  if(ty === 'text') return sqlQuote(raw);
+  if(ty === 'boolean') return raw.trim().toLowerCase() === 'true' ? 'TRUE' : 'FALSE';
+  return raw.trim();
+}
+
+async function doDefineColumn(){
+  const label = document.getElementById('schemaLabelName').value.trim();
+  const column = document.getElementById('schemaColumnName').value.trim();
+  const ty = document.getElementById('schemaColumnType').value;
+  const notNull = document.getElementById('schemaNotNull').checked;
+  const unique = document.getElementById('schemaUnique').checked;
+  const defaultRaw = document.getElementById('schemaDefaultValue').value.trim();
+  const statusEl = document.getElementById('schemaMgmtStatus');
+  if(!label || !column){ statusEl.textContent = 'ラベル名とカラム名を入力してください'; return; }
+
+  let sql = 'ALTER LABEL ' + label + ' DEFINE COLUMN ' + column + ' TYPE ' + ty;
+  if(notNull) sql += ' NOT NULL';
+  if(defaultRaw) sql += ' DEFAULT ' + formatSchemaDefaultLiteral(defaultRaw, ty);
+  if(unique) sql += ' UNIQUE';
+
+  statusEl.textContent = '定義中...';
+  try{
+    const data = await sqlRequest(sql);
+    if(data===null) return;
+    if(data.ok){
+      showToast("ラベル '" + label + "' のカラム '" + column + "' にスキーマを定義しました（未有効化）",'success');
+      statusEl.textContent = '';
+      document.getElementById('schemaColumnName').value = '';
+      document.getElementById('schemaDefaultValue').value = '';
+      document.getElementById('schemaNotNull').checked = false;
+      document.getElementById('schemaUnique').checked = false;
+      loadSchemas();
+    } else {
+      statusEl.textContent = data.error || '定義に失敗しました';
+    }
+  }catch(e){
+    statusEl.textContent = 'ネットワークエラー';
+  }
+}
+
+async function loadSchemas(){
+  const wrap = document.getElementById('schemaListWrap');
+  if(!wrap) return;
+  try{
+    const data = await sqlRequest('SHOW SCHEMAS');
+    if(data===null) return;
+    if(!data.ok){
+      wrap.innerHTML = '<div class="toggle-status">' + esc(data.error||'スキーマ一覧を取得できませんでした') + '</div>';
+      return;
+    }
+    const rows = data.rows || [];
+    if(rows.length === 0){
+      wrap.innerHTML = '<div class="toggle-desc">まだスキーマは定義されていません。</div>';
+      return;
+    }
+    let html = '<table class="sql-result-table" style="width:100%;border-collapse:collapse;font-size:13px">'
+      + '<thead><tr>'
+      + '<th style="text-align:left;padding:6px 10px;border-bottom:2px solid #4f6ef7">ラベル</th>'
+      + '<th style="text-align:left;padding:6px 10px;border-bottom:2px solid #4f6ef7">有効</th>'
+      + '<th style="text-align:left;padding:6px 10px;border-bottom:2px solid #4f6ef7">カラム数</th>'
+      + '<th></th></tr></thead><tbody>';
+    for(const r of rows){
+      const label = String(r[0]);
+      const enabled = !!r[1];
+      html += '<tr>'
+        + '<td style="padding:6px 10px;border-bottom:1px solid #eee">'+esc(label)+'</td>'
+        + '<td style="padding:6px 10px;border-bottom:1px solid #eee">'+(enabled?'有効':'無効')+'</td>'
+        + '<td style="padding:6px 10px;border-bottom:1px solid #eee">'+esc(String(r[2]))+'</td>'
+        + '<td style="padding:6px 10px;border-bottom:1px solid #eee;white-space:nowrap">'
+        + '<button class="btn btn-ghost btn-sm" data-describe-label="'+esc(label)+'">詳細</button> '
+        + '<button class="btn btn-ghost btn-sm" data-validate-label="'+esc(label)+'">検証</button> '
+        + '<button class="btn btn-sm" data-toggle-schema="'+esc(label)+'" data-enabled="'+enabled+'">'+(enabled?'無効化':'有効化')+'</button>'
+        + '</td></tr>'
+        + '<tr class="schema-detail-row" data-detail-for="'+esc(label)+'" style="display:none">'
+        + '<td colspan="4" style="padding:6px 10px;border-bottom:1px solid #eee;background:#fafbff"></td></tr>';
+    }
+    html += '</tbody></table>';
+    wrap.innerHTML = html;
+    wrap.querySelectorAll('button[data-toggle-schema]').forEach(btn=>{
+      btn.addEventListener('click', ()=>doToggleSchema(btn.getAttribute('data-toggle-schema'), btn.getAttribute('data-enabled')==='true'));
+    });
+    wrap.querySelectorAll('button[data-describe-label]').forEach(btn=>{
+      btn.addEventListener('click', ()=>doDescribeLabel(btn.getAttribute('data-describe-label')));
+    });
+    wrap.querySelectorAll('button[data-validate-label]').forEach(btn=>{
+      btn.addEventListener('click', ()=>doValidateLabel(btn.getAttribute('data-validate-label')));
+    });
+  }catch(e){
+    wrap.innerHTML = '<div class="toggle-status">スキーマ一覧の取得に失敗しました</div>';
+  }
+}
+
+async function doToggleSchema(label, currentlyEnabled){
+  const sql = 'ALTER LABEL ' + label + ' ' + (currentlyEnabled ? 'DISABLE' : 'ENABLE') + ' SCHEMA';
+  try{
+    const data = await sqlRequest(sql);
+    if(data===null) return;
+    if(data.ok){
+      showToast((currentlyEnabled?'無効化':'有効化')+"しました: "+label,'success');
+      loadSchemas();
+    } else {
+      showToast(data.error || '切替に失敗しました','error');
+    }
+  }catch(e){
+    showToast('ネットワークエラー','error');
+  }
+}
+
+async function doDescribeLabel(label){
+  const row = document.querySelector('tr[data-detail-for="'+CSS.escape(label)+'"]');
+  if(!row) return;
+  const cell = row.querySelector('td');
+  if(row.style.display !== 'none'){ row.style.display = 'none'; return; }
+  cell.textContent = '読み込み中...';
+  row.style.display = '';
+  try{
+    const data = await sqlRequest('DESCRIBE label.' + label);
+    if(data===null) return;
+    if(!data.ok){ cell.textContent = data.error || '取得に失敗しました'; return; }
+    const cols = data.columns||[];
+    const bodyRows = data.rows||[];
+    let html = '<table style="width:100%;border-collapse:collapse;font-size:12px">'
+      + '<thead><tr>' + cols.map(c=>'<th style="text-align:left;padding:4px 8px;border-bottom:1px solid #ccd">'+esc(c)+'</th>').join('') + '</tr></thead><tbody>';
+    for(const r of bodyRows){
+      html += '<tr>' + r.map(v=>'<td style="padding:4px 8px;border-bottom:1px solid #eee">'+esc(v===null||v===undefined?'':String(v))+'</td>').join('') + '</tr>';
+    }
+    html += '</tbody></table>';
+    cell.innerHTML = html;
+  }catch(e){
+    cell.textContent = 'ネットワークエラー';
+  }
+}
+
+async function doValidateLabel(label){
+  try{
+    const data = await sqlRequest('VALIDATE LABEL ' + label);
+    if(data===null) return;
+    if(!data.ok){ showToast(data.error || '検証に失敗しました','error'); return; }
+    const rows = data.rows || [];
+    if(rows.length === 0){
+      showToast("ラベル '" + label + "' は現在のデータで違反はありません",'success');
+    } else {
+      alert("ラベル '" + label + "' の違反 (" + rows.length + " 件):\n" + rows.map(r=>r[0]).join('\n'));
+    }
+  }catch(e){
+    showToast('ネットワークエラー','error');
+  }
+}
+
 function showView(name){
   currentView = name;
   document.getElementById('viewRecords').style.display  = name==='records'  ? '' : 'none';
@@ -701,18 +900,44 @@ function renderDbInfo(d){
 // ---- Settings ----
 async function loadSettings(){
   const statusEl = document.getElementById('httpApiStatus');
+  const schemaStatusEl = document.getElementById('schemaEnforcementStatus');
   statusEl.textContent = '読み込み中...';
+  schemaStatusEl.textContent = '読み込み中...';
   try{
     const s = await api.get('/settings');
     document.getElementById('httpApiToggle').checked = !!s.http_api_enabled;
     statusEl.textContent = s.http_api_enabled
       ? 'HTTPリクエストは現在有効です。'
       : 'HTTPリクエストは現在無効です（SQLのみ利用可能）。';
+    document.getElementById('schemaEnforcementToggle').checked = !!s.schema_enforcement_enabled;
+    schemaStatusEl.textContent = s.schema_enforcement_enabled
+      ? 'スキーマ強制は現在有効です（各ラベルの設定に従います）。'
+      : 'スキーマ強制は現在全体で無効です（有効化したラベルも検証されません）。';
   }catch(e){
     statusEl.textContent = '設定の読み込みに失敗しました';
+    schemaStatusEl.textContent = '設定の読み込みに失敗しました';
     showToast('設定の読み込みに失敗しました','error');
   }
   loadUsers();
+  loadSchemas();
+}
+
+async function onSchemaEnforcementToggle(){
+  const checkbox = document.getElementById('schemaEnforcementToggle');
+  const statusEl = document.getElementById('schemaEnforcementStatus');
+  const enabled = checkbox.checked;
+  statusEl.textContent = '更新中...';
+  try{
+    const s = await api.put('/settings', {schema_enforcement_enabled: enabled});
+    statusEl.textContent = s.schema_enforcement_enabled
+      ? 'スキーマ強制は現在有効です（各ラベルの設定に従います）。'
+      : 'スキーマ強制は現在全体で無効です（有効化したラベルも検証されません）。';
+    showToast(s.schema_enforcement_enabled ? 'スキーマ強制を有効化しました' : 'スキーマ強制を無効化しました','success');
+  }catch(e){
+    checkbox.checked = !enabled;
+    statusEl.textContent = '更新に失敗しました';
+    showToast('設定の更新に失敗しました','error');
+  }
 }
 
 async function onHttpApiToggle(){

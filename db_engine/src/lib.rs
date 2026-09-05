@@ -67,6 +67,10 @@ pub enum DatabaseError {
     IndexAlreadyExists(String),
     /// そのカラムに二次インデックスが存在しない
     IndexNotFound(String),
+    /// 指定したラベル（またはラベル内の指定カラム）にスキーマ定義が存在しない
+    SchemaNotFound(String),
+    /// INSERT/UPDATE がスキーマ制約（型・NOT NULL・UNIQUE）に違反した
+    SchemaViolation(String),
 }
 
 impl std::fmt::Display for DatabaseError {
@@ -81,6 +85,10 @@ impl std::fmt::Display for DatabaseError {
                 write!(f, "Index on column '{}' already exists", col),
             DatabaseError::IndexNotFound(col) =>
                 write!(f, "Index on column '{}' does not exist", col),
+            DatabaseError::SchemaNotFound(what) =>
+                write!(f, "Schema not found: {}", what),
+            DatabaseError::SchemaViolation(msg) =>
+                write!(f, "Schema violation: {}", msg),
         }
     }
 }
@@ -150,6 +158,50 @@ fn secondary_index_remove(indexes: &mut HashMap<String, SecondaryIndex>, col: &s
     }
 }
 
+// ---------------------------------------------------------------------------
+// 任意スキーマ層（ALTER LABEL ... DEFINE COLUMN / ENABLE|DISABLE SCHEMA）
+// ---------------------------------------------------------------------------
+
+/// カラムに宣言できる型（`DataType` の NULL を除く4種に対応）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchemaType {
+    Text,
+    Integer,
+    Float,
+    Boolean,
+}
+
+/// 値が宣言された型に適合するか（`Integer` の値は `Float` 宣言にも適合させる。
+/// 桁落ちする逆方向＝`Float`の値を`Integer`宣言に、は適合させない）
+fn value_matches_type(v: &DataType, ty: SchemaType) -> bool {
+    matches!((v, ty),
+        (DataType::Text(_), SchemaType::Text)
+        | (DataType::Integer(_), SchemaType::Integer)
+        | (DataType::Float(_), SchemaType::Float)
+        | (DataType::Integer(_), SchemaType::Float)
+        | (DataType::Boolean(_), SchemaType::Boolean)
+    )
+}
+
+/// 1カラムぶんのスキーマ定義（`ALTER LABEL ... DEFINE COLUMN` 1回に対応）
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColumnSchema {
+    pub ty: SchemaType,
+    pub not_null: bool,
+    pub default: Option<DataType>,
+    pub unique: bool,
+}
+
+/// 1ラベルぶんのスキーマ（列挙したカラム定義 + 強制の有効/無効）。
+/// `enabled` の既定値は `false`：`DEFINE COLUMN` しただけでは強制されず、
+/// `ENABLE SCHEMA` して初めて INSERT/UPDATE で検証されるようになる
+/// （定義してすぐ強制されて既存データが壊れる、という事故を避けるため）。
+#[derive(Debug, Clone, Default)]
+struct LabelSchema {
+    columns: HashMap<String, ColumnSchema>,
+    enabled: bool,
+}
+
 /// DBエンジン本体
 pub struct Database {
     records: Vec<Option<Record>>,
@@ -159,6 +211,15 @@ pub struct Database {
     /// カラム名 → 二次インデックス（`CREATE INDEX` で作成。永続化はせず、
     /// 起動時に呼び出し側が定義を読み直して `create_index` で再構築する想定）
     secondary_indexes: HashMap<String, SecondaryIndex>,
+    /// ラベル名 → 任意スキーマ定義（同様に永続化はせず、呼び出し側が定義を読み直して
+    /// `define_column`/`enable_schema` で再構築する想定）
+    schemas: HashMap<String, LabelSchema>,
+    /// スキーマ強制の全体スイッチ（既定 `true`＝各ラベルの `enabled` 設定を尊重する）。
+    /// `false` にすると、個々のラベルの `ENABLE SCHEMA` 状態に関わらず一時的に全ての
+    /// スキーマ検証を止められる（大量バックフィル時の緊急退避用）。サーバー再起動のたびに
+    /// `true` へ戻り、意図せず無効なままになることを防ぐ（`.kdb`/JSON・サイドカーどちらにも
+    /// 永続化しない）。
+    schema_enforcement_enabled: bool,
 }
 
 impl Database {
@@ -169,6 +230,8 @@ impl Database {
             store: ColumnStore::new(),
             next_id: 1,
             secondary_indexes: HashMap::new(),
+            schemas: HashMap::new(),
+            schema_enforcement_enabled: true,
         }
     }
 
@@ -183,6 +246,8 @@ impl Database {
         if let Some(dup) = find_duplicate_label(&record.labels) {
             return Err(DatabaseError::DuplicateLabel(dup.clone()));
         }
+        self.apply_schema(&mut record)?;
+        self.check_unique_constraints(&record, None)?;
         if record.id == 0 {
             record.id = self.allocate_id();
         } else if self.id_to_index.contains_key(&record.id) {
@@ -245,9 +310,11 @@ impl Database {
     }
 
     /// UPDATE: 指定IDのレコードを更新する
-    pub fn update(&mut self, id: u64, new_record: Record) -> Result<(), DatabaseError> {
+    pub fn update(&mut self, id: u64, mut new_record: Record) -> Result<(), DatabaseError> {
         let &row_idx = self.id_to_index.get(&id)
             .ok_or(DatabaseError::RecordNotFound(id))?;
+        self.apply_schema(&mut new_record)?;
+        self.check_unique_constraints(&new_record, Some(id))?;
 
         let old_labels: Vec<String> = self.records[row_idx].as_ref()
             .map(|r| r.labels.clone())
@@ -471,6 +538,199 @@ impl Database {
         let indices: &[usize] = index.entries.get(&key).map(|v| v.as_slice()).unwrap_or(&[]);
         Some(indices.iter().filter_map(|&i| self.records.get(i).and_then(|r| r.as_ref())).collect())
     }
+
+    // -----------------------------------------------------------------
+    // 任意スキーマ層（ALTER LABEL ... DEFINE COLUMN / ENABLE|DISABLE SCHEMA）
+    // -----------------------------------------------------------------
+
+    /// `label` の `column` にスキーマを定義する（既存の定義は上書きする）。
+    /// `unique: true` の場合、まだ二次インデックスが無ければ自動的に作成する
+    /// （UNIQUE 制約のチェックを O(1) に近い速度で行うため。既存のインデックスが
+    /// あればそれをそのまま流用する）。定義しただけではまだ強制されない
+    /// （`enable_schema` するまで、そのラベルは今までどおりスキーマレスのまま）。
+    pub fn define_column(&mut self, label: &str, column: &str, schema: ColumnSchema) -> Result<(), DatabaseError> {
+        if schema.unique && !self.has_index(column) {
+            self.create_index(column)?;
+        }
+        self.schemas.entry(label.to_string()).or_default()
+            .columns.insert(column.to_string(), schema);
+        Ok(())
+    }
+
+    /// `label` の `column` のスキーマ定義を削除する（データそのもの・自動作成された
+    /// 二次インデックスは削除しない）。定義が存在しない場合はエラー。
+    pub fn drop_column_schema(&mut self, label: &str, column: &str) -> Result<(), DatabaseError> {
+        let schema = self.schemas.get_mut(label)
+            .ok_or_else(|| DatabaseError::SchemaNotFound(label.to_string()))?;
+        if schema.columns.remove(column).is_none() {
+            return Err(DatabaseError::SchemaNotFound(format!("{}.{}", label, column)));
+        }
+        Ok(())
+    }
+
+    /// `label` のスキーマ強制を有効化する（スキーマが未定義でも空のスキーマとして
+    /// 有効化できる。既存データの整合性は自動チェックしない。事前に `validate_label`
+    /// で確認しておくことを推奨する）。
+    pub fn enable_schema(&mut self, label: &str) {
+        self.schemas.entry(label.to_string()).or_default().enabled = true;
+    }
+
+    /// `label` のスキーマ強制を無効化する（定義自体は保持したまま、検証だけ止める）。
+    pub fn disable_schema(&mut self, label: &str) {
+        self.schemas.entry(label.to_string()).or_default().enabled = false;
+    }
+
+    /// `label` のスキーマ定義を取得する（`(強制が有効か, カラム名でソートしたカラム定義一覧)`）。
+    /// スキーマが未定義（一度も `define_column`/`enable_schema` していない）なら `None`。
+    pub fn describe_label(&self, label: &str) -> Option<(bool, Vec<(String, ColumnSchema)>)> {
+        let schema = self.schemas.get(label)?;
+        let mut cols: Vec<(String, ColumnSchema)> = schema.columns.iter()
+            .map(|(k, v)| (k.clone(), v.clone())).collect();
+        cols.sort_by(|a, b| a.0.cmp(&b.0));
+        Some((schema.enabled, cols))
+    }
+
+    /// スキーマが定義されているラベル名の一覧（ソート済み）
+    pub fn list_schema_labels(&self) -> Vec<String> {
+        let mut labels: Vec<String> = self.schemas.keys().cloned().collect();
+        labels.sort();
+        labels
+    }
+
+    /// `label` の現在のデータが、定義済みスキーマ（強制が無効でも定義があれば対象）に
+    /// 違反していないかを確認する。違反があれば1件ごとに説明文を返す（空なら違反なし）。
+    /// `ENABLE SCHEMA` する前の事前確認に使う想定で、これ自体は何も変更しない。
+    pub fn validate_label(&self, label: &str) -> Vec<String> {
+        let Some(schema) = self.schemas.get(label) else { return Vec::new(); };
+        let mut violations = Vec::new();
+        for record in self.get_by_label(label) {
+            for (col, def) in &schema.columns {
+                match record.columns.get(col) {
+                    None => {
+                        // DEFAULT はこれから INSERT する行にのみ適用され、既存データを遡って
+                        // 埋めるわけではないため、DEFAULT の有無に関わらず現状を報告する。
+                        if def.not_null {
+                            violations.push(format!("record id={}: column '{}' is missing (NOT NULL)", record.id, col));
+                        }
+                    }
+                    Some(DataType::Null) => {
+                        if def.not_null {
+                            violations.push(format!("record id={}: column '{}' is NULL (NOT NULL)", record.id, col));
+                        }
+                    }
+                    Some(v) => {
+                        if !value_matches_type(v, def.ty) {
+                            violations.push(format!(
+                                "record id={}: column '{}' has type {:?}, expected {:?}", record.id, col, v, def.ty
+                            ));
+                        }
+                    }
+                }
+            }
+            if let Some(dups) = self.unique_conflicts(label, record, schema) {
+                violations.extend(dups);
+            }
+        }
+        violations
+    }
+
+    /// `record` が `schema` の UNIQUE 制約に違反していないかを、同じラベルを持つ
+    /// 他のレコードと比較して確認する（`validate_label` 専用の内部ヘルパー）。
+    fn unique_conflicts(&self, label: &str, record: &Record, schema: &LabelSchema) -> Option<Vec<String>> {
+        let mut out = Vec::new();
+        for (col, def) in &schema.columns {
+            if !def.unique { continue; }
+            let Some(val) = record.columns.get(col) else { continue; };
+            if matches!(val, DataType::Null) { continue; }
+            let conflict = self.get_by_index(col, val)
+                .unwrap_or_default()
+                .iter()
+                .any(|r| r.id != record.id && r.labels.iter().any(|l| l == label));
+            if conflict {
+                out.push(format!("record id={}: column '{}' value is not unique", record.id, col));
+            }
+        }
+        if out.is_empty() { None } else { Some(out) }
+    }
+
+    /// スキーマ強制の全体スイッチを設定する（`false` で全ラベルの検証を一時停止）
+    pub fn set_schema_enforcement_enabled(&mut self, enabled: bool) {
+        self.schema_enforcement_enabled = enabled;
+    }
+
+    /// スキーマ強制の全体スイッチが有効か
+    pub fn is_schema_enforcement_enabled(&self) -> bool {
+        self.schema_enforcement_enabled
+    }
+
+    /// INSERT/UPDATE の前段でスキーマを適用する: `DEFAULT` の補完と、型・NOT NULL の検証を行う。
+    /// 強制が無効（全体スイッチ OFF、またはそのラベルが未定義／`DISABLE SCHEMA`）なラベルは
+    /// 素通りする。スキーマが1件も定義されていなければ即座に抜ける（無関係なクエリへの
+    /// オーバーヘッドをゼロに近づけるため）。
+    fn apply_schema(&self, record: &mut Record) -> Result<(), DatabaseError> {
+        if !self.schema_enforcement_enabled || self.schemas.is_empty() { return Ok(()); }
+        let labels = record.labels.clone();
+        for label in &labels {
+            let Some(schema) = self.schemas.get(label) else { continue; };
+            if !schema.enabled { continue; }
+            for (col, def) in &schema.columns {
+                match record.columns.get(col) {
+                    None => {
+                        if let Some(default) = &def.default {
+                            record.columns.insert(col.clone(), default.clone());
+                        } else if def.not_null {
+                            return Err(DatabaseError::SchemaViolation(format!(
+                                "label '{}': column '{}' is required (NOT NULL)", label, col
+                            )));
+                        }
+                    }
+                    Some(DataType::Null) => {
+                        if def.not_null {
+                            return Err(DatabaseError::SchemaViolation(format!(
+                                "label '{}': column '{}' cannot be NULL", label, col
+                            )));
+                        }
+                    }
+                    Some(v) => {
+                        if !value_matches_type(v, def.ty) {
+                            return Err(DatabaseError::SchemaViolation(format!(
+                                "label '{}': column '{}' expects type {:?}, got '{}'", label, col, def.ty, v
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// INSERT/UPDATE の前段で UNIQUE 制約を検証する（`apply_schema` で DEFAULT 補完済みの
+    /// `record` に対して行う）。`exclude_id` は UPDATE で自分自身を重複扱いしないために使う。
+    fn check_unique_constraints(&self, record: &Record, exclude_id: Option<u64>) -> Result<(), DatabaseError> {
+        if !self.schema_enforcement_enabled || self.schemas.is_empty() { return Ok(()); }
+        for label in &record.labels {
+            let Some(schema) = self.schemas.get(label) else { continue; };
+            if !schema.enabled { continue; }
+            for (col, def) in &schema.columns {
+                if !def.unique { continue; }
+                let Some(val) = record.columns.get(col) else { continue; };
+                if matches!(val, DataType::Null) { continue; }
+                let conflict = match self.get_by_index(col, val) {
+                    Some(hits) => hits.iter().any(|r| Some(r.id) != exclude_id && r.labels.iter().any(|l| l == label)),
+                    // UNIQUE 指定時に自動でインデックスを作るため通常はここに来ないが、
+                    // 保険として全件走査でも確認する
+                    None => self.records.iter().filter_map(|r| r.as_ref())
+                        .any(|r| Some(r.id) != exclude_id && r.labels.iter().any(|l| l == label) && r.columns.get(col) == Some(val)),
+                };
+                if conflict {
+                    return Err(DatabaseError::SchemaViolation(format!(
+                        "label '{}': column '{}' must be unique, value already exists", label, col
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Default for Database {
@@ -663,6 +923,8 @@ impl Database {
         if let Some(dup) = find_duplicate_label(&record.labels) {
             return Err(DatabaseError::DuplicateLabel(dup.clone()));
         }
+        self.apply_schema(&mut record)?;
+        self.check_unique_constraints(&record, None)?;
         // ID採番
         if record.id == 0 {
             record.id = self.next_id;

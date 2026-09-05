@@ -12,6 +12,7 @@ use crate::auth::Privilege;
 use crate::auth_handlers::{resolve_actor, resolve_actor_readonly};
 use crate::handlers::{auto_save, AppState};
 use crate::index_sql::{execute_index_statement, parse_index_statement, save_index_definitions, IndexSqlOutcome};
+use crate::schema_sql::{execute_schema_statement, parse_schema_statement, save_schema_definitions, SchemaSqlOutcome};
 use crate::user_sql::{execute_user_statement, parse_user_statement, UserSqlOutcome};
 use sql_engine::{run_select, run_insert_fast, run_update, run_delete, run_explain, CellValue};
 
@@ -215,6 +216,57 @@ pub async fn execute_sql(
                 (StatusCode::OK, Json(SqlQueryResponse::acknowledged(query)))
             }
             IndexSqlOutcome::Err { status, message } => {
+                inner.logger.sql_query(&query, false, started.elapsed().as_millis(), Some(&message));
+                let code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_REQUEST);
+                (code, Json(SqlQueryResponse::error(query, message)))
+            }
+        };
+    }
+
+    // 任意スキーマ層（ALTER LABEL ... DEFINE COLUMN / ENABLE|DISABLE SCHEMA / DESCRIBE /
+    // SHOW SCHEMAS / VALIDATE LABEL）も CREATE USER・CREATE INDEX と同様に MANAGE_USERS 権限
+    // が必要な管理操作。定義（カラム名一覧）だけをサイドカーファイルへ保存し、
+    // `.kdb`/JSON 本体のフォーマットは変更しない。
+    if let Some(parsed) = parse_schema_statement(&query) {
+        let started = std::time::Instant::now();
+        let mut inner = state.write().await;
+        let stmt = match parsed {
+            Ok(s) => s,
+            Err(e) => {
+                inner.logger.sql_query(&query, false, started.elapsed().as_millis(), Some(&e));
+                return (StatusCode::BAD_REQUEST, Json(SqlQueryResponse::error(query, e)));
+            }
+        };
+        let Some(actor) = resolve_actor(&mut inner, &headers) else {
+            let msg = "認証が必要です。/auth/login でログインしてください。";
+            inner.logger.sql_query(&query, false, started.elapsed().as_millis(), Some(msg));
+            return (StatusCode::UNAUTHORIZED, Json(SqlQueryResponse::error(query, msg)));
+        };
+        if !inner.auth.can_manage_users(&actor) {
+            let msg = "この操作には MANAGE_USERS 権限が必要です。管理者に依頼してください。";
+            inner.logger.sql_query(&query, false, started.elapsed().as_millis(), Some(msg));
+            return (StatusCode::FORBIDDEN, Json(SqlQueryResponse::error(query, msg)));
+        }
+        let outcome = execute_schema_statement(inner.mgr.db_mut(), stmt);
+        // DEFINE/DROP COLUMN・ENABLE/DISABLE SCHEMA が成功した場合だけ、
+        // 定義をサイドカーファイルへ保存する（DESCRIBE/SHOW/VALIDATE は読み取り専用）
+        if matches!(outcome, SchemaSqlOutcome::Ok { .. }) {
+            let db_path = inner.db_path.clone();
+            if let Err(e) = save_schema_definitions(&db_path, inner.mgr.db()) {
+                inner.logger.db_info(format!("スキーマ定義の保存に失敗しました: {}", e));
+            }
+        }
+        return match outcome {
+            SchemaSqlOutcome::Rows { columns, rows } => {
+                inner.logger.sql_query(&query, true, started.elapsed().as_millis(), None);
+                (StatusCode::OK, Json(SqlQueryResponse::rows(query, columns, rows)))
+            }
+            SchemaSqlOutcome::Ok { message } => {
+                inner.logger.db_info(format!("schema-mgmt by '{}': {} | query={}", actor, message, query));
+                inner.logger.sql_query(&query, true, started.elapsed().as_millis(), None);
+                (StatusCode::OK, Json(SqlQueryResponse::acknowledged(query)))
+            }
+            SchemaSqlOutcome::Err { status, message } => {
                 inner.logger.sql_query(&query, false, started.elapsed().as_millis(), Some(&message));
                 let code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_REQUEST);
                 (code, Json(SqlQueryResponse::error(query, message)))
@@ -430,6 +482,6 @@ pub async fn execute_sql(
         inner.logger.sql_query(&query, false, 0, Some("unsupported statement"));
     }
     (StatusCode::BAD_REQUEST, Json(SqlQueryResponse::error(
-        query, "Only SELECT, INSERT, UPDATE, DELETE, EXPLAIN, and index/user management statements are supported in this version.",
+        query, "Only SELECT, INSERT, UPDATE, DELETE, EXPLAIN, and index/user/schema management statements are supported in this version.",
     )))
 }
