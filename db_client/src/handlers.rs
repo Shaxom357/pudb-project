@@ -34,17 +34,21 @@ pub type AppState = Arc<RwLock<AppStateInner>>;
 
 pub(crate) fn auto_save(state: &mut AppStateInner) {
     if let Some(kdb) = state.kdb.as_mut() {
-        let records: Vec<Record> = state.mgr.db().list_all().into_iter().cloned().collect();
+        let records: Vec<Record> = state.mgr.db().list_all();
         let next_id = state.mgr.db().next_id();
-        if let Err(e) = kdb.compact(&records, next_id) {
-            eprintln!("[WARN] KDB compact failed: {}", e);
-            if let KdbError::Io(io_err) = &e {
-                state.logger.db_io_error("KDB compact failed", io_err);
-            } else {
-                state.logger.db_warn(format!("KDB compact failed: {}", e));
+        match kdb.compact(&records, next_id) {
+            Ok(offsets) => {
+                state.mgr.db_mut().sync_record_offsets(&records, &offsets);
+                state.logger.db_info(format!("KDB saved to '{}' ({} record(s))", state.db_path, records.len()));
             }
-        } else {
-            state.logger.db_info(format!("KDB saved to '{}' ({} record(s))", state.db_path, records.len()));
+            Err(e) => {
+                eprintln!("[WARN] KDB compact failed: {}", e);
+                if let KdbError::Io(io_err) = &e {
+                    state.logger.db_io_error("KDB compact failed", io_err);
+                } else {
+                    state.logger.db_warn(format!("KDB compact failed: {}", e));
+                }
+            }
         }
     } else if let Err(e) = state.mgr.db().save(&state.db_path) {
         eprintln!("[WARN] Failed to save DB: {}", e);
@@ -69,7 +73,7 @@ pub async fn get_record(State(state): State<AppState>, Path(id): Path<u64>) -> i
     let inner = state.read().await;
     match inner.mgr.db().get(id) {
         Ok(record) => (StatusCode::OK,
-            Json(serde_json::to_value(RecordResponse::from_record(record)).unwrap())),
+            Json(serde_json::to_value(RecordResponse::from_record(&record)).unwrap())),
         Err(e) => (StatusCode::NOT_FOUND,
             Json(serde_json::to_value(ErrorResponse::new(e.to_string())).unwrap())),
     }
@@ -101,7 +105,7 @@ pub async fn create_record(
     };
     match id_result {
         Ok(id) => {
-            let response = RecordResponse::from_record(inner.mgr.db().get(id).unwrap());
+            let response = RecordResponse::from_record(&inner.mgr.db().get(id).unwrap());
             if inner.kdb.is_none() { auto_save(&mut inner); }
             inner.logger.db_info(format!("record created id={}", id));
             (StatusCode::CREATED, Json(serde_json::to_value(response).unwrap()))
@@ -125,7 +129,7 @@ pub async fn update_record(
     let mut inner = state.write().await;
     match inner.mgr.db_mut().update(id, new_record) {
         Ok(()) => {
-            let response = RecordResponse::from_record(inner.mgr.db().get(id).unwrap());
+            let response = RecordResponse::from_record(&inner.mgr.db().get(id).unwrap());
             auto_save(&mut inner);
             inner.logger.db_info(format!("record updated id={}", id));
             (StatusCode::OK, Json(serde_json::to_value(response).unwrap()))

@@ -108,7 +108,7 @@ pub async fn search_by_labels(
     };
     let records: Vec<RecordResponse> = ids.iter()
         .filter_map(|&id| inner.mgr.db().get(id).ok())
-        .map(RecordResponse::from_record)
+        .map(|r| RecordResponse::from_record(&r))
         .collect();
     let response = LabelSearchResponse {
         mode: payload.mode.unwrap_or_else(|| "and".to_string()),

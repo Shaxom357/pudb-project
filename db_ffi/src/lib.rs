@@ -137,7 +137,7 @@ pub extern "C" fn db_insert(ptr: *mut Database, json: *const c_char) -> u64 {
 pub extern "C" fn db_get(ptr: *mut Database, id: u64) -> *mut c_char {
     if ptr.is_null() { return std::ptr::null_mut(); }
     match unsafe { (*ptr).get(id) } {
-        Ok(record) => to_c_string(record_to_json(record).to_string()),
+        Ok(record) => to_c_string(record_to_json(&record).to_string()),
         Err(_)     => std::ptr::null_mut(),
     }
 }
