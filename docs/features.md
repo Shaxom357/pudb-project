@@ -45,8 +45,11 @@
 - ✅ `ORDER BY col [ASC|DESC]`（複数カラム対応。`SELECT ... AS alias` で付けた別名でも指定可能）
 - ✅ `LIMIT n` / `LIMIT n OFFSET m` / `OFFSET m` 単独指定（ページング）
 - ✅ カラム指定 `SELECT col1, col2 FROM ...`、`AS` によるカラムの別名指定
+- ✅ `SELECT DISTINCT col1, col2, ...`（出力行の重複排除）
+- ✅ 集計関数 `COUNT(*)` / `COUNT(col)` / `SUM(col)` / `AVG(col)` / `MIN(col)` / `MAX(col)`
+- ✅ `GROUP BY col1, col2, ...`（省略時は集計関数を全件で1グループとして計算）・`HAVING <条件>`
 - ✅ 大文字小文字無視・セミコロン対応
-- ✅ `SELECT *` は `id` 列を先頭、`labels` 列（カンマ区切り）を末尾に付与して返す
+- ✅ `SELECT *` は `id` 列を先頭、`labels` 列（カンマ区切り）を末尾に付与して返す（`GROUP BY`/`HAVING` とは組み合わせ不可）
 - ✅ 独自拡張 SQL `INSERT INTO (label.xxx) VALUE (...)` 構文
 - ✅ `INSERT INTO (label.a, label.b) VALUE (...)`（複数ラベルへの同時付与）
 - ✅ `INTO (label.xxx) (col1, col2, ...)` によるカラム順の明示指定（省略時は既存カラムのソート順に対応）
