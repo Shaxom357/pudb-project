@@ -10,7 +10,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use crate::auth::Privilege;
 use crate::auth_handlers::{resolve_actor, resolve_actor_readonly};
-use crate::handlers::{auto_save, AppState};
+use crate::bootstrap::reload_database;
+use crate::handlers::{auto_save, expire_stale_transaction, AppState, AppStateInner, TxnMeta};
+use dynamic_label_management::LabelManager;
 use crate::index_sql::{execute_index_statement, parse_index_statement, save_index_definitions, IndexSqlOutcome};
 use crate::schema_sql::{execute_schema_statement, parse_schema_statement, save_schema_definitions, SchemaSqlOutcome};
 use crate::user_sql::{execute_user_statement, parse_user_statement, UserSqlOutcome};
@@ -109,6 +111,66 @@ impl SqlQueryResponse {
     }
 }
 
+/// トランザクション実行中の書き込み文（INSERT/UPDATE/DELETE）のガード。
+/// - トランザクション無し → `Ok(false)`（通常どおり即時永続化する）
+/// - 自分（`actor`）のトランザクション中 → `Ok(true)`（永続化を COMMIT まで遅延する）
+/// - 他ユーザーのトランザクション中 → `Err(409)`
+fn txn_write_check(
+    inner: &AppStateInner,
+    actor: &str,
+    query: &str,
+) -> Result<bool, (StatusCode, Json<SqlQueryResponse>)> {
+    match &inner.active_txn {
+        None => Ok(false),
+        Some(txn) if txn.owner == actor => Ok(true),
+        Some(txn) => Err((
+            StatusCode::CONFLICT,
+            Json(SqlQueryResponse::error(
+                query.to_string(),
+                format!(
+                    "別のユーザー（{}）がトランザクションを実行中です。完了までお待ちください。",
+                    txn.owner
+                ),
+            )),
+        )),
+    }
+}
+
+/// 進行中トランザクションの「最終操作時刻」を更新する（無操作タイムアウトの起点をずらす）。
+fn touch_txn(inner: &AppStateInner) {
+    if let Some(txn) = &inner.active_txn {
+        if let Ok(mut t) = txn.last_activity.lock() {
+            *t = std::time::Instant::now();
+        }
+    }
+}
+
+/// DDL 系（ユーザー管理／インデックス管理／スキーマ管理）をトランザクション中に拒否する。
+fn reject_ddl_in_txn(inner: &AppStateInner, query: &str) -> Option<(StatusCode, Json<SqlQueryResponse>)> {
+    if inner.active_txn.is_some() {
+        Some((
+            StatusCode::CONFLICT,
+            Json(SqlQueryResponse::error(
+                query.to_string(),
+                "トランザクション中は DDL（ユーザー管理／インデックス管理／スキーマ管理）を実行できません。COMMIT または ROLLBACK してください。",
+            )),
+        ))
+    } else {
+        None
+    }
+}
+
+fn status_response(query: String, message: &str) -> (StatusCode, Json<SqlQueryResponse>) {
+    (
+        StatusCode::OK,
+        Json(SqlQueryResponse::rows(
+            query,
+            vec!["status".to_string()],
+            vec![vec![serde_json::Value::String(message.to_string())]],
+        )),
+    )
+}
+
 fn cell_to_json(cell: &CellValue) -> serde_json::Value {
     match cell {
         CellValue::Text(s)    => serde_json::Value::String(s.clone()),
@@ -138,6 +200,8 @@ pub async fn execute_sql(
     if let Some(parsed) = parse_user_statement(&query) {
         let started = std::time::Instant::now();
         let mut inner = state.write().await;
+        expire_stale_transaction(&mut inner);
+        if let Some(resp) = reject_ddl_in_txn(&inner, &query) { return resp; }
         let stmt = match parsed {
             Ok(s) => s,
             Err(e) => {
@@ -180,6 +244,8 @@ pub async fn execute_sql(
     if let Some(parsed) = parse_index_statement(&query) {
         let started = std::time::Instant::now();
         let mut inner = state.write().await;
+        expire_stale_transaction(&mut inner);
+        if let Some(resp) = reject_ddl_in_txn(&inner, &query) { return resp; }
         let stmt = match parsed {
             Ok(s) => s,
             Err(e) => {
@@ -230,6 +296,8 @@ pub async fn execute_sql(
     if let Some(parsed) = parse_schema_statement(&query) {
         let started = std::time::Instant::now();
         let mut inner = state.write().await;
+        expire_stale_transaction(&mut inner);
+        if let Some(resp) = reject_ddl_in_txn(&inner, &query) { return resp; }
         let stmt = match parsed {
             Ok(s) => s,
             Err(e) => {
@@ -272,6 +340,82 @@ pub async fn execute_sql(
                 (code, Json(SqlQueryResponse::error(query, message)))
             }
         };
+    }
+
+    // トランザクション制御（BEGIN / BEGIN TRANSACTION / START TRANSACTION / COMMIT / ROLLBACK）。
+    // 同時に開けるトランザクションは1つだけ（先着のログインユーザーが所有者になる）。
+    {
+        let normalized = query.trim().trim_end_matches(';').trim_end().to_uppercase();
+        let is_begin = matches!(normalized.as_str(), "BEGIN" | "BEGIN TRANSACTION" | "START TRANSACTION");
+        let is_commit = normalized == "COMMIT";
+        let is_rollback = normalized == "ROLLBACK";
+        if is_begin || is_commit || is_rollback {
+            let started = std::time::Instant::now();
+            let mut inner = state.write().await;
+            let Some(actor) = resolve_actor(&mut inner, &headers) else {
+                let msg = "認証が必要です。/auth/login でログインしてください。";
+                return (StatusCode::UNAUTHORIZED, Json(SqlQueryResponse::error(query, msg)));
+            };
+
+            if is_begin {
+                expire_stale_transaction(&mut inner);
+                if let Some(txn) = &inner.active_txn {
+                    let msg = format!(
+                        "既にトランザクションが実行中です（owner: {}）。先に COMMIT または ROLLBACK してください。",
+                        txn.owner
+                    );
+                    return (StatusCode::CONFLICT, Json(SqlQueryResponse::error(query, msg)));
+                }
+                inner.mgr.db_mut().begin_transaction();
+                inner.active_txn = Some(TxnMeta {
+                    owner: actor.clone(),
+                    last_activity: std::sync::Mutex::new(std::time::Instant::now()),
+                });
+                inner.logger.sql_query(&query, true, started.elapsed().as_millis(), None);
+                return status_response(query, "トランザクションを開始しました（COMMIT / ROLLBACK で終了）");
+            }
+
+            // COMMIT / ROLLBACK: 所有者チェック
+            let owner = inner.active_txn.as_ref().map(|t| t.owner.clone());
+            match owner {
+                None => {
+                    return (StatusCode::BAD_REQUEST, Json(SqlQueryResponse::error(query, "実行中のトランザクションがありません。")));
+                }
+                Some(o) if o != actor => {
+                    let msg = format!("このトランザクションは別のユーザー（{}）が開始したものです。", o);
+                    return (StatusCode::CONFLICT, Json(SqlQueryResponse::error(query, msg)));
+                }
+                Some(_) => {}
+            }
+
+            if is_commit {
+                // compact で一括永続化 → オフセット再同期 → トランザクション終了（追い出し再開）
+                auto_save(&mut inner);
+                inner.mgr.db_mut().end_transaction();
+                inner.active_txn = None;
+                inner.logger.sql_query(&query, true, started.elapsed().as_millis(), None);
+                return status_response(query, "コミットしました");
+            }
+
+            // ROLLBACK: トランザクション中は .kdb/JSON を一切書き換えていないので、
+            // ディスクから読み直すだけで開始前の状態に戻せる。
+            let db_path = inner.db_path.clone();
+            match reload_database(&db_path) {
+                Ok(db) => {
+                    inner.mgr = LabelManager::from_db(db);
+                    inner.active_txn = None;
+                    inner.logger.sql_query(&query, true, started.elapsed().as_millis(), None);
+                    return status_response(query, "ロールバックしました");
+                }
+                Err(e) => {
+                    inner.logger.db_warn(format!("rollback reload failed: {}", e));
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(SqlQueryResponse::error(query, format!("ロールバックに失敗しました: {}", e))),
+                    );
+                }
+            }
+        }
     }
 
     // 現時点では SELECT / INSERT / UPDATE / DELETE / EXPLAIN のみサポート
@@ -331,6 +475,13 @@ pub async fn execute_sql(
     if trimmed.starts_with("SELECT") {
         let started = std::time::Instant::now();
         let inner = state.read().await;
+        // 自分のトランザクション中の SELECT なら無操作タイムアウトの起点を更新する
+        // （read ロックのままでも last_activity は内部可変な Mutex なので更新できる）
+        if let Some(actor) = resolve_actor_readonly(&inner, &headers) {
+            if inner.active_txn.as_ref().map(|t| t.owner == actor).unwrap_or(false) {
+                touch_txn(&inner);
+            }
+        }
         let db = inner.mgr.db();
 
         return match run_select(db, &query) {
@@ -366,19 +517,30 @@ pub async fn execute_sql(
     if trimmed.starts_with("INSERT") {
         let started = std::time::Instant::now();
         let mut inner = state.write().await;
+        expire_stale_transaction(&mut inner);
+        let actor = resolve_actor_readonly(&inner, &headers).unwrap_or_default();
+        let in_txn = match txn_write_check(&inner, &actor, &query) {
+            Ok(v) => v,
+            Err(resp) => return resp,
+        };
         // kdb モード: WAL 追記(insert_fast, O(1)) / JSON モード: 通常insert
-        // Rustの借用チェッカー対策: kdb と mgr を別々に取り出す（handlers::create_recordと同じパターン）
+        // Rustの借用チェッカー対策: kdb と mgr を別々に取り出す（handlers::create_recordと同じパターン）。
+        // トランザクション中は .kdb へ書かず（kdb ハンドルを渡さない）、COMMIT 時にまとめて永続化する。
         let insert_result = {
-            let mut kdb_taken = inner.kdb.take();
+            let mut kdb_taken = if in_txn { None } else { inner.kdb.take() };
             let result = run_insert_fast(inner.mgr.db_mut(), kdb_taken.as_mut(), &query);
-            inner.kdb = kdb_taken;
+            if !in_txn { inner.kdb = kdb_taken; }
             result
         };
 
         return match insert_result {
             Ok(result) => {
-                // kdb モードは insert_fast が WAL 追記済みなのでコンパクション不要。JSON モードのみ保存する。
-                if inner.kdb.is_none() { auto_save(&mut inner); }
+                if in_txn {
+                    touch_txn(&inner);
+                } else if inner.kdb.is_none() {
+                    // JSON モードのみ即時保存（kdb モードは insert_fast が WAL 追記済み）
+                    auto_save(&mut inner);
+                }
                 inner.logger.sql_query(&query, true, started.elapsed().as_millis(), None);
                 // 挿入後のレコードを読み直し、使用したカラム順に値を並べて返す
                 let record = inner.mgr.db().get(result.id).unwrap();
@@ -414,12 +576,19 @@ pub async fn execute_sql(
     if trimmed.starts_with("UPDATE") {
         let started = std::time::Instant::now();
         let mut inner = state.write().await;
+        expire_stale_transaction(&mut inner);
+        let actor = resolve_actor_readonly(&inner, &headers).unwrap_or_default();
+        let in_txn = match txn_write_check(&inner, &actor, &query) {
+            Ok(v) => v,
+            Err(resp) => return resp,
+        };
         let update_result = run_update(inner.mgr.db_mut(), &query);
 
         return match update_result {
             Ok(result) => {
-                // UPDATE/DELETE後はコンパクションが必要（kdbモードは全件書き直し、JSONモードは通常保存）
-                auto_save(&mut inner);
+                // UPDATE/DELETE後はコンパクションが必要（kdbモードは全件書き直し、JSONモードは通常保存）。
+                // トランザクション中は遅延し、COMMIT 時にまとめて永続化する。
+                if in_txn { touch_txn(&inner); } else { auto_save(&mut inner); }
                 inner.logger.sql_query(&query, true, started.elapsed().as_millis(), None);
                 (StatusCode::OK, Json(SqlQueryResponse {
                     ok: true,
@@ -447,12 +616,19 @@ pub async fn execute_sql(
     if trimmed.starts_with("DELETE") {
         let started = std::time::Instant::now();
         let mut inner = state.write().await;
+        expire_stale_transaction(&mut inner);
+        let actor = resolve_actor_readonly(&inner, &headers).unwrap_or_default();
+        let in_txn = match txn_write_check(&inner, &actor, &query) {
+            Ok(v) => v,
+            Err(resp) => return resp,
+        };
         let delete_result = run_delete(inner.mgr.db_mut(), &query);
 
         return match delete_result {
             Ok(result) => {
-                // UPDATE/DELETE後はコンパクションが必要（kdbモードは全件書き直し、JSONモードは通常保存）
-                auto_save(&mut inner);
+                // UPDATE/DELETE後はコンパクションが必要（kdbモードは全件書き直し、JSONモードは通常保存）。
+                // トランザクション中は遅延し、COMMIT 時にまとめて永続化する。
+                if in_txn { touch_txn(&inner); } else { auto_save(&mut inner); }
                 inner.logger.sql_query(&query, true, started.elapsed().as_millis(), None);
                 (StatusCode::OK, Json(SqlQueryResponse {
                     ok: true,

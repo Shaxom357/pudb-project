@@ -176,6 +176,7 @@ pub fn build_app(mgr: LabelManager, db_path: String) -> (Router, AppState) {
     let state: AppState = Arc::new(RwLock::new(AppStateInner {
         mgr, db_path, kdb: None, http_api_enabled: true, logger,
         auth: AuthState::bypass_for_tests(),
+        active_txn: None,
     }));
     let router = build_router(state.clone());
     (router, state)

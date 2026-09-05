@@ -324,6 +324,12 @@ pub struct Database {
     loaded: Vec<bool>,
     /// オンメモリ容量制限モードのキャッシュ状態（内部可変）
     mem: Mutex<MemCache>,
+    /// トランザクション実行中フラグ（`BEGIN`〜`COMMIT`/`ROLLBACK`）。`true` の間は、
+    /// まだ `.kdb` に永続化されていない行が容量制限で追い出されて失われないよう、
+    /// メモリからの追い出しを一切行わない（トランザクションのワークセットはRAMに収まる前提）。
+    /// トランザクション制御・分離・永続化の遅延・ロールバック（`.kdb` からの再ロード）は
+    /// 呼び出し側（`db_client`）が行う。
+    txn_active: bool,
 }
 
 impl Database {
@@ -342,7 +348,29 @@ impl Database {
             memory_policy: MemoryPolicy::default(),
             loaded: Vec::new(),
             mem: Mutex::new(MemCache::default()),
+            txn_active: false,
         }
+    }
+
+    /// トランザクション開始を通知する（容量制限モードでの追い出しを止める）。
+    pub fn begin_transaction(&mut self) {
+        self.txn_active = true;
+    }
+
+    /// トランザクション終了を通知する（`COMMIT` で永続化を済ませた後に呼ぶ）。
+    /// 止めていたメモリの追い出しを再開し、上限まで削り直す。
+    pub fn end_transaction(&mut self) {
+        self.txn_active = false;
+        if !self.memory_policy.all_in_memory {
+            let budget = self.resolve_budget();
+            let mut mem = self.mem.lock().unwrap_or_else(|e| e.into_inner());
+            mem.evict_until_within(budget);
+        }
+    }
+
+    /// トランザクション実行中か
+    pub fn in_transaction(&self) -> bool {
+        self.txn_active
     }
 
     fn mem_lock(&self) -> std::sync::MutexGuard<'_, MemCache> {
@@ -462,7 +490,7 @@ impl Database {
         let budget = self.resolve_budget();
         let mut mem = self.mem_lock();
         mem.insert(row_idx, loaded_cols);
-        if !self.memory_policy.all_in_memory {
+        if !self.memory_policy.all_in_memory && !self.txn_active {
             mem.evict_until_within(budget);
         }
         Some(rec)
@@ -489,9 +517,12 @@ impl Database {
             }
             if let Some(f) = self.loaded.get_mut(row_idx) { *f = false; }
             let budget = self.resolve_budget();
+            let txn_active = self.txn_active;
             let mut mem = self.mem.lock().unwrap_or_else(|e| e.into_inner());
             mem.insert(row_idx, cols);
-            mem.evict_until_within(budget);
+            if !txn_active {
+                mem.evict_until_within(budget);
+            }
         }
     }
 

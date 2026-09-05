@@ -28,6 +28,45 @@ pub struct AppStateInner {
     pub http_api_enabled: bool,
     pub logger: Arc<Logger>,
     pub auth: AuthState,
+    /// 進行中のトランザクション（`BEGIN`〜`COMMIT`/`ROLLBACK`）。同時に1つだけ開ける。
+    pub active_txn: Option<TxnMeta>,
+}
+
+/// 進行中トランザクションのメタ情報
+#[derive(Debug)]
+pub struct TxnMeta {
+    /// `BEGIN` を実行したユーザー名。以後の書き込み文はこのユーザーのみ許可する。
+    pub owner: String,
+    /// 最後にこのトランザクションの文が実行された時刻（無操作タイムアウト判定用）。
+    /// SELECT（read ロック）からも更新できるよう内部可変にしている。
+    pub last_activity: std::sync::Mutex<std::time::Instant>,
+}
+
+/// 進行中トランザクションが無操作タイムアウト（既定300秒）を超えていれば自動 ROLLBACK する。
+/// 各 `/sql` の書き込み系処理の冒頭で呼ぶ。
+pub const TXN_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+pub(crate) fn expire_stale_transaction(state: &mut AppStateInner) {
+    let stale = state.active_txn.as_ref()
+        .map(|t| {
+            t.last_activity.lock()
+                .map(|inst| inst.elapsed() >= TXN_IDLE_TIMEOUT)
+                .unwrap_or(true)
+        })
+        .unwrap_or(false);
+    if stale {
+        let db_path = state.db_path.clone();
+        match crate::bootstrap::reload_database(&db_path) {
+            Ok(db) => {
+                state.mgr = LabelManager::from_db(db);
+                state.logger.db_warn("transaction auto-rolled back (idle timeout)".to_string());
+            }
+            Err(e) => {
+                state.logger.db_warn(format!("transaction idle timeout, but reload failed: {}", e));
+            }
+        }
+        state.active_txn = None;
+    }
 }
 
 pub type AppState = Arc<RwLock<AppStateInner>>;
