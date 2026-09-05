@@ -292,11 +292,20 @@ impl Parser {
         if is_and { Ok(FromClause::And(targets)) } else { Ok(FromClause::Or(targets)) }
     }
 
+    /// `label.name`（識別子形式）と `'label.name'` / `'label.*'`（文字列リテラル形式）の
+    /// 両方を受理する。識別子は英数字・`_` しか許容しないため、`:` などラベルによく使う
+    /// 区切り文字（例: `country:Japan`）を含む名前は文字列リテラル形式でのみ指定できる。
     fn parse_label_target(&mut self) -> Result<LabelTarget, ParseError> {
+        if let Token::StringLit(_) = self.peek() {
+            let s = match self.advance() { Token::StringLit(s) => s, _ => unreachable!() };
+            let name = parse_quoted_label_name(&s)?;
+            return if name == "*" { Ok(LabelTarget::All) }
+                    else { Ok(LabelTarget::LabelName(validate_label_name(&name)?)) };
+        }
         match self.advance() {
             Token::Ident(s) if s.to_lowercase() == "label" => {}
             o => return Err(ParseError::UnexpectedToken {
-                got: format!("{:?}", o), expected: "'label'".into() }),
+                got: format!("{:?}", o), expected: "'label' or 'label.<name>' string".into() }),
         }
         self.expect(Token::Dot)?;
         match self.advance() {
@@ -427,10 +436,8 @@ impl Parser {
     fn parse_insert_label_item(&mut self) -> Result<String, ParseError> {
         if let Token::StringLit(_) = self.peek() {
             let s = match self.advance() { Token::StringLit(s) => s, _ => unreachable!() };
-            let name = s.strip_prefix("label.")
-                .ok_or_else(|| ParseError::UnsupportedSyntax(
-                    format!("label must be in 'label.<name>' form, got '{}'", s)))?;
-            return validate_insert_label_name(name);
+            let name = parse_quoted_label_name(&s)?;
+            return validate_insert_label_name(&name);
         }
         match self.advance() {
             Token::Ident(s) if s.to_lowercase() == "label" => {}
@@ -500,13 +507,23 @@ impl Parser {
         Ok(UpdateStatement::Data(UpdateDataStatement { target, assignments, where_clause }))
     }
 
-    /// `label.<name>` 形式の単一ラベル参照をパースする（`label.*` は不可）。
-    /// UPDATE LABEL 文の旧ラベル名・新ラベル名の指定に使う。
+    /// `label.<name>`（識別子形式）と `'label.<name>'`（文字列リテラル形式）の
+    /// 単一ラベル参照をパースする（`label.*` / `'label.*'` は不可）。
+    /// UPDATE LABEL / DELETE LABEL 文のラベル名指定に使う。
     fn parse_label_ref(&mut self) -> Result<String, ParseError> {
+        if let Token::StringLit(_) = self.peek() {
+            let s = match self.advance() { Token::StringLit(s) => s, _ => unreachable!() };
+            let name = parse_quoted_label_name(&s)?;
+            if name == "*" {
+                return Err(ParseError::UnsupportedSyntax(
+                    "UPDATE LABEL name cannot be '*'".into()));
+            }
+            return validate_label_name(&name);
+        }
         match self.advance() {
             Token::Ident(s) if s.to_lowercase() == "label" => {}
             o => return Err(ParseError::UnexpectedToken {
-                got: format!("{:?}", o), expected: "'label'".into() }),
+                got: format!("{:?}", o), expected: "'label' or 'label.<name>' string".into() }),
         }
         self.expect(Token::Dot)?;
         match self.advance() {
@@ -568,12 +585,29 @@ impl Parser {
     }
 }
 
+/// `'label.<name>'` 形式の文字列リテラルから `<name>` 部分を取り出す（`'label.*'` は
+/// `name == "*"` として返す。空・`*` かどうかの判定は呼び出し側の用途ごとに行う）。
+fn parse_quoted_label_name(s: &str) -> Result<String, ParseError> {
+    s.strip_prefix("label.")
+        .map(|name| name.to_string())
+        .ok_or_else(|| ParseError::UnsupportedSyntax(
+            format!("label must be in 'label.<name>' form, got '{}'", s)))
+}
+
+/// ラベル名として最低限の妥当性（空文字でない）を検証する。
+fn validate_label_name(name: &str) -> Result<String, ParseError> {
+    if name.is_empty() {
+        return Err(ParseError::UnsupportedSyntax("label name cannot be empty".into()));
+    }
+    Ok(name.to_string())
+}
+
 fn validate_insert_label_name(name: &str) -> Result<String, ParseError> {
-    if name.is_empty() || name == "*" {
+    if name == "*" {
         return Err(ParseError::UnsupportedSyntax(
             "INSERT label name cannot be empty or '*'".into()));
     }
-    Ok(name.to_string())
+    validate_label_name(name)
 }
 
 /// SELECT文をパースする公開エントリーポイント
@@ -633,6 +667,33 @@ mod tests {
     fn test_select_from_label_star() {
         let s = parse_select("SELECT * FROM label.*").unwrap();
         assert_eq!(s.from, FromClause::Label(LabelTarget::All));
+    }
+    #[test]
+    fn test_select_rejects_colon_in_identifier_label() {
+        // `:` は識別子形式の文字として使えないため、量化されていない `label.country:Japan`
+        // はトークン化の時点でエラーになる（文字列リテラル形式を使う必要がある）。
+        assert!(parse_select("SELECT * FROM label.country:Japan").is_err());
+    }
+    #[test]
+    fn test_select_from_quoted_label_with_colon() {
+        // `:` など識別子に使えない文字を含むラベルは 'label.<name>' 形式で指定できる
+        // （INSERT で既に使える文字列リテラル形式を SELECT/UPDATE/DELETE にも拡張したもの）。
+        let s = parse_select("SELECT * FROM 'label.country:Japan'").unwrap();
+        assert_eq!(s.from, FromClause::Label(LabelTarget::LabelName("country:Japan".into())));
+    }
+    #[test]
+    fn test_select_from_quoted_label_star() {
+        let s = parse_select("SELECT * FROM 'label.*'").unwrap();
+        assert_eq!(s.from, FromClause::Label(LabelTarget::All));
+    }
+    #[test]
+    fn test_select_and_quoted_and_identifier_labels() {
+        // 識別子形式と文字列リテラル形式を AND で混在させても解釈できる
+        let s = parse_select("SELECT * FROM label.customer AND 'label.category:drink'").unwrap();
+        assert_eq!(s.from, FromClause::And(vec![
+            LabelTarget::LabelName("customer".into()),
+            LabelTarget::LabelName("category:drink".into()),
+        ]));
     }
     #[test]
     fn test_select_and_labels() {
@@ -855,6 +916,36 @@ mod tests {
     }
 
     #[test]
+    fn test_update_label_rename_quoted_form() {
+        // `:` を含むラベルは UPDATE LABEL の旧名・新名どちらも文字列リテラル形式で指定できる
+        let s = parse_update(
+            "UPDATE LABEL 'label.country:Japan' SET 'label.country:JP'"
+        ).unwrap();
+        match s {
+            UpdateStatement::Label(l) => {
+                assert_eq!(l.old_label, "country:Japan");
+                assert_eq!(l.new_label, "country:JP");
+            }
+            _ => panic!("expected UpdateStatement::Label"),
+        }
+    }
+
+    #[test]
+    fn test_update_label_quoted_form_rejects_star() {
+        assert!(parse_update("UPDATE LABEL 'label.*' SET label.staff").is_err());
+        assert!(parse_update("UPDATE LABEL label.employee SET 'label.*'").is_err());
+    }
+
+    #[test]
+    fn test_update_data_target_quoted_form() {
+        let s = parse_update("UPDATE 'label.country:Japan' SET active=true").unwrap();
+        match s {
+            UpdateStatement::Data(d) => assert_eq!(d.target, LabelTarget::LabelName("country:Japan".into())),
+            _ => panic!("expected UpdateStatement::Data"),
+        }
+    }
+
+    #[test]
     fn test_update_rejects_trailing_tokens() {
         assert!(parse_update("UPDATE label.employee SET age=30 GARBAGE").is_err());
     }
@@ -925,6 +1016,29 @@ mod tests {
             }
             _ => panic!("expected DeleteStatement::Label"),
         }
+    }
+
+    #[test]
+    fn test_delete_data_target_quoted_form() {
+        let s = parse_delete("DELETE FROM 'label.country:Japan'").unwrap();
+        match s {
+            DeleteStatement::Data(d) => assert_eq!(d.target, LabelTarget::LabelName("country:Japan".into())),
+            _ => panic!("expected DeleteStatement::Data"),
+        }
+    }
+
+    #[test]
+    fn test_delete_label_quoted_form() {
+        let s = parse_delete("DELETE LABEL FROM 'label.country:Japan'").unwrap();
+        match s {
+            DeleteStatement::Label(l) => assert_eq!(l.label, "country:Japan"),
+            _ => panic!("expected DeleteStatement::Label"),
+        }
+    }
+
+    #[test]
+    fn test_delete_label_quoted_form_rejects_star() {
+        assert!(parse_delete("DELETE LABEL FROM 'label.*'").is_err());
     }
 
     #[test]
