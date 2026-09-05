@@ -41,9 +41,9 @@
 | `POST`   | `/labels/search` | AND/OR ラベル検索 | ✅ | ✅ |
 | `PUT`    | `/labels/rename` | ラベルリネーム | ✅ | ✅ |
 | `GET`    | `/db/info` | DB バージョン・統計情報 | ✅ | - |
-| `POST`   | `/sql` | SQL SELECT / INSERT / UPDATE / DELETE / EXPLAIN 実行（一般ユーザーは付与された権限の範囲のみ・不足時 `403`）、`MANAGE_USERS` 権限向けユーザー管理（`CREATE`/`DROP`/`ALTER USER`・`SHOW USERS`・`GRANT`/`REVOKE`。詳細は [authentication.md](authentication.md)）、および同じく `MANAGE_USERS` 権限向け二次インデックス管理（`CREATE`/`DROP INDEX`・`SHOW INDEXES`。詳細は [sql.md](sql.md#二次インデックス-create-index--drop-index--show-indexes--explain)） | ✅ | - |
+| `POST`   | `/sql` | SQL SELECT / INSERT / UPDATE / DELETE / EXPLAIN 実行（一般ユーザーは付与された権限の範囲のみ・不足時 `403`）、`MANAGE_USERS` 権限向けユーザー管理（`CREATE`/`DROP`/`ALTER USER`・`SHOW USERS`・`GRANT`/`REVOKE`。詳細は [authentication.md](authentication.md)）、同じく `MANAGE_USERS` 権限向け二次インデックス管理（`CREATE`/`DROP INDEX`・`SHOW INDEXES`）、および任意スキーマ層管理（`ALTER LABEL ... DEFINE COLUMN`/`DROP COLUMN`/`ENABLE`・`DISABLE SCHEMA`・`DESCRIBE`・`SHOW SCHEMAS`・`VALIDATE LABEL`。詳細は [sql.md](sql.md#二次インデックス-create-index--drop-index--show-indexes--explain) と [sql.md](sql.md#任意スキーマ層-alter-label--define-column--enabledisable-schema--describe--show-schemas--validate-label)） | ✅ | - |
 | `GET`    | `/settings` | 現在の設定取得 | ✅ | - |
-| `PUT`    | `/settings` | 設定更新（HTTPリクエスト受付オンオフ） | ✅ | - |
+| `PUT`    | `/settings` | 設定更新（HTTPリクエスト受付オンオフ、スキーマ強制の全体スイッチ `schema_enforcement_enabled`。指定したフィールドだけを更新） | ✅ | - |
 | `GET`    | `/logs` | 保管されたログを新しい順に取得（`?lines=` で件数指定、既定200・上限2000） | ✅ | - |
 
 ### GET /db/info レスポンス例

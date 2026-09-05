@@ -9,6 +9,7 @@ pub mod label_handlers;
 pub mod logging;
 pub mod logging_handlers;
 pub mod models;
+pub mod schema_sql;
 pub mod settings_handlers;
 pub mod sql_handlers;
 pub mod test_helpers;

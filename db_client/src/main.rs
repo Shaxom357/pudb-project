@@ -20,6 +20,7 @@ mod label_handlers;
 mod logging;
 mod logging_handlers;
 mod models;
+mod schema_sql;
 mod settings_handlers;
 mod sql_handlers;
 mod ui;
@@ -132,6 +133,14 @@ async fn main() {
     index_sql::rebuild_indexes_from_sidecar(&db_path, &mut db);
     if !db.list_indexes().is_empty() {
         println!("[INFO] Rebuilt secondary index(es): {}", db.list_indexes().join(", "));
+    }
+
+    // 任意スキーマ層も同様に、サイドカーファイル `<DB_FILE>.schema.json` の定義から
+    // 再構築する（DB全体の一時停止スイッチ schema_enforcement_enabled は再起動のたびに
+    // 既定値 true へ戻るため、ここでは触らない）。
+    schema_sql::rebuild_schemas_from_sidecar(&db_path, &mut db);
+    if !db.list_schema_labels().is_empty() {
+        println!("[INFO] Rebuilt schema definition(s) for label(s): {}", db.list_schema_labels().join(", "));
     }
 
     let state = Arc::new(RwLock::new(AppStateInner {
