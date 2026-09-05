@@ -33,12 +33,53 @@ pub enum SelectColumns {
     Named(Vec<SelectItem>),
 }
 
-/// SELECT で指定する1項目：素のカラム参照、または集計関数呼び出し
+/// SELECT で指定する1項目：素のカラム参照、集計関数呼び出し、または一般の式
 #[derive(Debug, Clone, PartialEq)]
 pub enum SelectItem {
     Column(ColumnItem),
     Aggregate(AggregateItem),
+    Expression(ExpressionItem),
 }
+
+/// 一般の式（算術演算・CASE・COALESCE・CAST・スカラ関数呼び出し）
+/// （`AS` によるエイリアス指定は省略可。省略時は `expr1`/`expr2` のような既定名になる）
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExpressionItem {
+    pub expr: Expr,
+    pub alias: Option<String>,
+}
+
+/// スカラ式（レコード1行に対して評価される、集計を含まない式）
+#[derive(Debug, Clone, PartialEq)]
+pub enum Expr {
+    /// カラム参照
+    Column(String),
+    /// リテラル値
+    Literal(LiteralValue),
+    /// 算術演算: `left op right`
+    BinaryOp(Box<Expr>, ArithOp, Box<Expr>),
+    /// `CASE WHEN <条件> THEN <式> [WHEN ... THEN ...]* [ELSE <式>] END`
+    /// （条件部は WHERE句と同じ構文が使える）
+    Case { branches: Vec<(WhereExpr, Expr)>, else_expr: Option<Box<Expr>> },
+    /// `COALESCE(expr1, expr2, ...)`（先頭から順に NULL でない最初の値を返す）
+    Coalesce(Vec<Expr>),
+    /// `CAST(expr AS type)`
+    Cast(Box<Expr>, CastType),
+    /// スカラ関数呼び出し: `LENGTH(x)` / `SUBSTR(x, a, b)` など
+    Func(ScalarFunc, Vec<Expr>),
+}
+
+/// 算術演算子
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArithOp { Add, Sub, Mul, Div }
+
+/// `CAST` の変換先の型
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CastType { Text, Integer, Float, Boolean }
+
+/// スカラ関数の種類
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScalarFunc { Length, Lower, Upper, Substr, Round, Abs }
 
 /// 素のカラム参照（`AS` によるエイリアス指定は省略可）
 #[derive(Debug, Clone, PartialEq)]

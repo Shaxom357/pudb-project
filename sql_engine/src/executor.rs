@@ -59,15 +59,30 @@ pub fn execute_select(db: &Database, stmt: &SelectStatement) -> QueryResult {
 
     // total_matched は WHERE 後・GROUP BY/LIMIT/OFFSET 前の一致件数（従来どおり集計前の生レコード数）
     let total_matched = records.len();
+    let has_expr = has_expression_item(stmt);
 
     if is_aggregate_query(stmt) {
         // GROUP BY / 集計関数を含むクエリは、グループごとに合成した Record を1行として扱う。
         // こちらは新規に Record を組み立てる都合上、参照ではなく所有データとして持つ。
         let mut grouped = build_grouped_records(&records, stmt);
+        if has_expr {
+            if let SelectColumns::Named(items) = &stmt.columns {
+                for r in &mut grouped { materialize_expressions(r, items); }
+            }
+        }
         if let Some(ref having) = stmt.having {
             grouped.retain(|r| eval_where(r, having));
         }
         let refs: Vec<&Record> = grouped.iter().collect();
+        finish_select(db, refs, stmt, total_matched)
+    } else if has_expr {
+        // 式（算術演算・CASE・COALESCE・CAST・スカラ関数）を含むクエリだけ、値を書き込む
+        // ために Record を複製する（式を含まない大多数のクエリは従来どおり借用のみで進む）。
+        let mut owned: Vec<Record> = records.into_iter().cloned().collect();
+        if let SelectColumns::Named(items) = &stmt.columns {
+            for r in &mut owned { materialize_expressions(r, items); }
+        }
+        let refs: Vec<&Record> = owned.iter().collect();
         finish_select(db, refs, stmt, total_matched)
     } else {
         finish_select(db, records, stmt, total_matched)
@@ -82,8 +97,28 @@ fn is_aggregate_query(stmt: &SelectStatement) -> bool {
         if items.iter().any(|it| matches!(it, SelectItem::Aggregate(_))))
 }
 
+/// 一般の式（算術演算・CASE・COALESCE・CAST・スカラ関数）を1つでも SELECT しているか
+fn has_expression_item(stmt: &SelectStatement) -> bool {
+    matches!(&stmt.columns, SelectColumns::Named(items)
+        if items.iter().any(|it| matches!(it, SelectItem::Expression(_))))
+}
+
+/// `SelectItem::Expression` の値を評価し、`expression_output_key` のキーでレコードに
+/// 書き込む（後続の投影・ORDER BY・DISTINCT が他の項目と同じ「カラム参照」として
+/// 一様に扱えるようにするための下ごしらえ）。先に書き込んだ式の結果を後の式から
+/// カラム参照で参照することもできる（`age*2 AS a, a+1 AS b` のように）。
+fn materialize_expressions(r: &mut Record, items: &[SelectItem]) {
+    for (i, item) in items.iter().enumerate() {
+        if let SelectItem::Expression(e) = item {
+            let value = eval_expr(r, &e.expr);
+            r.set(expression_output_key(e, i), cell_to_data_type(&value));
+        }
+    }
+}
+
 /// ORDER BY・LIMIT/OFFSET・DISTINCT・カラム投影を適用して最終結果を組み立てる
-/// （集計クエリ・非集計クエリの両方から共通で呼ばれる）。
+/// （集計クエリ・非集計クエリの両方から共通で呼ばれる）。式（Expression）を含む場合は
+/// 呼び出し側で `materialize_expressions` 済みである前提。
 fn finish_select(db: &Database, mut records: Vec<&Record>, stmt: &SelectStatement, total_matched: usize) -> QueryResult {
     // ORDER BY はカラム名のほか、SELECT ... AS で付けたエイリアスでも指定できるようにする
     // （元のカラム名に解決してから並べ替える）。
@@ -107,8 +142,8 @@ fn finish_select(db: &Database, mut records: Vec<&Record>, stmt: &SelectStatemen
             (display, internal)
         }
         SelectColumns::Named(items) => (
-            items.iter().map(select_item_output_name).collect(),
-            items.iter().map(select_item_internal_key).collect(),
+            items.iter().enumerate().map(|(i, it)| select_item_output_name(it, i)).collect(),
+            items.iter().enumerate().map(|(i, it)| select_item_internal_key(it, i)).collect(),
         ),
     };
 
@@ -136,20 +171,26 @@ fn finish_select(db: &Database, mut records: Vec<&Record>, stmt: &SelectStatemen
     QueryResult { columns: display_cols, rows, total_matched }
 }
 
-/// SELECT 項目の表示名（`AS` エイリアスがあればそれ、無ければ既定名）
-fn select_item_output_name(item: &SelectItem) -> String {
+/// SELECT 項目の出力名。素のカラムは `AS` エイリアスがあればそれ、無ければカラム名そのもの。
+/// 集計関数・式はエイリアスがあればそれ、無ければ既定名（`count(*)` / `expr1` 等）。
+/// 集計関数・式についてはこの名前がそのまま Record 上の内部キー（格納場所）にもなる
+/// （`aggregate_output_name` / `expression_output_key` を参照）。
+fn select_item_output_name(item: &SelectItem, index: usize) -> String {
     match item {
-        SelectItem::Column(c)    => c.alias.clone().unwrap_or_else(|| c.column.clone()),
-        SelectItem::Aggregate(a) => aggregate_output_name(a),
+        SelectItem::Column(c)     => c.alias.clone().unwrap_or_else(|| c.column.clone()),
+        SelectItem::Aggregate(a)  => aggregate_output_name(a),
+        SelectItem::Expression(e) => expression_output_key(e, index),
     }
 }
 
-/// SELECT 項目の値を Record から引くための内部キー（素のカラムはカラム名そのもの、
-/// 集計関数は `build_grouped_records` が合成レコードへ書き込むキーと一致させる）
-fn select_item_internal_key(item: &SelectItem) -> String {
+/// SELECT 項目の値を Record から引くための内部キー。素のカラムは（エイリアスの有無に
+/// 関わらず）常に元のカラム名そのもの。集計関数・式は `select_item_output_name` と同じ
+/// （エイリアスまたは既定名がそのまま格納キーになる）。
+fn select_item_internal_key(item: &SelectItem, index: usize) -> String {
     match item {
-        SelectItem::Column(c)    => c.column.clone(),
-        SelectItem::Aggregate(a) => aggregate_output_name(a),
+        SelectItem::Column(c)     => c.column.clone(),
+        SelectItem::Aggregate(a)  => aggregate_output_name(a),
+        SelectItem::Expression(e) => expression_output_key(e, index),
     }
 }
 
@@ -167,16 +208,22 @@ fn aggregate_output_name(agg: &AggregateItem) -> String {
     }
 }
 
+/// 式（Expression）項目の既定の出力名（`AS` 省略時は SELECT リスト内の位置から
+/// `expr1`/`expr2`... を生成し、複数の無名式があっても衝突しないようにする）。
+fn expression_output_key(item: &ExpressionItem, index: usize) -> String {
+    item.alias.clone().unwrap_or_else(|| format!("expr{}", index + 1))
+}
+
 // ---------------------------------------------------------------------------
 // GROUP BY / 集計関数
 // ---------------------------------------------------------------------------
 
 /// WHERE 適用後のレコードを GROUP BY 句でグルーピングし、グループごとに1つの合成
 /// Record を組み立てる（`GROUP BY` 省略時は全件を1グループとして扱う）。
-/// 合成 Record のカラムには GROUP BY 対象カラムの値（代表レコード＝先頭の値をそのまま採用）
-/// と、集計関数の計算結果を `aggregate_output_name` のキーで格納する。GROUP BY に
-/// 含まれない素のカラムを SELECT した場合も同様に代表レコードの値を採用する（標準SQLの
-/// ように GROUP BY 対象外カラムの指定をエラーにはしない、緩めの仕様）。
+/// 合成 Record にはまず代表レコード（先頭の1件）の全カラムをコピーする
+/// （GROUP BY 対象カラムの値・素のカラム参照・式が参照する生カラムをまとめて賄うため。
+/// 標準SQLのように GROUP BY 対象外カラムの指定をエラーにはしない、緩めの仕様）。
+/// その上に集計関数の計算結果を `aggregate_output_name` のキーで上書きする。
 fn build_grouped_records(records: &[&Record], stmt: &SelectStatement) -> Vec<Record> {
     let mut order: Vec<Vec<String>> = Vec::new();
     let mut members: std::collections::HashMap<Vec<String>, Vec<Record>> = std::collections::HashMap::new();
@@ -195,23 +242,14 @@ fn build_grouped_records(records: &[&Record], stmt: &SelectStatement) -> Vec<Rec
     order.into_iter().map(|key| {
         let group = &members[&key];
         let mut out = Record::new(0);
-        for col in &stmt.group_by {
-            if let Some(first) = group.first() {
-                if let Some(v) = first.columns.get(col) { out.set(col.clone(), v.clone()); }
-            }
+        if let Some(first) = group.first() {
+            for (k, v) in &first.columns { out.set(k.clone(), v.clone()); }
         }
         if let SelectColumns::Named(items) = &stmt.columns {
             for item in items {
-                match item {
-                    SelectItem::Aggregate(agg) => {
-                        let value = eval_aggregate(agg, group);
-                        out.set(aggregate_output_name(agg), cell_to_data_type(&value));
-                    }
-                    SelectItem::Column(c) => {
-                        if let Some(first) = group.first() {
-                            if let Some(v) = first.columns.get(&c.column) { out.set(c.column.clone(), v.clone()); }
-                        }
-                    }
+                if let SelectItem::Aggregate(agg) = item {
+                    let value = eval_aggregate(agg, group);
+                    out.set(aggregate_output_name(agg), cell_to_data_type(&value));
                 }
             }
         }
@@ -291,6 +329,146 @@ fn cell_to_data_type(v: &CellValue) -> DataType {
         CellValue::Float(f)   => DataType::Float(*f),
         CellValue::Boolean(b) => DataType::Boolean(*b),
         CellValue::Null       => DataType::Null,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 式（算術演算・CASE・COALESCE・CAST・スカラ関数）の評価
+// ---------------------------------------------------------------------------
+
+/// 式をレコード1行に対して評価し、値を返す（集計を含まないスカラ式のみ）。
+fn eval_expr(r: &Record, expr: &Expr) -> CellValue {
+    match expr {
+        Expr::Column(name) => r.columns.get(name).map(CellValue::from_data_type).unwrap_or(CellValue::Null),
+        Expr::Literal(lit) => literal_to_cell_value(lit),
+        Expr::BinaryOp(l, op, rr) => eval_arith(&eval_expr(r, l), *op, &eval_expr(r, rr)),
+        Expr::Case { branches, else_expr } => {
+            for (cond, result) in branches {
+                if eval_where(r, cond) { return eval_expr(r, result); }
+            }
+            else_expr.as_ref().map(|e| eval_expr(r, e)).unwrap_or(CellValue::Null)
+        }
+        Expr::Coalesce(args) => {
+            for a in args {
+                let v = eval_expr(r, a);
+                if v != CellValue::Null { return v; }
+            }
+            CellValue::Null
+        }
+        Expr::Cast(inner, target) => cast_cell_value(&eval_expr(r, inner), *target),
+        Expr::Func(func, args) => eval_scalar_func(*func, args.iter().map(|a| eval_expr(r, a)).collect()),
+    }
+}
+
+fn literal_to_cell_value(lit: &LiteralValue) -> CellValue {
+    match lit {
+        LiteralValue::Text(s)    => CellValue::Text(s.clone()),
+        LiteralValue::Integer(n) => CellValue::Integer(*n),
+        LiteralValue::Float(f)   => CellValue::Float(*f),
+        LiteralValue::Boolean(b) => CellValue::Boolean(*b),
+        LiteralValue::Null       => CellValue::Null,
+    }
+}
+
+/// 算術演算 `left op right`。どちらかが数値（Integer/Float）でなければ `NULL` を返す。
+/// 両辺とも Integer なら結果も Integer（`/` を除く）、どちらかが Float なら Float になる。
+/// `/` は常に小数を返す（整数同士でも切り捨てない）。ゼロ除算は `NULL` を返す。
+fn eval_arith(l: &CellValue, op: ArithOp, r: &CellValue) -> CellValue {
+    let (Some(lf), Some(rf)) = (cell_as_f64(l), cell_as_f64(r)) else { return CellValue::Null; };
+    if op == ArithOp::Div && rf == 0.0 { return CellValue::Null; }
+    let result = match op {
+        ArithOp::Add => lf + rf,
+        ArithOp::Sub => lf - rf,
+        ArithOp::Mul => lf * rf,
+        ArithOp::Div => lf / rf,
+    };
+    let all_integer = matches!(l, CellValue::Integer(_)) && matches!(r, CellValue::Integer(_));
+    if all_integer && op != ArithOp::Div { CellValue::Integer(result as i64) } else { CellValue::Float(result) }
+}
+
+fn cell_as_f64(v: &CellValue) -> Option<f64> {
+    match v {
+        CellValue::Integer(n) => Some(*n as f64),
+        CellValue::Float(f)   => Some(*f),
+        _ => None,
+    }
+}
+
+/// `CAST(expr AS type)`。変換できない場合（数値に解釈できない文字列など）は `NULL` を返す。
+fn cast_cell_value(v: &CellValue, target: CastType) -> CellValue {
+    if *v == CellValue::Null { return CellValue::Null; }
+    match target {
+        CastType::Text => CellValue::Text(v.display()),
+        CastType::Integer => match v {
+            CellValue::Integer(n) => CellValue::Integer(*n),
+            CellValue::Float(f)   => CellValue::Integer(*f as i64),
+            CellValue::Boolean(b) => CellValue::Integer(if *b { 1 } else { 0 }),
+            CellValue::Text(s)    => s.trim().parse::<i64>().map(CellValue::Integer).unwrap_or(CellValue::Null),
+            CellValue::Null       => unreachable!(),
+        },
+        CastType::Float => match v {
+            CellValue::Integer(n) => CellValue::Float(*n as f64),
+            CellValue::Float(f)   => CellValue::Float(*f),
+            CellValue::Boolean(b) => CellValue::Float(if *b { 1.0 } else { 0.0 }),
+            CellValue::Text(s)    => s.trim().parse::<f64>().map(CellValue::Float).unwrap_or(CellValue::Null),
+            CellValue::Null       => unreachable!(),
+        },
+        CastType::Boolean => match v {
+            CellValue::Boolean(b) => CellValue::Boolean(*b),
+            CellValue::Integer(n) => CellValue::Boolean(*n != 0),
+            CellValue::Float(f)   => CellValue::Boolean(*f != 0.0),
+            CellValue::Text(s)    => match s.to_lowercase().as_str() {
+                "true" | "1"  => CellValue::Boolean(true),
+                "false" | "0" => CellValue::Boolean(false),
+                _             => CellValue::Null,
+            },
+            CellValue::Null => unreachable!(),
+        },
+    }
+}
+
+/// スカラ関数呼び出しを評価する。引数の個数はパース時（`validate_scalar_func_arity`）に
+/// 検証済みのため、ここでは正しい個数が渡ってくる前提でよい。
+fn eval_scalar_func(func: ScalarFunc, args: Vec<CellValue>) -> CellValue {
+    match func {
+        ScalarFunc::Length => match &args[0] {
+            CellValue::Null => CellValue::Null,
+            v => CellValue::Integer(v.display().chars().count() as i64),
+        },
+        ScalarFunc::Lower => match &args[0] {
+            CellValue::Null => CellValue::Null,
+            CellValue::Text(s) => CellValue::Text(s.to_lowercase()),
+            v => CellValue::Text(v.display().to_lowercase()),
+        },
+        ScalarFunc::Upper => match &args[0] {
+            CellValue::Null => CellValue::Null,
+            CellValue::Text(s) => CellValue::Text(s.to_uppercase()),
+            v => CellValue::Text(v.display().to_uppercase()),
+        },
+        ScalarFunc::Abs => match &args[0] {
+            CellValue::Integer(n) => CellValue::Integer(n.abs()),
+            CellValue::Float(f)   => CellValue::Float(f.abs()),
+            _ => CellValue::Null,
+        },
+        ScalarFunc::Round => {
+            let Some(base) = cell_as_f64(&args[0]) else { return CellValue::Null; };
+            let digits = match args.get(1) { Some(CellValue::Integer(n)) => *n, _ => 0 };
+            let factor = 10f64.powi(digits as i32);
+            CellValue::Float((base * factor).round() / factor)
+        }
+        ScalarFunc::Substr => {
+            // 1-based の開始位置（標準SQLのSUBSTR互換）。長さ省略時は末尾まで。
+            let text = match &args[0] { CellValue::Null => return CellValue::Null, v => v.display() };
+            let Some(CellValue::Integer(start1)) = args.get(1) else { return CellValue::Null; };
+            let chars: Vec<char> = text.chars().collect();
+            let start0 = (*start1 - 1).max(0) as usize;
+            if start0 >= chars.len() { return CellValue::Text(String::new()); }
+            let end0 = match args.get(2) {
+                Some(CellValue::Integer(len)) => chars.len().min(start0 + (*len).max(0) as usize),
+                _ => chars.len(),
+            };
+            CellValue::Text(chars[start0..end0].iter().collect())
+        }
     }
 }
 
@@ -434,10 +612,12 @@ fn resolve_order_by_aliases(columns: &SelectColumns, order_by: &[OrderByItem]) -
     let SelectColumns::Named(items) = columns else { return order_by.to_vec(); };
     // 集計関数（`COUNT(*) AS n` 等）はエイリアス無しでは括弧を含む式になり ORDER BY から
     // 識別子として参照できないため、エイリアスが無い集計項目は対象外（内部キーへの解決不要）。
+    // 集計関数・式は既定名/エイリアスがそのまま合成レコードの内部キーになる
+    // （`aggregate_output_name`/`expression_output_key`）ため、ここでの変換は不要。
     let alias_map: std::collections::HashMap<&str, String> = items.iter()
         .filter_map(|it| match it {
-            SelectItem::Column(c)    => c.alias.as_deref().map(|a| (a, c.column.clone())),
-            SelectItem::Aggregate(a) => a.alias.as_deref().map(|alias| (alias, aggregate_output_name(a))),
+            SelectItem::Column(c) => c.alias.as_deref().map(|a| (a, c.column.clone())),
+            SelectItem::Aggregate(_) | SelectItem::Expression(_) => None,
         })
         .collect();
     if alias_map.is_empty() { return order_by.to_vec(); }
@@ -944,6 +1124,150 @@ mod select_tests {
             vec![CellValue::Text("dev".into())],
             vec![CellValue::Text("sales".into())],
         ]);
+    }
+
+    // --- Step 3: 式（算術演算・CASE・COALESCE・CAST・スカラ関数） ---
+
+    #[test]
+    fn test_select_arithmetic_expression_value() {
+        let db = setup();
+        let r = select(&db, "SELECT age * 2 AS doubled FROM label.employee WHERE name = '田中'");
+        assert_eq!(r.columns, vec!["doubled".to_string()]);
+        assert_eq!(r.rows, vec![vec![CellValue::Integer(48)]]);
+    }
+
+    #[test]
+    fn test_select_arithmetic_mixed_int_float_returns_float() {
+        let db = setup();
+        let r = select(&db, "SELECT age / 2.0 AS half FROM label.employee WHERE name = '田中'");
+        assert_eq!(r.rows, vec![vec![CellValue::Float(12.0)]]);
+    }
+
+    #[test]
+    fn test_select_division_by_zero_is_null() {
+        let db = setup();
+        let r = select(&db, "SELECT age / 0 AS x FROM label.employee WHERE name = '田中'");
+        assert_eq!(r.rows, vec![vec![CellValue::Null]]);
+    }
+
+    #[test]
+    fn test_select_arithmetic_on_missing_column_is_null() {
+        let db = setup();
+        let r = select(&db, "SELECT department * 2 AS x FROM label.employee WHERE name = '佐藤'");
+        assert_eq!(r.rows, vec![vec![CellValue::Null]]);
+    }
+
+    #[test]
+    fn test_select_case_expression_value() {
+        let db = setup();
+        let r = select(&db,
+            "SELECT name, CASE WHEN age >= 30 THEN 'senior' ELSE 'junior' END AS grade \
+             FROM label.employee ORDER BY name"
+        );
+        // 佐藤(40)->senior, 田中(24)->junior, 鈴木(30)->senior（名前の五十音順ではなくコードポイント順）
+        let grades: Vec<&CellValue> = r.rows.iter().map(|row| &row[1]).collect();
+        assert!(grades.contains(&&CellValue::Text("senior".into())));
+        assert!(grades.contains(&&CellValue::Text("junior".into())));
+    }
+
+    #[test]
+    fn test_select_case_without_else_returns_null_when_no_branch_matches() {
+        let db = setup();
+        let r = select(&db, "SELECT CASE WHEN age > 100 THEN 'old' END AS c FROM label.employee WHERE name = '田中'");
+        assert_eq!(r.rows, vec![vec![CellValue::Null]]);
+    }
+
+    #[test]
+    fn test_select_coalesce_picks_first_non_null() {
+        let db = setup();
+        // department が未設定の佐藤は2つ目の引数(name)にフォールバックする
+        let r = select(&db, "SELECT COALESCE(department, name) AS d FROM label.employee WHERE name = '佐藤'");
+        assert_eq!(r.rows, vec![vec![CellValue::Text("佐藤".into())]]);
+    }
+
+    #[test]
+    fn test_select_cast_to_text_and_integer() {
+        let db = setup();
+        let r = select(&db, "SELECT CAST(age AS text) AS t FROM label.employee WHERE name = '田中'");
+        assert_eq!(r.rows, vec![vec![CellValue::Text("24".into())]]);
+        let r2 = select(&db, "SELECT CAST('42' AS integer) AS n FROM label.employee WHERE name = '田中'");
+        assert_eq!(r2.rows, vec![vec![CellValue::Integer(42)]]);
+    }
+
+    #[test]
+    fn test_select_cast_unparseable_text_to_integer_is_null() {
+        let db = setup();
+        let r = select(&db, "SELECT CAST(name AS integer) AS n FROM label.employee WHERE name = '田中'");
+        assert_eq!(r.rows, vec![vec![CellValue::Null]]);
+    }
+
+    #[test]
+    fn test_select_scalar_functions_value() {
+        let db = setup();
+        let r = select(&db,
+            "SELECT LENGTH(name) AS len, UPPER(name) AS up, ABS(age - 100) AS diff \
+             FROM label.employee WHERE name = '田中'"
+        );
+        assert_eq!(r.rows, vec![vec![CellValue::Integer(2), CellValue::Text("田中".into()), CellValue::Integer(76)]]);
+    }
+
+    #[test]
+    fn test_select_substr() {
+        let db = setup();
+        let r = select(&db, "SELECT SUBSTR(name, 1, 1) AS first_char FROM label.employee WHERE name = '田中'");
+        assert_eq!(r.rows, vec![vec![CellValue::Text("田".into())]]);
+    }
+
+    #[test]
+    fn test_select_round() {
+        let db = setup();
+        let r = select(&db, "SELECT ROUND(age / 7.0, 2) AS r FROM label.employee WHERE name = '田中'");
+        assert_eq!(r.rows, vec![vec![CellValue::Float(3.43)]]);
+    }
+
+    #[test]
+    fn test_select_order_by_expression_alias() {
+        let db = setup();
+        let r = select(&db, "SELECT name, age * -1 AS neg_age FROM label.employee ORDER BY neg_age");
+        // neg_age 昇順 = age 降順: 佐藤(40) -> 鈴木(30) -> 田中(24)
+        let names: Vec<&CellValue> = r.rows.iter().map(|row| &row[0]).collect();
+        assert_eq!(names, vec![
+            &CellValue::Text("佐藤".into()), &CellValue::Text("鈴木".into()), &CellValue::Text("田中".into()),
+        ]);
+    }
+
+    #[test]
+    fn test_select_expression_with_group_by() {
+        // 集計関数の呼び出し自体を式の内側にネストする（例: ROUND(AVG(x), 0)）ことはできないが、
+        // AVG(...) にエイリアスを付けて、別の式からそのエイリアスをカラム参照することはできる。
+        let db = setup_departments();
+        let r = select(&db,
+            "SELECT department, UPPER(department) AS d, COUNT(*) AS n, AVG(age) AS avg_age, ROUND(avg_age, 0) AS avg_rounded \
+             FROM label.employee GROUP BY department ORDER BY department"
+        );
+        assert_eq!(r.columns, vec![
+            "department".to_string(), "d".to_string(), "n".to_string(), "avg_age".to_string(), "avg_rounded".to_string(),
+        ]);
+        assert_eq!(r.rows[0], vec![
+            CellValue::Text("dev".into()), CellValue::Text("DEV".into()), CellValue::Integer(2),
+            CellValue::Float(27.0), CellValue::Float(27.0),
+        ]);
+    }
+
+    #[test]
+    fn test_select_rejects_aggregate_nested_inside_scalar_function() {
+        // ROUND(AVG(x), 0) のように集計関数呼び出しを式の内側にネストすることは非対応
+        let stmt = crate::parser::parse_select(
+            "SELECT ROUND(AVG(age), 0) FROM label.employee GROUP BY department"
+        );
+        assert!(stmt.is_err());
+    }
+
+    #[test]
+    fn test_select_chained_expressions_reference_earlier_alias() {
+        let db = setup();
+        let r = select(&db, "SELECT age * 2 AS doubled, doubled + 1 AS plus_one FROM label.employee WHERE name = '田中'");
+        assert_eq!(r.rows, vec![vec![CellValue::Integer(48), CellValue::Integer(49)]]);
     }
 }
 

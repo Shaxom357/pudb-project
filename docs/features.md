@@ -48,6 +48,10 @@
 - ✅ `SELECT DISTINCT col1, col2, ...`（出力行の重複排除）
 - ✅ 集計関数 `COUNT(*)` / `COUNT(col)` / `SUM(col)` / `AVG(col)` / `MIN(col)` / `MAX(col)`
 - ✅ `GROUP BY col1, col2, ...`（省略時は集計関数を全件で1グループとして計算）・`HAVING <条件>`
+- ✅ 算術演算式 `+` `-` `*` `/`（優先順位・括弧対応、単項マイナス対応）
+- ✅ `CASE WHEN <条件> THEN <式> ... [ELSE <式>] END`（条件部は `WHERE` と同じ構文）
+- ✅ `COALESCE(expr, ...)`・`CAST(expr AS type)`（`TEXT`/`INTEGER`/`FLOAT`/`BOOLEAN`）
+- ✅ スカラ関数 `LENGTH` / `LOWER` / `UPPER` / `SUBSTR` / `ROUND` / `ABS`
 - ✅ 大文字小文字無視・セミコロン対応
 - ✅ `SELECT *` は `id` 列を先頭、`labels` 列（カンマ区切り）を末尾に付与して返す（`GROUP BY`/`HAVING` とは組み合わせ不可）
 - ✅ 独自拡張 SQL `INSERT INTO (label.xxx) VALUE (...)` 構文

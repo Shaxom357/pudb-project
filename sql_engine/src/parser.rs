@@ -16,12 +16,14 @@ pub enum Token {
     Having,
     Limit, Offset, Like, Asc, Desc, Null, True, False,
     Is, In, Between, As,
+    Case, When, Then, Else, End,
     Insert, Into, Value,
     Update, Set,
     Delete,
     // 記号
     Star, Comma, Dot,
     Eq, Ne, Lt, Le, Gt, Ge,
+    Plus, Minus, Slash,
     LParen, RParen,
     // リテラル
     StringLit(String),
@@ -157,6 +159,11 @@ impl<'a> Lexer<'a> {
             }
             "HAVING"  => Token::Having,
             "DISTINCT" => Token::Distinct,
+            "CASE"    => Token::Case,
+            "WHEN"    => Token::When,
+            "THEN"    => Token::Then,
+            "ELSE"    => Token::Else,
+            "END"     => Token::End,
             "LIMIT"   => Token::Limit,
             "OFFSET"  => Token::Offset,
             "LIKE"    => Token::Like,
@@ -209,6 +216,10 @@ impl<'a> Lexer<'a> {
             Some('\'') => self.read_string(),
             Some(c) if c.is_ascii_digit() => Ok(self.read_number(c)),
             Some('-') => {
+                // 直後が数字ならこれまでどおり負数リテラルとして1トークンにまとめる
+                // （`age=-5` のような、間に空白を挟まない書き方への後方互換）。
+                // 数字が続かない場合は算術演算子・単項マイナスとして Minus トークンを返す
+                // （`age - 5` のように前後に空白を入れれば減算として使える）。
                 if self.peek_char().map_or(false, |d| d.is_ascii_digit()) {
                     let d = self.advance_char().unwrap();
                     match self.read_number(d) {
@@ -216,8 +227,10 @@ impl<'a> Lexer<'a> {
                         Token::FloatLit(f) => Ok(Token::FloatLit(-f)),
                         other => Ok(other),
                     }
-                } else { Err(ParseError::UnexpectedChar('-')) }
+                } else { Ok(Token::Minus) }
             }
+            Some('+')  => Ok(Token::Plus),
+            Some('/')  => Ok(Token::Slash),
             Some(c) if c.is_alphabetic() || c == '_' => Ok(self.read_ident(c)),
             Some(';') => Ok(Token::Eof),
             Some(c)   => Err(ParseError::UnexpectedChar(c)),
@@ -349,12 +362,151 @@ impl Parser {
                 }
             }
         }
-        let column = self.expect_ident()?;
+        // 集計関数呼び出しでなければ、算術演算・CASE・COALESCE・CAST・スカラ関数を含む
+        // 一般の式としてパースする。式が単なるカラム参照1つだけなら、従来どおり
+        // SelectItem::Column として扱う（内部キー・投影ロジックを変えないための互換維持）。
+        let expr = self.parse_expr()?;
         let alias = if self.peek() == &Token::As {
             self.advance();
             Some(self.expect_ident()?)
         } else { None };
-        Ok(SelectItem::Column(ColumnItem { column, alias }))
+        Ok(match expr {
+            Expr::Column(column) => SelectItem::Column(ColumnItem { column, alias }),
+            other => SelectItem::Expression(ExpressionItem { expr: other, alias }),
+        })
+    }
+
+    // -----------------------------------------------------------------
+    // 式（算術演算・CASE・COALESCE・CAST・スカラ関数）
+    // -----------------------------------------------------------------
+
+    fn parse_expr(&mut self) -> Result<Expr, ParseError> { self.parse_add_expr() }
+
+    fn parse_add_expr(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_mul_expr()?;
+        loop {
+            let op = match self.peek() {
+                Token::Plus  => ArithOp::Add,
+                Token::Minus => ArithOp::Sub,
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_mul_expr()?;
+            left = Expr::BinaryOp(Box::new(left), op, Box::new(right));
+        }
+        Ok(left)
+    }
+
+    fn parse_mul_expr(&mut self) -> Result<Expr, ParseError> {
+        let mut left = self.parse_unary_expr()?;
+        loop {
+            let op = match self.peek() {
+                Token::Star  => ArithOp::Mul,
+                Token::Slash => ArithOp::Div,
+                _ => break,
+            };
+            self.advance();
+            let right = self.parse_unary_expr()?;
+            left = Expr::BinaryOp(Box::new(left), op, Box::new(right));
+        }
+        Ok(left)
+    }
+
+    /// 単項マイナス（`-age` のような式）。`0 - <式>` として表現し、専用のASTは持たない。
+    fn parse_unary_expr(&mut self) -> Result<Expr, ParseError> {
+        if self.peek() == &Token::Minus {
+            self.advance();
+            let operand = self.parse_unary_expr()?;
+            return Ok(Expr::BinaryOp(Box::new(Expr::Literal(LiteralValue::Integer(0))), ArithOp::Sub, Box::new(operand)));
+        }
+        self.parse_primary_expr_value()
+    }
+
+    /// 式の末端: 括弧・CASE・COALESCE・CAST・スカラ関数・カラム参照・リテラルのいずれか。
+    /// COALESCE/CAST/スカラ関数名は集計関数と同様に予約語化せず、直後が `(` のときだけ
+    /// 関数呼び出しとして扱う。
+    fn parse_primary_expr_value(&mut self) -> Result<Expr, ParseError> {
+        if self.peek() == &Token::LParen {
+            self.advance();
+            let e = self.parse_expr()?;
+            self.expect(Token::RParen)?;
+            return Ok(e);
+        }
+        if self.peek() == &Token::Case {
+            return self.parse_case_expr();
+        }
+        if let Token::Ident(name) = self.peek().clone() {
+            let upper = name.to_uppercase();
+            if upper == "COALESCE" && self.peek_at(1) == &Token::LParen {
+                self.advance(); self.advance();
+                let args = self.parse_expr_list()?;
+                self.expect(Token::RParen)?;
+                if args.is_empty() {
+                    return Err(ParseError::UnsupportedSyntax("COALESCE requires at least 1 argument".into()));
+                }
+                return Ok(Expr::Coalesce(args));
+            }
+            if upper == "CAST" && self.peek_at(1) == &Token::LParen {
+                self.advance(); self.advance();
+                let inner = self.parse_expr()?;
+                self.expect(Token::As)?;
+                let type_name = self.expect_ident()?;
+                let target = cast_type_from_name(&type_name)?;
+                self.expect(Token::RParen)?;
+                return Ok(Expr::Cast(Box::new(inner), target));
+            }
+            if let Some(func) = scalar_func_from_name(&upper) {
+                if self.peek_at(1) == &Token::LParen {
+                    self.advance(); self.advance();
+                    let args = self.parse_expr_list()?;
+                    self.expect(Token::RParen)?;
+                    validate_scalar_func_arity(func, args.len())?;
+                    return Ok(Expr::Func(func, args));
+                }
+            }
+        }
+        match self.advance() {
+            Token::Ident(name)  => Ok(Expr::Column(name)),
+            Token::StringLit(s) => Ok(Expr::Literal(LiteralValue::Text(s))),
+            Token::IntLit(n)    => Ok(Expr::Literal(LiteralValue::Integer(n))),
+            Token::FloatLit(f)  => Ok(Expr::Literal(LiteralValue::Float(f))),
+            Token::True         => Ok(Expr::Literal(LiteralValue::Boolean(true))),
+            Token::False        => Ok(Expr::Literal(LiteralValue::Boolean(false))),
+            Token::Null         => Ok(Expr::Literal(LiteralValue::Null)),
+            o => Err(ParseError::UnexpectedToken { got: format!("{:?}", o), expected: "expression".into() }),
+        }
+    }
+
+    /// `CASE WHEN <条件> THEN <式> [WHEN ... THEN ...]* [ELSE <式>] END`
+    /// 条件部は WHERE句と同じ構文（`parse_where_expr`）を再利用する。
+    fn parse_case_expr(&mut self) -> Result<Expr, ParseError> {
+        self.expect(Token::Case)?;
+        let mut branches = Vec::new();
+        while self.peek() == &Token::When {
+            self.advance();
+            let cond = self.parse_where_expr()?;
+            self.expect(Token::Then)?;
+            let result = self.parse_expr()?;
+            branches.push((cond, result));
+        }
+        if branches.is_empty() {
+            return Err(ParseError::UnsupportedSyntax("CASE requires at least one WHEN branch".into()));
+        }
+        let else_expr = if self.peek() == &Token::Else {
+            self.advance();
+            Some(Box::new(self.parse_expr()?))
+        } else { None };
+        self.expect(Token::End)?;
+        Ok(Expr::Case { branches, else_expr })
+    }
+
+    fn parse_expr_list(&mut self) -> Result<Vec<Expr>, ParseError> {
+        let mut items = vec![self.parse_expr()?];
+        while self.peek() == &Token::Comma {
+            self.advance();
+            items.push(self.parse_expr()?);
+        }
+        Ok(items)
     }
 
     fn parse_from_clause(&mut self) -> Result<FromClause, ParseError> {
@@ -728,6 +880,44 @@ fn aggregate_func_from_name(name: &str) -> Option<AggregateFunc> {
     }
 }
 
+/// 大文字化済みの識別子名がスカラ関数名と一致すれば対応する `ScalarFunc` を返す。
+/// 集計関数と同様に予約語化していないため、呼び出し側は直後が `(` のときだけ採用する。
+fn scalar_func_from_name(name_upper: &str) -> Option<ScalarFunc> {
+    match name_upper {
+        "LENGTH"                => Some(ScalarFunc::Length),
+        "LOWER"                 => Some(ScalarFunc::Lower),
+        "UPPER"                 => Some(ScalarFunc::Upper),
+        "SUBSTR" | "SUBSTRING"  => Some(ScalarFunc::Substr),
+        "ROUND"                 => Some(ScalarFunc::Round),
+        "ABS"                   => Some(ScalarFunc::Abs),
+        _                       => None,
+    }
+}
+
+/// スカラ関数の引数の個数を検証する。
+/// `LENGTH`/`LOWER`/`UPPER`/`ABS` は1個、`SUBSTR` は2〜3個、`ROUND` は1〜2個。
+fn validate_scalar_func_arity(func: ScalarFunc, n: usize) -> Result<(), ParseError> {
+    let ok = match func {
+        ScalarFunc::Length | ScalarFunc::Lower | ScalarFunc::Upper | ScalarFunc::Abs => n == 1,
+        ScalarFunc::Substr => n == 2 || n == 3,
+        ScalarFunc::Round  => n == 1 || n == 2,
+    };
+    if ok { Ok(()) } else {
+        Err(ParseError::UnsupportedSyntax(format!("{:?} does not accept {} argument(s)", func, n)))
+    }
+}
+
+/// `CAST(expr AS <type>)` の型名を解決する。大文字小文字を区別せず、いくつかの別名も許容する。
+fn cast_type_from_name(name: &str) -> Result<CastType, ParseError> {
+    match name.to_uppercase().as_str() {
+        "TEXT" | "STRING" | "VARCHAR" => Ok(CastType::Text),
+        "INTEGER" | "INT"             => Ok(CastType::Integer),
+        "FLOAT" | "DOUBLE" | "REAL"   => Ok(CastType::Float),
+        "BOOLEAN" | "BOOL"            => Ok(CastType::Boolean),
+        other => Err(ParseError::UnsupportedSyntax(format!("unknown CAST target type '{}'", other))),
+    }
+}
+
 fn parse_quoted_label_name(s: &str) -> Result<String, ParseError> {
     s.strip_prefix("label.")
         .map(|name| name.to_string())
@@ -919,6 +1109,173 @@ mod tests {
     fn test_select_distinct() {
         let s = parse_select("SELECT DISTINCT department FROM label.employee").unwrap();
         assert!(s.distinct);
+    }
+
+    // --- Step 3: 式（算術演算・CASE・COALESCE・CAST・スカラ関数） ---
+
+    #[test]
+    fn test_select_arithmetic_expression() {
+        let s = parse_select("SELECT age * 2 AS doubled FROM label.employee").unwrap();
+        assert_eq!(s.columns, SelectColumns::Named(vec![
+            SelectItem::Expression(ExpressionItem {
+                expr: Expr::BinaryOp(
+                    Box::new(Expr::Column("age".into())), ArithOp::Mul, Box::new(Expr::Literal(LiteralValue::Integer(2)))
+                ),
+                alias: Some("doubled".into()),
+            }),
+        ]));
+    }
+
+    #[test]
+    fn test_select_arithmetic_precedence() {
+        // 1 + 2 * 3 は 1 + (2 * 3) と解釈される（乗除算が優先）
+        let s = parse_select("SELECT 1 + 2 * 3 AS n FROM label.employee").unwrap();
+        assert_eq!(s.columns, SelectColumns::Named(vec![
+            SelectItem::Expression(ExpressionItem {
+                expr: Expr::BinaryOp(
+                    Box::new(Expr::Literal(LiteralValue::Integer(1))), ArithOp::Add,
+                    Box::new(Expr::BinaryOp(
+                        Box::new(Expr::Literal(LiteralValue::Integer(2))), ArithOp::Mul, Box::new(Expr::Literal(LiteralValue::Integer(3)))
+                    )),
+                ),
+                alias: Some("n".into()),
+            }),
+        ]));
+    }
+
+    #[test]
+    fn test_select_subtraction_with_spaces() {
+        // 空白を挟めば減算として解釈できる（詰めて書くと負数リテラルと解釈されるため不可）
+        let s = parse_select("SELECT price - 10 AS discounted FROM label.employee").unwrap();
+        assert_eq!(s.columns, SelectColumns::Named(vec![
+            SelectItem::Expression(ExpressionItem {
+                expr: Expr::BinaryOp(Box::new(Expr::Column("price".into())), ArithOp::Sub, Box::new(Expr::Literal(LiteralValue::Integer(10)))),
+                alias: Some("discounted".into()),
+            }),
+        ]));
+    }
+
+    #[test]
+    fn test_select_unary_minus() {
+        let s = parse_select("SELECT -age AS negated FROM label.employee").unwrap();
+        assert_eq!(s.columns, SelectColumns::Named(vec![
+            SelectItem::Expression(ExpressionItem {
+                expr: Expr::BinaryOp(Box::new(Expr::Literal(LiteralValue::Integer(0))), ArithOp::Sub, Box::new(Expr::Column("age".into()))),
+                alias: Some("negated".into()),
+            }),
+        ]));
+    }
+
+    #[test]
+    fn test_select_parenthesized_expression() {
+        let s = parse_select("SELECT (a + b) * 2 AS n FROM label.x").unwrap();
+        assert_eq!(s.columns, SelectColumns::Named(vec![
+            SelectItem::Expression(ExpressionItem {
+                expr: Expr::BinaryOp(
+                    Box::new(Expr::BinaryOp(Box::new(Expr::Column("a".into())), ArithOp::Add, Box::new(Expr::Column("b".into())))),
+                    ArithOp::Mul, Box::new(Expr::Literal(LiteralValue::Integer(2))),
+                ),
+                alias: Some("n".into()),
+            }),
+        ]));
+    }
+
+    #[test]
+    fn test_select_case_expression() {
+        let s = parse_select(
+            "SELECT CASE WHEN rank = 1 THEN 'win' WHEN rank = 2 THEN 'place' ELSE 'lose' END AS result FROM label.race"
+        ).unwrap();
+        assert_eq!(s.columns, SelectColumns::Named(vec![
+            SelectItem::Expression(ExpressionItem {
+                expr: Expr::Case {
+                    branches: vec![
+                        (WhereExpr::Comparison(Comparison { column: "rank".into(), op: CompareOp::Eq, value: LiteralValue::Integer(1) }),
+                         Expr::Literal(LiteralValue::Text("win".into()))),
+                        (WhereExpr::Comparison(Comparison { column: "rank".into(), op: CompareOp::Eq, value: LiteralValue::Integer(2) }),
+                         Expr::Literal(LiteralValue::Text("place".into()))),
+                    ],
+                    else_expr: Some(Box::new(Expr::Literal(LiteralValue::Text("lose".into())))),
+                },
+                alias: Some("result".into()),
+            }),
+        ]));
+    }
+
+    #[test]
+    fn test_select_case_without_else() {
+        let s = parse_select("SELECT CASE WHEN age > 20 THEN 'adult' END AS c FROM label.x").unwrap();
+        match &s.columns {
+            SelectColumns::Named(items) => match &items[0] {
+                SelectItem::Expression(e) => match &e.expr {
+                    Expr::Case { else_expr, .. } => assert!(else_expr.is_none()),
+                    _ => panic!("expected Case"),
+                },
+                _ => panic!("expected Expression"),
+            },
+            _ => panic!("expected Named"),
+        }
+    }
+
+    #[test]
+    fn test_select_case_requires_at_least_one_when() {
+        assert!(parse_select("SELECT CASE ELSE 'x' END FROM label.x").is_err());
+    }
+
+    #[test]
+    fn test_select_coalesce() {
+        let s = parse_select("SELECT COALESCE(nickname, name) AS display_name FROM label.employee").unwrap();
+        assert_eq!(s.columns, SelectColumns::Named(vec![
+            SelectItem::Expression(ExpressionItem {
+                expr: Expr::Coalesce(vec![Expr::Column("nickname".into()), Expr::Column("name".into())]),
+                alias: Some("display_name".into()),
+            }),
+        ]));
+    }
+
+    #[test]
+    fn test_select_cast() {
+        let s = parse_select("SELECT CAST(age AS text) AS age_text FROM label.employee").unwrap();
+        assert_eq!(s.columns, SelectColumns::Named(vec![
+            SelectItem::Expression(ExpressionItem {
+                expr: Expr::Cast(Box::new(Expr::Column("age".into())), CastType::Text),
+                alias: Some("age_text".into()),
+            }),
+        ]));
+    }
+
+    #[test]
+    fn test_select_cast_unknown_type_is_error() {
+        assert!(parse_select("SELECT CAST(age AS unknown_type) FROM label.employee").is_err());
+    }
+
+    #[test]
+    fn test_select_scalar_functions() {
+        let s = parse_select(
+            "SELECT LENGTH(name), LOWER(name), UPPER(name), ROUND(odds, 1), ABS(age), SUBSTR(name, 1, 2) FROM label.employee"
+        ).unwrap();
+        match &s.columns {
+            SelectColumns::Named(items) => {
+                assert_eq!(items.len(), 6);
+                for it in items { assert!(matches!(it, SelectItem::Expression(_))); }
+            }
+            _ => panic!("expected Named"),
+        }
+    }
+
+    #[test]
+    fn test_select_scalar_func_wrong_arity_is_error() {
+        assert!(parse_select("SELECT LENGTH(name, 1) FROM label.employee").is_err());
+        assert!(parse_select("SELECT SUBSTR(name) FROM label.employee").is_err());
+    }
+
+    #[test]
+    fn test_select_function_name_as_plain_column_still_works() {
+        // COALESCE/CAST/スカラ関数名は予約語化していないため、"(" が続かなければ通常の列名
+        let s = parse_select("SELECT round, length FROM label.employee").unwrap();
+        assert_eq!(s.columns, SelectColumns::Named(vec![
+            SelectItem::Column(ColumnItem { column: "round".into(), alias: None }),
+            SelectItem::Column(ColumnItem { column: "length".into(), alias: None }),
+        ]));
     }
     #[test]
     fn test_select_sum_avg_min_max() {

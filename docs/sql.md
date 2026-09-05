@@ -52,6 +52,25 @@ SELECT department, COUNT(*) AS n, AVG(age) AS avg_age
   GROUP BY department
   HAVING n >= 2
   ORDER BY avg_age DESC
+
+-- 算術演算（+ - * /）。'-' を減算として使うときは前後に空白が必要（詰めて書くと負数リテラルになる）
+SELECT odds * 100 AS pct FROM label.race
+SELECT price - 10 AS discounted FROM label.product
+SELECT (a + b) * 2 AS n FROM label.x
+SELECT -age AS negated FROM label.employee
+
+-- CASE 式（条件部は WHERE と同じ構文が使える）
+SELECT name, CASE WHEN rank = 1 THEN 'win' WHEN rank <= 3 THEN 'place' ELSE 'lose' END AS result
+  FROM label.race
+
+-- COALESCE（先頭から順にNULLでない最初の値を返す）
+SELECT COALESCE(nickname, name) AS display_name FROM label.employee
+
+-- CAST（text / integer / float / boolean へ変換。変換できなければ NULL）
+SELECT CAST(age AS text) AS age_text FROM label.employee
+
+-- スカラ関数: LENGTH / LOWER / UPPER / SUBSTR(str, start[, length]) / ROUND(num[, digits]) / ABS
+SELECT LENGTH(name) AS len, UPPER(name) AS name_upper, ROUND(odds, 1) AS odds_r FROM label.race
 ```
 
 補足:
@@ -96,6 +115,29 @@ SELECT department, COUNT(*) AS n, AVG(age) AS avg_age
     （`SELECT COUNT(*) AS n ... ORDER BY n` のように書く）。
   - `SELECT *` は `GROUP BY`/`HAVING` と組み合わせられない（集計対象・グループ代表値の区別がつかなくなるため）。
   - `SUM`/`AVG`/`MIN`/`MAX` に `*` は使えない（`COUNT(*)` のみ許可）。
+- SELECT のカラムには算術演算・`CASE`式・`COALESCE`・`CAST`・スカラ関数を使った一般の式を書ける。
+  式の結果は `AS` エイリアスがあればその名前、無ければ `expr1`/`expr2`... のような既定名で出力される
+  （`ORDER BY` からもこの名前で参照できる）。
+  - 算術演算子は `+` `-` `*` `/`（`*`/`/` が `+`/`-` より優先。`()` で優先順位を変更可能）。
+    `-` を減算として使うときは前後どちらかに空白を入れる必要がある（`price -10` や `price-10` のように
+    詰めて書くと、`-10` が負数リテラル1個として解釈されてしまいエラーになる）。`-age` のような単項マイナスも使える。
+  - `/` は常に小数を返す（整数同士の除算でも切り捨てない）。ゼロ除算は `NULL` を返す。
+  - どちらかのオペランドが数値でない場合（文字列・真偽値・`NULL`・未設定カラムなど）は `NULL` を返す。
+  - `CASE WHEN <条件> THEN <式> [WHEN ... THEN ...]* [ELSE <式>] END`。条件部は `WHERE` 句と同じ構文
+    （比較・`IS NULL`・`IN`・`BETWEEN`・`AND`/`OR`/`NOT`）が使える。`ELSE` 省略時、どの条件にも一致しなければ
+    `NULL` を返す。
+  - `COALESCE(expr1, expr2, ...)` は先頭から順に評価し、`NULL` でない最初の値を返す（全て `NULL` なら `NULL`）。
+  - `CAST(expr AS <type>)` の `<type>` は `TEXT`（別名 `STRING`/`VARCHAR`）/`INTEGER`（別名 `INT`）/
+    `FLOAT`（別名 `DOUBLE`/`REAL`）/`BOOLEAN`（別名 `BOOL`）。値が変換できない場合（`'abc'` を `INTEGER` へ
+    等）は `NULL` を返す（エラーにはならない）。
+  - スカラ関数: `LENGTH(x)`（文字数）・`LOWER(x)`・`UPPER(x)`・`SUBSTR(x, start[, length])`（`start` は1始まり。
+    `SUBSTRING` も同義）・`ROUND(x[, digits])`（`digits` 省略時は0桁。常に小数を返す）・`ABS(x)`。
+    `COUNT`/`SUM`/`AVG`/`MIN`/`MAX` と同様に予約語ではなく、直後に `(` が続くときだけ関数として扱われる。
+  - **集計関数（`COUNT`/`SUM`/`AVG`/`MIN`/`MAX`）を式の内側に直接ネストすることはできない**
+    （`ROUND(AVG(age), 0)` は不可）。代わりに集計関数へ `AS` でエイリアスを付け、別の式からそのエイリアスを
+    カラム参照する（`AVG(age) AS avg_age, ROUND(avg_age, 0) AS avg_rounded` のように2項目に分ける）。
+  - 先に指定した式のエイリアスを、後続の式からカラム参照として使うこともできる
+    （`age * 2 AS doubled, doubled + 1 AS plus_one` のように左から順に評価される）。
 
 ## INSERT 構文
 
