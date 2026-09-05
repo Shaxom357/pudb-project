@@ -15,7 +15,20 @@ SELECT * FROM label.employee WHERE name = '田中'
 SELECT * FROM label.employee WHERE age > 30 AND city = 'Tokyo'
 SELECT * FROM label.employee WHERE name LIKE '田%'
 SELECT * FROM label.employee ORDER BY salary DESC LIMIT 10
+
+-- ':' など識別子に使えない文字を含むラベルは文字列リテラル形式で指定する
+SELECT * FROM 'label.country:Japan'
+SELECT * FROM label.customer AND 'label.category:drink'
 ```
+
+補足:
+- ラベル名は `label.employee` のような識別子形式（英数字・`_`・日本語などの文字のみ）に加えて、
+  `'label.country:Japan'` のような `'label.<name>'` 文字列リテラル形式でも指定できる。`:` や空白など
+  識別子として使えない文字を含むラベル（`country:Japan` のような namespace 付きタグ）はリテラル形式が必要。
+  `'label.*'` は `label.*` と同じ意味になる。`FROM` の `AND`/`OR` では両形式を混在させられる。
+  `UPDATE`（`UPDATE 'label.xxx' SET ...`・`UPDATE LABEL 'label.old' SET 'label.new'`）・
+  `DELETE`（`DELETE FROM 'label.xxx'`・`DELETE LABEL FROM 'label.xxx'`）でも同様。
+  `INSERT INTO ('label.xxx')` は元から対応済み（[INSERT 構文](#insert-構文)を参照）。
 
 ## INSERT 構文
 

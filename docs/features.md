@@ -54,6 +54,7 @@
 - ✅ 独自拡張 SQL `DELETE FROM label.xxx WHERE ...` 構文（対象ラベルのレコードをデータごと完全に削除）。`WHERE`句は省略可（省略時は対象ラベル内の全レコードを一括削除）
 - ✅ `DELETE FROM label.*`（`WHERE`と組み合わせ可能。省略時はDB全体の全レコードを削除）
 - ✅ `DELETE LABEL FROM label.xxx WHERE ...`（レコードそのものは削除せず、指定ラベルのみを対象レコードから外す。`WHERE`省略時は`xxx`が付いた全レコードが一括で対象になる）
+- ✅ ラベル名の文字列リテラル形式 `'label.xxx'`（`'label.*'` を含む）を `SELECT`/`UPDATE`/`DELETE` のラベル指定全箇所（`FROM`・`UPDATE LABEL`・`DELETE LABEL`）で使用可能。識別子形式（英数字・`_`のみ）では書けない `:` 等を含むラベル名（`country:Japan` のような namespace 付きタグ）を扱える。従来 `INSERT` のみで対応していた形式を拡張したもの
 
 構文の詳細と例は [sql.md](sql.md) を参照してください。
 
