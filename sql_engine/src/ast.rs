@@ -4,12 +4,18 @@
 /// SELECT文全体
 #[derive(Debug, Clone, PartialEq)]
 pub struct SelectStatement {
+    /// SELECT DISTINCT かどうか
+    pub distinct: bool,
     /// 取得するカラム（`*` なら空 Vec）
     pub columns: SelectColumns,
     /// FROM句（ラベル指定）
     pub from: FromClause,
     /// WHERE句（省略可）
     pub where_clause: Option<WhereExpr>,
+    /// GROUP BY句（省略可。空なら集計関数使用時も全体を1グループとして扱う）
+    pub group_by: Vec<String>,
+    /// HAVING句（省略可。GROUP BY 後のグループに対する絞り込み）
+    pub having: Option<WhereExpr>,
     /// ORDER BY句（省略可）
     pub order_by: Vec<OrderByItem>,
     /// LIMIT句（省略可）
@@ -23,15 +29,48 @@ pub struct SelectStatement {
 pub enum SelectColumns {
     /// SELECT *
     All,
-    /// SELECT col1, col2 AS alias2, ...
+    /// SELECT col1, col2 AS alias2, COUNT(*) AS n, ...
     Named(Vec<SelectItem>),
 }
 
-/// SELECT で指定する1カラム（`AS` によるエイリアス指定は省略可）
+/// SELECT で指定する1項目：素のカラム参照、または集計関数呼び出し
 #[derive(Debug, Clone, PartialEq)]
-pub struct SelectItem {
+pub enum SelectItem {
+    Column(ColumnItem),
+    Aggregate(AggregateItem),
+}
+
+/// 素のカラム参照（`AS` によるエイリアス指定は省略可）
+#[derive(Debug, Clone, PartialEq)]
+pub struct ColumnItem {
     pub column: String,
     pub alias: Option<String>,
+}
+
+/// 集計関数呼び出し: `COUNT(*)` / `SUM(col)` / `AVG(col)` / `MIN(col)` / `MAX(col)`
+/// （`AS` によるエイリアス指定は省略可。省略時は `count(*)` / `sum(col)` のような既定名になる）
+#[derive(Debug, Clone, PartialEq)]
+pub struct AggregateItem {
+    pub func: AggregateFunc,
+    pub arg: AggregateArg,
+    pub alias: Option<String>,
+}
+
+/// 集計関数の種類
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AggregateFunc {
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
+}
+
+/// 集計関数の引数（`COUNT(*)` のみ `Star` を取りうる）
+#[derive(Debug, Clone, PartialEq)]
+pub enum AggregateArg {
+    Star,
+    Column(String),
 }
 
 /// FROM句：ラベル条件の組み合わせ

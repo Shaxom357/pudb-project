@@ -57,18 +57,38 @@ pub fn execute_select(db: &Database, stmt: &SelectStatement) -> QueryResult {
         records.retain(|r| eval_where(r, where_expr));
     }
 
+    // total_matched は WHERE 後・GROUP BY/LIMIT/OFFSET 前の一致件数（従来どおり集計前の生レコード数）
     let total_matched = records.len();
 
+    if is_aggregate_query(stmt) {
+        // GROUP BY / 集計関数を含むクエリは、グループごとに合成した Record を1行として扱う。
+        // こちらは新規に Record を組み立てる都合上、参照ではなく所有データとして持つ。
+        let mut grouped = build_grouped_records(&records, stmt);
+        if let Some(ref having) = stmt.having {
+            grouped.retain(|r| eval_where(r, having));
+        }
+        let refs: Vec<&Record> = grouped.iter().collect();
+        finish_select(db, refs, stmt, total_matched)
+    } else {
+        finish_select(db, records, stmt, total_matched)
+    }
+}
+
+/// GROUP BY 句があるか、集計関数（`COUNT`/`SUM`/`AVG`/`MIN`/`MAX`）が1つでも SELECT に
+/// 含まれるか、または HAVING 句があるかを判定する（このいずれかがあれば集計クエリとして扱う）。
+fn is_aggregate_query(stmt: &SelectStatement) -> bool {
+    if !stmt.group_by.is_empty() || stmt.having.is_some() { return true; }
+    matches!(&stmt.columns, SelectColumns::Named(items)
+        if items.iter().any(|it| matches!(it, SelectItem::Aggregate(_))))
+}
+
+/// ORDER BY・LIMIT/OFFSET・DISTINCT・カラム投影を適用して最終結果を組み立てる
+/// （集計クエリ・非集計クエリの両方から共通で呼ばれる）。
+fn finish_select(db: &Database, mut records: Vec<&Record>, stmt: &SelectStatement, total_matched: usize) -> QueryResult {
     // ORDER BY はカラム名のほか、SELECT ... AS で付けたエイリアスでも指定できるようにする
     // （元のカラム名に解決してから並べ替える）。
     let order_by = resolve_order_by_aliases(&stmt.columns, &stmt.order_by);
     if !order_by.is_empty() { sort_records(&mut records, &order_by); }
-
-    if let Some(offset) = stmt.offset {
-        let skip = (offset as usize).min(records.len());
-        records.drain(0..skip);
-    }
-    if let Some(limit) = stmt.limit { records.truncate(limit as usize); }
 
     // SELECT するカラムを決定
     // SELECT * の場合は id 列を先頭、labels 列（カンマ区切り）を末尾に付与する
@@ -87,12 +107,12 @@ pub fn execute_select(db: &Database, stmt: &SelectStatement) -> QueryResult {
             (display, internal)
         }
         SelectColumns::Named(items) => (
-            items.iter().map(|it| it.alias.clone().unwrap_or_else(|| it.column.clone())).collect(),
-            items.iter().map(|it| it.column.clone()).collect(),
+            items.iter().map(select_item_output_name).collect(),
+            items.iter().map(select_item_internal_key).collect(),
         ),
     };
 
-    let rows: Vec<Vec<CellValue>> = records.iter().map(|r| {
+    let mut rows: Vec<Vec<CellValue>> = records.iter().map(|r| {
         internal_cols.iter().map(|col| {
             if col == "__id" { CellValue::Integer(r.id as i64) }
             else if col == "__labels" { CellValue::Text(r.labels.join(",")) }
@@ -100,7 +120,178 @@ pub fn execute_select(db: &Database, stmt: &SelectStatement) -> QueryResult {
         }).collect()
     }).collect();
 
+    // DISTINCT は投影後の出力行（表示カラムの値の組）に対して重複排除する。
+    // LIMIT/OFFSET より前に適用しないと、重複排除で件数が減った分だけ結果がずれてしまう。
+    if stmt.distinct {
+        let mut seen: std::collections::HashSet<Vec<String>> = std::collections::HashSet::new();
+        rows.retain(|row| seen.insert(row.iter().map(CellValue::display).collect()));
+    }
+
+    if let Some(offset) = stmt.offset {
+        let skip = (offset as usize).min(rows.len());
+        rows.drain(0..skip);
+    }
+    if let Some(limit) = stmt.limit { rows.truncate(limit as usize); }
+
     QueryResult { columns: display_cols, rows, total_matched }
+}
+
+/// SELECT 項目の表示名（`AS` エイリアスがあればそれ、無ければ既定名）
+fn select_item_output_name(item: &SelectItem) -> String {
+    match item {
+        SelectItem::Column(c)    => c.alias.clone().unwrap_or_else(|| c.column.clone()),
+        SelectItem::Aggregate(a) => aggregate_output_name(a),
+    }
+}
+
+/// SELECT 項目の値を Record から引くための内部キー（素のカラムはカラム名そのもの、
+/// 集計関数は `build_grouped_records` が合成レコードへ書き込むキーと一致させる）
+fn select_item_internal_key(item: &SelectItem) -> String {
+    match item {
+        SelectItem::Column(c)    => c.column.clone(),
+        SelectItem::Aggregate(a) => aggregate_output_name(a),
+    }
+}
+
+/// 集計関数呼び出しの既定の出力名（`AS` 省略時）。`AS` があればそちらを優先する。
+/// この名前は表示名だけでなく、合成レコードの内部カラムキーとしても使う。
+fn aggregate_output_name(agg: &AggregateItem) -> String {
+    if let Some(alias) = &agg.alias { return alias.clone(); }
+    let func = match agg.func {
+        AggregateFunc::Count => "count", AggregateFunc::Sum => "sum",
+        AggregateFunc::Avg   => "avg",   AggregateFunc::Min => "min", AggregateFunc::Max => "max",
+    };
+    match &agg.arg {
+        AggregateArg::Star        => format!("{}(*)", func),
+        AggregateArg::Column(col) => format!("{}({})", func, col),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GROUP BY / 集計関数
+// ---------------------------------------------------------------------------
+
+/// WHERE 適用後のレコードを GROUP BY 句でグルーピングし、グループごとに1つの合成
+/// Record を組み立てる（`GROUP BY` 省略時は全件を1グループとして扱う）。
+/// 合成 Record のカラムには GROUP BY 対象カラムの値（代表レコード＝先頭の値をそのまま採用）
+/// と、集計関数の計算結果を `aggregate_output_name` のキーで格納する。GROUP BY に
+/// 含まれない素のカラムを SELECT した場合も同様に代表レコードの値を採用する（標準SQLの
+/// ように GROUP BY 対象外カラムの指定をエラーにはしない、緩めの仕様）。
+fn build_grouped_records(records: &[&Record], stmt: &SelectStatement) -> Vec<Record> {
+    let mut order: Vec<Vec<String>> = Vec::new();
+    let mut members: std::collections::HashMap<Vec<String>, Vec<Record>> = std::collections::HashMap::new();
+    for r in records {
+        let key = group_key(r, &stmt.group_by);
+        if !members.contains_key(&key) { order.push(key.clone()); }
+        members.entry(key).or_default().push((*r).clone());
+    }
+    if records.is_empty() && stmt.group_by.is_empty() {
+        // GROUP BY 無しで対象レコードが0件の場合でも、COUNT(*)=0 のような集計結果を
+        // 1行返す（標準SQLの集計クエリと同じ挙動）。
+        order.push(vec![]);
+        members.insert(vec![], vec![]);
+    }
+
+    order.into_iter().map(|key| {
+        let group = &members[&key];
+        let mut out = Record::new(0);
+        for col in &stmt.group_by {
+            if let Some(first) = group.first() {
+                if let Some(v) = first.columns.get(col) { out.set(col.clone(), v.clone()); }
+            }
+        }
+        if let SelectColumns::Named(items) = &stmt.columns {
+            for item in items {
+                match item {
+                    SelectItem::Aggregate(agg) => {
+                        let value = eval_aggregate(agg, group);
+                        out.set(aggregate_output_name(agg), cell_to_data_type(&value));
+                    }
+                    SelectItem::Column(c) => {
+                        if let Some(first) = group.first() {
+                            if let Some(v) = first.columns.get(&c.column) { out.set(c.column.clone(), v.clone()); }
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }).collect()
+}
+
+/// GROUP BY 対象カラムの値からグルーピングキーを作る（カラム未設定・NULL は1つの
+/// グループにまとめる。型ごとにタグを付けて `Text("1")` と `Integer(1)` を別グループにする）。
+fn group_key(r: &Record, group_by: &[String]) -> Vec<String> {
+    group_by.iter().map(|c| match r.columns.get(c) {
+        None | Some(DataType::Null) => "\u{0}NULL".to_string(),
+        Some(DataType::Text(s))     => format!("T:{}", s),
+        Some(DataType::Integer(n))  => format!("I:{}", n),
+        Some(DataType::Float(f))    => format!("F:{}", f),
+        Some(DataType::Boolean(b))  => format!("B:{}", b),
+    }).collect()
+}
+
+/// 1グループ分のレコード群に対して集計関数を1つ計算する。
+/// `SUM`/`MIN`/`MAX` は対象カラムが全て整数なら `Integer` を、Float が1つでも混ざれば
+/// `Float` を返す（`AVG` は常に `Float`）。対象カラムに数値が1件も無ければ `Null`
+/// （`COUNT` は対象0件でも `Integer(0)` を返す。標準SQLの集計関数と同じ挙動）。
+fn eval_aggregate(agg: &AggregateItem, group: &[Record]) -> CellValue {
+    if agg.func == AggregateFunc::Count {
+        return match &agg.arg {
+            AggregateArg::Star => CellValue::Integer(group.len() as i64),
+            AggregateArg::Column(col) => CellValue::Integer(
+                group.iter().filter(|r| !matches!(r.columns.get(col.as_str()), None | Some(DataType::Null))).count() as i64
+            ),
+        };
+    }
+    // パーサーが SUM/AVG/MIN/MAX(*) を弾いているため、ここに到達する引数は必ず Column
+    let AggregateArg::Column(col) = &agg.arg else {
+        unreachable!("SUM/AVG/MIN/MAX with '*' is rejected by the parser");
+    };
+    let (values, all_integer) = numeric_column_values(group, col);
+    if values.is_empty() { return CellValue::Null; }
+    match agg.func {
+        AggregateFunc::Sum => {
+            let total: f64 = values.iter().sum();
+            if all_integer { CellValue::Integer(total as i64) } else { CellValue::Float(total) }
+        }
+        AggregateFunc::Avg => CellValue::Float(values.iter().sum::<f64>() / values.len() as f64),
+        AggregateFunc::Min => {
+            let m = values.iter().cloned().fold(f64::INFINITY, f64::min);
+            if all_integer { CellValue::Integer(m as i64) } else { CellValue::Float(m) }
+        }
+        AggregateFunc::Max => {
+            let m = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            if all_integer { CellValue::Integer(m as i64) } else { CellValue::Float(m) }
+        }
+        AggregateFunc::Count => unreachable!("handled above"),
+    }
+}
+
+/// グループ内の指定カラムから数値（Integer/Float）だけを取り出す。
+/// 戻り値の bool は「対象カラムの値が全て Integer だったか」（1つでも Float が
+/// 混ざれば false）。テキスト・真偽値・NULL・未設定の行は集計対象から除外する。
+fn numeric_column_values(group: &[Record], col: &str) -> (Vec<f64>, bool) {
+    let mut values = Vec::new();
+    let mut all_integer = true;
+    for r in group {
+        match r.columns.get(col) {
+            Some(DataType::Integer(n)) => values.push(*n as f64),
+            Some(DataType::Float(f))   => { values.push(*f); all_integer = false; }
+            _ => {}
+        }
+    }
+    (values, all_integer)
+}
+
+fn cell_to_data_type(v: &CellValue) -> DataType {
+    match v {
+        CellValue::Text(s)    => DataType::Text(s.clone()),
+        CellValue::Integer(n) => DataType::Integer(*n),
+        CellValue::Float(f)   => DataType::Float(*f),
+        CellValue::Boolean(b) => DataType::Boolean(*b),
+        CellValue::Null       => DataType::Null,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -241,12 +432,17 @@ fn like_match(text: &str, pattern: &str) -> bool {
 /// 元のカラム名に解決した新しい Vec を返す（該当しない項目はそのまま）。
 fn resolve_order_by_aliases(columns: &SelectColumns, order_by: &[OrderByItem]) -> Vec<OrderByItem> {
     let SelectColumns::Named(items) = columns else { return order_by.to_vec(); };
-    let alias_map: std::collections::HashMap<&str, &str> = items.iter()
-        .filter_map(|it| it.alias.as_deref().map(|alias| (alias, it.column.as_str())))
+    // 集計関数（`COUNT(*) AS n` 等）はエイリアス無しでは括弧を含む式になり ORDER BY から
+    // 識別子として参照できないため、エイリアスが無い集計項目は対象外（内部キーへの解決不要）。
+    let alias_map: std::collections::HashMap<&str, String> = items.iter()
+        .filter_map(|it| match it {
+            SelectItem::Column(c)    => c.alias.as_deref().map(|a| (a, c.column.clone())),
+            SelectItem::Aggregate(a) => a.alias.as_deref().map(|alias| (alias, aggregate_output_name(a))),
+        })
         .collect();
     if alias_map.is_empty() { return order_by.to_vec(); }
     order_by.iter().map(|item| OrderByItem {
-        column: alias_map.get(item.column.as_str()).map(|c| c.to_string()).unwrap_or_else(|| item.column.clone()),
+        column: alias_map.get(item.column.as_str()).cloned().unwrap_or_else(|| item.column.clone()),
         direction: item.direction.clone(),
     }).collect()
 }
@@ -649,6 +845,105 @@ mod select_tests {
         let r = select(&db, "SELECT name FROM employee WHERE age = 24");
         assert_eq!(r.rows.len(), 1);
         assert_eq!(r.rows[0][0], CellValue::Text("田中".into()));
+    }
+
+    // --- GROUP BY / 集計関数 / HAVING / DISTINCT ---
+
+    /// 田中(dev,24) / 鈴木(dev,30) / 佐藤(sales,40) / 高橋(sales, age未設定) の4件を持つDB
+    fn setup_departments() -> Database {
+        let mut db = Database::new();
+        insert(&mut db, "INSERT INTO (label.employee) (name, department, age) VALUE ('田中', 'dev', 24)");
+        insert(&mut db, "INSERT INTO (label.employee) (name, department, age) VALUE ('鈴木', 'dev', 30)");
+        insert(&mut db, "INSERT INTO (label.employee) (name, department, age) VALUE ('佐藤', 'sales', 40)");
+        insert(&mut db, "INSERT INTO (label.employee) (name, department) VALUE ('高橋', 'sales')");
+        db
+    }
+
+    #[test]
+    fn test_select_count_star_group_by() {
+        let db = setup_departments();
+        let r = select(&db, "SELECT department, COUNT(*) AS n FROM label.employee GROUP BY department ORDER BY department");
+        assert_eq!(r.columns, vec!["department".to_string(), "n".to_string()]);
+        assert_eq!(r.rows, vec![
+            vec![CellValue::Text("dev".into()), CellValue::Integer(2)],
+            vec![CellValue::Text("sales".into()), CellValue::Integer(2)],
+        ]);
+    }
+
+    #[test]
+    fn test_select_sum_avg_min_max_per_group_all_integer_stays_integer() {
+        let db = setup_departments();
+        let r = select(&db,
+            "SELECT department, SUM(age) AS s, AVG(age) AS a, MIN(age) AS lo, MAX(age) AS hi \
+             FROM label.employee GROUP BY department ORDER BY department"
+        );
+        // dev: age=24,30 -> sum=54, avg=27.0, min=24, max=30（全て整数なのでSUM/MIN/MAXはInteger）
+        assert_eq!(r.rows[0], vec![
+            CellValue::Text("dev".into()), CellValue::Integer(54), CellValue::Float(27.0),
+            CellValue::Integer(24), CellValue::Integer(30),
+        ]);
+        // sales: age=40 のみ（高橋はage未設定なので集計対象外）
+        assert_eq!(r.rows[1], vec![
+            CellValue::Text("sales".into()), CellValue::Integer(40), CellValue::Float(40.0),
+            CellValue::Integer(40), CellValue::Integer(40),
+        ]);
+    }
+
+    #[test]
+    fn test_select_count_column_excludes_missing_and_null() {
+        let db = setup_departments();
+        let r = select(&db, "SELECT department, COUNT(age) AS n FROM label.employee GROUP BY department ORDER BY department");
+        // dev: 2件とも age あり -> 2 / sales: 佐藤のみ age あり(高橋は未設定) -> 1
+        assert_eq!(r.rows, vec![
+            vec![CellValue::Text("dev".into()), CellValue::Integer(2)],
+            vec![CellValue::Text("sales".into()), CellValue::Integer(1)],
+        ]);
+    }
+
+    #[test]
+    fn test_select_aggregate_without_group_by_returns_single_row() {
+        let db = setup_departments();
+        let r = select(&db, "SELECT COUNT(*) AS n FROM label.employee");
+        assert_eq!(r.rows, vec![vec![CellValue::Integer(4)]]);
+    }
+
+    #[test]
+    fn test_select_aggregate_over_empty_result_returns_zero_row() {
+        let db = setup_departments();
+        let r = select(&db, "SELECT COUNT(*) AS n, SUM(age) AS s FROM label.employee WHERE department = 'nonexistent'");
+        assert_eq!(r.rows, vec![vec![CellValue::Integer(0), CellValue::Null]]);
+    }
+
+    #[test]
+    fn test_select_having_filters_groups() {
+        let db = setup_departments();
+        let r = select(&db,
+            "SELECT department, COUNT(*) AS n FROM label.employee GROUP BY department HAVING n > 2"
+        );
+        assert_eq!(r.rows.len(), 0);
+        let r2 = select(&db,
+            "SELECT department, COUNT(*) AS n FROM label.employee GROUP BY department HAVING n >= 2"
+        );
+        assert_eq!(r2.rows.len(), 2);
+    }
+
+    #[test]
+    fn test_select_group_by_order_by_aggregate_alias() {
+        let db = setup_departments();
+        let r = select(&db,
+            "SELECT department, SUM(age) AS total FROM label.employee GROUP BY department ORDER BY total DESC"
+        );
+        assert_eq!(r.rows[0][0], CellValue::Text("dev".into())); // sum=54 > sales(40)
+    }
+
+    #[test]
+    fn test_select_distinct_deduplicates_rows() {
+        let db = setup_departments();
+        let r = select(&db, "SELECT DISTINCT department FROM label.employee ORDER BY department");
+        assert_eq!(r.rows, vec![
+            vec![CellValue::Text("dev".into())],
+            vec![CellValue::Text("sales".into())],
+        ]);
     }
 }
 

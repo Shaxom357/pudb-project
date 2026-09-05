@@ -10,8 +10,10 @@ use crate::ast::*;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     // キーワード
-    Select, From, Where, And, Or, Not,
+    Select, Distinct, From, Where, And, Or, Not,
     OrderBy, // ORDER BY は2語だが1トークンとして扱う
+    GroupBy, // GROUP BY も同様に2語で1トークン
+    Having,
     Limit, Offset, Like, Asc, Desc, Null, True, False,
     Is, In, Between, As,
     Insert, Into, Value,
@@ -143,6 +145,18 @@ impl<'a> Lexer<'a> {
                 if kw.to_uppercase() == "BY" { Token::OrderBy }
                 else { self.pos = saved; Token::Ident(s) }
             }
+            "GROUP"  => {
+                let saved = self.pos;
+                self.skip_whitespace();
+                let mut kw = String::new();
+                while let Some(c) = self.peek_char() {
+                    if c.is_alphabetic() { kw.push(c); self.advance_char(); } else { break; }
+                }
+                if kw.to_uppercase() == "BY" { Token::GroupBy }
+                else { self.pos = saved; Token::Ident(s) }
+            }
+            "HAVING"  => Token::Having,
+            "DISTINCT" => Token::Distinct,
             "LIMIT"   => Token::Limit,
             "OFFSET"  => Token::Offset,
             "LIKE"    => Token::Like,
@@ -257,10 +271,17 @@ impl Parser {
 
     pub fn parse_select(&mut self) -> Result<SelectStatement, ParseError> {
         self.expect(Token::Select)?;
+        let distinct = if self.peek() == &Token::Distinct { self.advance(); true } else { false };
         let columns = self.parse_select_columns()?;
         self.expect(Token::From)?;
         let from = self.parse_from_clause()?;
         let where_clause = if self.peek() == &Token::Where {
+            self.advance(); Some(self.parse_where_expr()?)
+        } else { None };
+        let group_by = if self.peek() == &Token::GroupBy {
+            self.advance(); self.parse_ident_list()?
+        } else { vec![] };
+        let having = if self.peek() == &Token::Having {
             self.advance(); Some(self.parse_where_expr()?)
         } else { None };
         let order_by = if self.peek() == &Token::OrderBy {
@@ -282,7 +303,16 @@ impl Parser {
                     got: format!("{:?}", o), expected: "non-negative integer".into() }),
             }
         } else { None };
-        Ok(SelectStatement { columns, from, where_clause, order_by, limit, offset })
+
+        // GROUP BY / HAVING は集計目的の構文なので、カラムを列挙しない SELECT * とは
+        // 組み合わせられない（列挙されていないと、どのカラムがグループ単位の代表値で
+        // どれが集計結果なのか区別できないため）。
+        if matches!(columns, SelectColumns::All) && (!group_by.is_empty() || having.is_some()) {
+            return Err(ParseError::UnsupportedSyntax(
+                "SELECT * cannot be combined with GROUP BY / HAVING; list columns explicitly".into()));
+        }
+
+        Ok(SelectStatement { distinct, columns, from, where_clause, group_by, having, order_by, limit, offset })
     }
 
     fn parse_select_columns(&mut self) -> Result<SelectColumns, ParseError> {
@@ -292,14 +322,39 @@ impl Parser {
         Ok(SelectColumns::Named(items))
     }
 
-    /// `col` または `col AS alias` の1項目をパースする
+    /// `col [AS alias]` または `COUNT(*)`/`SUM(col)`/`AVG(col)`/`MIN(col)`/`MAX(col) [AS alias]`
+    /// の1項目をパースする。集計関数名は予約語化せず、識別子の直後が `(` のときだけ
+    /// 集計関数呼び出しとして扱う（`count` 等をそのまま列名として使えるようにするため）。
     fn parse_select_item(&mut self) -> Result<SelectItem, ParseError> {
+        if let Token::Ident(name) = self.peek().clone() {
+            if let Some(func) = aggregate_func_from_name(&name) {
+                if self.peek_at(1) == &Token::LParen {
+                    self.advance(); // 関数名
+                    self.advance(); // "("
+                    let arg = if func == AggregateFunc::Count && self.peek() == &Token::Star {
+                        self.advance();
+                        AggregateArg::Star
+                    } else {
+                        AggregateArg::Column(self.expect_ident()?)
+                    };
+                    self.expect(Token::RParen)?;
+                    if arg == AggregateArg::Star && func != AggregateFunc::Count {
+                        return Err(ParseError::UnsupportedSyntax(
+                            "'*' can only be used with COUNT(*); SUM/AVG/MIN/MAX require a column name".into()));
+                    }
+                    let alias = if self.peek() == &Token::As {
+                        self.advance(); Some(self.expect_ident()?)
+                    } else { None };
+                    return Ok(SelectItem::Aggregate(AggregateItem { func, arg, alias }));
+                }
+            }
+        }
         let column = self.expect_ident()?;
         let alias = if self.peek() == &Token::As {
             self.advance();
             Some(self.expect_ident()?)
         } else { None };
-        Ok(SelectItem { column, alias })
+        Ok(SelectItem::Column(ColumnItem { column, alias }))
     }
 
     fn parse_from_clause(&mut self) -> Result<FromClause, ParseError> {
@@ -659,6 +714,20 @@ impl Parser {
 
 /// `'label.<name>'` 形式の文字列リテラルから `<name>` 部分を取り出す（`'label.*'` は
 /// `name == "*"` として返す。空・`*` かどうかの判定は呼び出し側の用途ごとに行う）。
+/// 識別子名が集計関数名（大文字小文字無視）と一致すれば対応する `AggregateFunc` を返す。
+/// `COUNT`/`SUM`/`AVG`/`MIN`/`MAX` は予約語化していないため、呼び出し側は直後が `(` の
+/// ときだけこの結果を集計関数呼び出しとして採用する（それ以外は通常の列名として扱う）。
+fn aggregate_func_from_name(name: &str) -> Option<AggregateFunc> {
+    match name.to_uppercase().as_str() {
+        "COUNT" => Some(AggregateFunc::Count),
+        "SUM"   => Some(AggregateFunc::Sum),
+        "AVG"   => Some(AggregateFunc::Avg),
+        "MIN"   => Some(AggregateFunc::Min),
+        "MAX"   => Some(AggregateFunc::Max),
+        _       => None,
+    }
+}
+
 fn parse_quoted_label_name(s: &str) -> Result<String, ParseError> {
     s.strip_prefix("label.")
         .map(|name| name.to_string())
@@ -802,16 +871,84 @@ mod tests {
     fn test_select_named_columns() {
         let s = parse_select("SELECT name, age FROM label.employee").unwrap();
         assert_eq!(s.columns, SelectColumns::Named(vec![
-            SelectItem { column: "name".into(), alias: None },
-            SelectItem { column: "age".into(), alias: None },
+            SelectItem::Column(ColumnItem { column: "name".into(), alias: None }),
+            SelectItem::Column(ColumnItem { column: "age".into(), alias: None }),
         ]));
     }
     #[test]
     fn test_select_column_alias() {
         let s = parse_select("SELECT age AS employee_age FROM label.employee").unwrap();
         assert_eq!(s.columns, SelectColumns::Named(vec![
-            SelectItem { column: "age".into(), alias: Some("employee_age".into()) },
+            SelectItem::Column(ColumnItem { column: "age".into(), alias: Some("employee_age".into()) }),
         ]));
+    }
+    #[test]
+    fn test_select_count_star() {
+        let s = parse_select("SELECT COUNT(*) FROM label.employee").unwrap();
+        assert_eq!(s.columns, SelectColumns::Named(vec![
+            SelectItem::Aggregate(AggregateItem { func: AggregateFunc::Count, arg: AggregateArg::Star, alias: None }),
+        ]));
+    }
+    #[test]
+    fn test_select_aggregate_with_alias_and_group_by() {
+        let s = parse_select(
+            "SELECT department, COUNT(*) AS n, AVG(age) AS avg_age FROM label.employee GROUP BY department"
+        ).unwrap();
+        assert_eq!(s.group_by, vec!["department".to_string()]);
+        assert_eq!(s.columns, SelectColumns::Named(vec![
+            SelectItem::Column(ColumnItem { column: "department".into(), alias: None }),
+            SelectItem::Aggregate(AggregateItem { func: AggregateFunc::Count, arg: AggregateArg::Star, alias: Some("n".into()) }),
+            SelectItem::Aggregate(AggregateItem { func: AggregateFunc::Avg, arg: AggregateArg::Column("age".into()), alias: Some("avg_age".into()) }),
+        ]));
+    }
+    #[test]
+    fn test_select_group_by_multiple_columns() {
+        let s = parse_select("SELECT a, b, COUNT(*) FROM label.x GROUP BY a, b").unwrap();
+        assert_eq!(s.group_by, vec!["a".to_string(), "b".to_string()]);
+    }
+    #[test]
+    fn test_select_having() {
+        let s = parse_select(
+            "SELECT department, COUNT(*) AS n FROM label.employee GROUP BY department HAVING n > 5"
+        ).unwrap();
+        assert_eq!(s.having, Some(WhereExpr::Comparison(Comparison {
+            column: "n".into(), op: CompareOp::Gt, value: LiteralValue::Integer(5),
+        })));
+    }
+    #[test]
+    fn test_select_distinct() {
+        let s = parse_select("SELECT DISTINCT department FROM label.employee").unwrap();
+        assert!(s.distinct);
+    }
+    #[test]
+    fn test_select_sum_avg_min_max() {
+        let s = parse_select("SELECT SUM(age), AVG(age), MIN(age), MAX(age) FROM label.employee").unwrap();
+        assert_eq!(s.columns, SelectColumns::Named(vec![
+            SelectItem::Aggregate(AggregateItem { func: AggregateFunc::Sum, arg: AggregateArg::Column("age".into()), alias: None }),
+            SelectItem::Aggregate(AggregateItem { func: AggregateFunc::Avg, arg: AggregateArg::Column("age".into()), alias: None }),
+            SelectItem::Aggregate(AggregateItem { func: AggregateFunc::Min, arg: AggregateArg::Column("age".into()), alias: None }),
+            SelectItem::Aggregate(AggregateItem { func: AggregateFunc::Max, arg: AggregateArg::Column("age".into()), alias: None }),
+        ]));
+    }
+    #[test]
+    fn test_select_sum_star_is_error() {
+        assert!(parse_select("SELECT SUM(*) FROM label.employee").is_err());
+    }
+    #[test]
+    fn test_select_count_as_plain_column_name_still_works() {
+        // COUNT/SUM/AVG/MIN/MAX は予約語化していないため、"(" が続かなければ通常の列名として扱える
+        let s = parse_select("SELECT count FROM label.employee").unwrap();
+        assert_eq!(s.columns, SelectColumns::Named(vec![
+            SelectItem::Column(ColumnItem { column: "count".into(), alias: None }),
+        ]));
+    }
+    #[test]
+    fn test_select_star_rejects_group_by() {
+        assert!(parse_select("SELECT * FROM label.employee GROUP BY department").is_err());
+    }
+    #[test]
+    fn test_select_star_rejects_having() {
+        assert!(parse_select("SELECT * FROM label.employee HAVING department = 'sales'").is_err());
     }
     #[test]
     fn test_select_order_by_limit() {

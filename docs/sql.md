@@ -41,6 +41,17 @@ SELECT * FROM label.employee WHERE age NOT BETWEEN 20 AND 30
 -- LIMIT と組み合わせたページング、OFFSET 単独指定も可能
 SELECT * FROM label.employee ORDER BY age LIMIT 10 OFFSET 20
 SELECT * FROM label.employee OFFSET 5
+
+-- DISTINCT
+SELECT DISTINCT department FROM label.employee
+
+-- 集計関数（COUNT/SUM/AVG/MIN/MAX）と GROUP BY / HAVING
+SELECT COUNT(*) FROM label.employee
+SELECT department, COUNT(*) AS n, AVG(age) AS avg_age
+  FROM label.employee
+  GROUP BY department
+  HAVING n >= 2
+  ORDER BY avg_age DESC
 ```
 
 補足:
@@ -63,7 +74,28 @@ SELECT * FROM label.employee OFFSET 5
 - `WHERE column BETWEEN low AND high` / `NOT BETWEEN` は `column >= low AND column <= high` と同義
   （数値・文字列の比較規則は既存の `>=`/`<=` に準じる）。
 - `LIMIT n OFFSET m` で取得開始位置をずらせる（ページング用）。`OFFSET` は `LIMIT` を省略して単独でも指定できる。
-  `total_matched`（`WHERE` 後・`LIMIT`/`OFFSET` 前の一致件数）は `OFFSET`/`LIMIT` の影響を受けない。
+  `total_matched`（`WHERE` 後・`GROUP BY`/`LIMIT`/`OFFSET` 前の一致件数）は `OFFSET`/`LIMIT`/`DISTINCT` の
+  影響を受けない。
+- `SELECT DISTINCT col1, col2, ...` で、選択したカラムの値の組が重複する行をまとめる。重複判定は
+  `LIMIT`/`OFFSET` を適用する前の出力行に対して行う。
+- 集計関数 `COUNT(*)` / `COUNT(col)` / `SUM(col)` / `AVG(col)` / `MIN(col)` / `MAX(col)` に対応。
+  `COUNT`/`SUM`/`AVG`/`MIN`/`MAX` は予約語ではなく、直後に `(` が続くときだけ集計関数として扱われる
+  （`SELECT count FROM ...` のように、同名の通常カラムとしても引き続き使える）。
+  - `COUNT(*)` は行数、`COUNT(col)` は `col` が `NULL`・未設定でない行数を数える。
+  - `SUM`/`MIN`/`MAX` は対象カラムの値が全て整数なら整数を、`Float` が1つでも混ざれば小数を返す。
+    `AVG` は常に小数を返す。対象カラムに数値（整数・小数）が1件も無ければ `NULL` を返す
+    （`COUNT` は対象0件でも `0` を返す）。文字列・真偽値の列を渡した場合、その行は集計対象から除外される。
+  - `GROUP BY col1, col2, ...` を省略した場合、集計関数は WHERE 適用後の全レコードを1つのグループとして
+    計算する（`WHERE` の一致件数が0件でも `COUNT(*)` は `0` の1行を返す）。
+  - `GROUP BY` に含まれない素のカラムを同時に SELECT した場合、標準SQLのようにはエラーにせず、
+    各グループの代表レコード（先頭の1件）の値をそのまま返す（緩めの仕様）。
+  - `HAVING <条件>` で集計後のグループを絞り込める。`WHERE` と同じ構文が使えるが、参照できるのは
+    `GROUP BY` のカラム名と、集計関数に付けた `AS` エイリアスのみ（`HAVING COUNT(*) > 5` のように
+    集計関数の呼び出し自体を直接書くことはできないため、必ずエイリアスを付けて名前で参照する）。
+  - `ORDER BY` から集計関数の結果を参照する場合も同様に `AS` エイリアスが必要
+    （`SELECT COUNT(*) AS n ... ORDER BY n` のように書く）。
+  - `SELECT *` は `GROUP BY`/`HAVING` と組み合わせられない（集計対象・グループ代表値の区別がつかなくなるため）。
+  - `SUM`/`AVG`/`MIN`/`MAX` に `*` は使えない（`COUNT(*)` のみ許可）。
 
 ## INSERT 構文
 
