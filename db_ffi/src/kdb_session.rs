@@ -76,9 +76,11 @@ impl KdbSession {
     fn checkpoint(&mut self) -> bool {
         match self.kdb.as_mut() {
             Some(kdb) => {
-                let records: Vec<Record> =
-                    self.db.list_all().into_iter().cloned().collect();
-                kdb.compact(&records, self.db.next_id()).is_ok()
+                let records: Vec<Record> = self.db.list_all();
+                match kdb.compact(&records, self.db.next_id()) {
+                    Ok(offsets) => { self.db.sync_record_offsets(&records, &offsets); true }
+                    Err(_) => false,
+                }
             }
             // 純メモリセッション（kdb 無し）は何もすることがない
             None => true,
@@ -443,7 +445,7 @@ pub extern "C" fn kdb_get_by_label_ndjson(
     let mut w = BufWriter::new(file);
     let mut count = 0i64;
     for record in s.db.get_by_label(label) {
-        let line = record_to_flat_json(record).to_string();
+        let line = record_to_flat_json(&record).to_string();
         if writeln!(w, "{line}").is_err() {
             return -1;
         }

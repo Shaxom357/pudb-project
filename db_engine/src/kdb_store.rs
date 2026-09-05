@@ -112,10 +112,13 @@ fn wal_append_entry(file: &mut File, enc_key: &[u8; 32], record: &Record) -> Res
     Ok(())
 }
 
-fn wal_read_all(file: &mut File, enc_key: &[u8; 32]) -> Result<Vec<Record>, KdbError> {
+/// WAL全件を先頭から読む。各レコードについて、そのエントリの開始バイトオフセット
+/// （`read_record_at` で単体再読込する際に使う）も併せて返す。
+fn wal_read_all(file: &mut File, enc_key: &[u8; 32]) -> Result<Vec<(u64, Record)>, KdbError> {
     file.seek(SeekFrom::Start(HEADER_SIZE as u64))?;
     let mut records = Vec::new();
     loop {
+        let offset = file.stream_position()?;
         let mut lbuf = [0u8; 4];
         match file.read_exact(&mut lbuf) {
             Ok(_) => {}
@@ -128,9 +131,23 @@ fn wal_read_all(file: &mut File, enc_key: &[u8; 32]) -> Result<Vec<Record>, KdbE
         file.read_exact(&mut entry)?;
         let nonce: [u8; 24] = entry[0..24].try_into().unwrap();
         let plain = xchacha20poly1305_decrypt(enc_key, &nonce, b"kdb-wal", &entry[24..])?;
-        records.push(decode_record(&plain)?);
+        records.push((offset, decode_record(&plain)?));
     }
     Ok(records)
+}
+
+/// 指定オフセットの1エントリだけを読んで復号する（コールドな行の再読込用）。
+fn wal_read_one(file: &mut File, enc_key: &[u8; 32], offset: u64) -> Result<Record, KdbError> {
+    file.seek(SeekFrom::Start(offset))?;
+    let mut lbuf = [0u8; 4];
+    file.read_exact(&mut lbuf)?;
+    let elen = u32::from_le_bytes(lbuf) as usize;
+    if elen < 24 { return Err(KdbError::Corrupted("entry too short".into())); }
+    let mut entry = vec![0u8; elen];
+    file.read_exact(&mut entry)?;
+    let nonce: [u8; 24] = entry[0..24].try_into().unwrap();
+    let plain = xchacha20poly1305_decrypt(enc_key, &nonce, b"kdb-wal", &entry[24..])?;
+    Ok(decode_record(&plain)?)
 }
 
 // ---------------------------------------------------------------------------
@@ -161,19 +178,27 @@ impl KdbFile {
         if std::path::Path::new(path).exists() { Self::open(path) } else { Self::create(path) }
     }
 
-    /// INSERT: WAL追記のみ → O(1) の高速書き込み
-    pub fn append_record(&mut self, record: &Record) -> Result<(), KdbError> {
-        self.file.seek(SeekFrom::End(0))?;
+    /// INSERT: WAL追記のみ → O(1) の高速書き込み。書き込んだエントリの開始バイトオフセット
+    /// を返す（コールドな行を後から`read_record_at`で再読込する際のキーに使う）。
+    pub fn append_record(&mut self, record: &Record) -> Result<u64, KdbError> {
+        let offset = self.file.seek(SeekFrom::End(0))?;
         wal_append_entry(&mut self.file, &self.enc_key, record)?;
         self.file.flush()?;
         self.header.wal_entries  += 1;
         self.header.record_count += 1;
-        self.flush_header()
+        self.flush_header()?;
+        Ok(offset)
     }
 
-    /// 全レコードを読み込む
-    pub fn read_all_records(&mut self) -> Result<Vec<Record>, KdbError> {
+    /// 全レコードを読み込む（オフセット付き）
+    pub fn read_all_records(&mut self) -> Result<Vec<(u64, Record)>, KdbError> {
         wal_read_all(&mut self.file, &self.enc_key)
+    }
+
+    /// 指定オフセットの1レコードだけを読み直す（オンメモリ容量制限で退避されたレコードの
+    /// 再読込用。オフセットは`read_all_records`/`append_record`/`compact`が返すもの）。
+    pub fn read_record_at(&mut self, offset: u64) -> Result<Record, KdbError> {
+        wal_read_one(&mut self.file, &self.enc_key, offset)
     }
 
     /// next_id をヘッダーに書き戻す
@@ -182,8 +207,9 @@ impl KdbFile {
         self.flush_header()
     }
 
-    /// WAL圧縮：全レコードを書き直す（DELETEやUPDATE後に呼ぶ）
-    pub fn compact(&mut self, records: &[Record], next_id: u64) -> Result<(), KdbError> {
+    /// WAL圧縮：全レコードを書き直す（DELETEやUPDATE後に呼ぶ）。書き直した後の各レコードの
+    /// バイトオフセットを、渡した`records`と同じ順序で返す（呼び出し側でIDと対応付けて使う）。
+    pub fn compact(&mut self, records: &[Record], next_id: u64) -> Result<Vec<u64>, KdbError> {
         self.file.seek(SeekFrom::Start(0))?;
         self.file.set_len(0)?;
         self.header.next_id      = next_id;
@@ -191,9 +217,13 @@ impl KdbFile {
         self.header.wal_entries  = records.len() as u64;
         self.file.write_all(&self.header.to_bytes())?;
         let enc_key = self.enc_key;
-        for r in records { wal_append_entry(&mut self.file, &enc_key, r)?; }
+        let mut offsets = Vec::with_capacity(records.len());
+        for r in records {
+            offsets.push(self.file.stream_position()?);
+            wal_append_entry(&mut self.file, &enc_key, r)?;
+        }
         self.file.flush()?;
-        Ok(())
+        Ok(offsets)
     }
 
     fn flush_header(&mut self) -> Result<(), KdbError> {

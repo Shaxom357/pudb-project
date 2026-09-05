@@ -73,17 +73,14 @@ pub fn execute_select(db: &Database, stmt: &SelectStatement) -> QueryResult {
         if let Some(ref having) = stmt.having {
             grouped.retain(|r| eval_where(r, having));
         }
-        let refs: Vec<&Record> = grouped.iter().collect();
-        finish_select(db, refs, stmt, total_matched)
+        finish_select(db, grouped, stmt, total_matched)
     } else if has_expr {
-        // 式（算術演算・CASE・COALESCE・CAST・スカラ関数）を含むクエリだけ、値を書き込む
-        // ために Record を複製する（式を含まない大多数のクエリは従来どおり借用のみで進む）。
-        let mut owned: Vec<Record> = records.into_iter().cloned().collect();
+        // 式（算術演算・CASE・COALESCE・CAST・スカラ関数）を含むクエリは、評価結果を
+        // レコードに書き込む必要があるため、そのまま所有データとして進める。
         if let SelectColumns::Named(items) = &stmt.columns {
-            for r in &mut owned { materialize_expressions(r, items); }
+            for r in &mut records { materialize_expressions(r, items); }
         }
-        let refs: Vec<&Record> = owned.iter().collect();
-        finish_select(db, refs, stmt, total_matched)
+        finish_select(db, records, stmt, total_matched)
     } else {
         finish_select(db, records, stmt, total_matched)
     }
@@ -119,7 +116,7 @@ fn materialize_expressions(r: &mut Record, items: &[SelectItem]) {
 /// ORDER BY・LIMIT/OFFSET・DISTINCT・カラム投影を適用して最終結果を組み立てる
 /// （集計クエリ・非集計クエリの両方から共通で呼ばれる）。式（Expression）を含む場合は
 /// 呼び出し側で `materialize_expressions` 済みである前提。
-fn finish_select(db: &Database, mut records: Vec<&Record>, stmt: &SelectStatement, total_matched: usize) -> QueryResult {
+fn finish_select(db: &Database, mut records: Vec<Record>, stmt: &SelectStatement, total_matched: usize) -> QueryResult {
     // ORDER BY はカラム名のほか、SELECT ... AS で付けたエイリアスでも指定できるようにする
     // （元のカラム名に解決してから並べ替える）。
     let order_by = resolve_order_by_aliases(&stmt.columns, &stmt.order_by);
@@ -224,7 +221,7 @@ fn expression_output_key(item: &ExpressionItem, index: usize) -> String {
 /// （GROUP BY 対象カラムの値・素のカラム参照・式が参照する生カラムをまとめて賄うため。
 /// 標準SQLのように GROUP BY 対象外カラムの指定をエラーにはしない、緩めの仕様）。
 /// その上に集計関数の計算結果を `aggregate_output_name` のキーで上書きする。
-fn build_grouped_records(records: &[&Record], stmt: &SelectStatement) -> Vec<Record> {
+fn build_grouped_records(records: &[Record], stmt: &SelectStatement) -> Vec<Record> {
     let mut order: Vec<Vec<String>> = Vec::new();
     let mut members: std::collections::HashMap<Vec<String>, Vec<Record>> = std::collections::HashMap::new();
     for r in records {
@@ -517,10 +514,10 @@ pub fn explain_select(db: &Database, stmt: &SelectStatement) -> QueryResult {
 ///
 /// 現状インデックスが効くのは「`WHERE` 句全体がちょうど1つの等値比較」のときだけで、
 /// `AND`/`OR`/`NOT` を含む複合条件では使われない（今後の拡張余地）。
-fn select_candidates<'a>(db: &'a Database, stmt: &SelectStatement) -> (Vec<&'a Record>, PlanDescription) {
+fn select_candidates(db: &Database, stmt: &SelectStatement) -> (Vec<Record>, PlanDescription) {
     if let Some((column, value)) = single_equality_condition(&stmt.where_clause) {
         if let Some(index_hits) = db.get_by_index(&column, &literal_to_data_type(&value)) {
-            let candidates: Vec<&Record> = index_hits.into_iter()
+            let candidates: Vec<Record> = index_hits.into_iter()
                 .filter(|r| record_matches_from(r, &stmt.from))
                 .collect();
             let n = candidates.len();
@@ -562,7 +559,7 @@ fn record_matches_target(r: &Record, target: &LabelTarget) -> bool {
     }
 }
 
-fn filter_by_from<'a>(db: &'a Database, from: &FromClause) -> Vec<&'a Record> {
+fn filter_by_from(db: &Database, from: &FromClause) -> Vec<Record> {
     match from {
         FromClause::Label(t) => filter_by_target(db, t),
         FromClause::And(ts)  => {
@@ -586,7 +583,7 @@ fn filter_by_from<'a>(db: &'a Database, from: &FromClause) -> Vec<&'a Record> {
     }
 }
 
-fn filter_by_target<'a>(db: &'a Database, target: &LabelTarget) -> Vec<&'a Record> {
+fn filter_by_target(db: &Database, target: &LabelTarget) -> Vec<Record> {
     match target {
         LabelTarget::All             => db.list_all(),
         LabelTarget::LabelName(name) => db.get_by_label(name),
@@ -713,7 +710,7 @@ fn resolve_order_by_aliases(columns: &SelectColumns, order_by: &[OrderByItem]) -
     }).collect()
 }
 
-fn sort_records(records: &mut Vec<&Record>, order_by: &[OrderByItem]) {
+fn sort_records(records: &mut [Record], order_by: &[OrderByItem]) {
     records.sort_by(|a, b| {
         for item in order_by {
             let cmp = cmp_dt(a.columns.get(&item.column), b.columns.get(&item.column));

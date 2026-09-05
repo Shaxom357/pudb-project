@@ -99,19 +99,17 @@ fn find_duplicate_label(labels: &[String]) -> Option<&String> {
     labels.iter().find(|l| !seen.insert(l.as_str()))
 }
 
-/// 列ごとのデータを保持する内部構造体
+/// ラベル→行番号の索引を保持する内部構造体（カラム値の実体は`Database.records`が
+/// 唯一の保持元。以前はここにも列ごとの値を複製して持っていたが、二重管理になっており
+/// オンメモリ容量制限機能の実装の妨げにもなるため廃止した）。
 #[derive(Debug, Default)]
 struct ColumnStore {
-    columns: HashMap<String, Vec<Option<DataType>>>,
     label_index: HashMap<String, Vec<usize>>,
 }
 
 impl ColumnStore {
     fn new() -> Self {
-        ColumnStore { columns: HashMap::new(), label_index: HashMap::new() }
-    }
-    fn row_count(&self) -> usize {
-        self.columns.values().next().map_or(0, |v| v.len())
+        ColumnStore { label_index: HashMap::new() }
     }
 }
 
@@ -220,6 +218,11 @@ pub struct Database {
     /// `true` へ戻り、意図せず無効なままになることを防ぐ（`.kdb`/JSON・サイドカーどちらにも
     /// 永続化しない）。
     schema_enforcement_enabled: bool,
+    /// レコードID → `.kdb`上の最新エントリのバイトオフセット（`.kdb`利用時のみ設定）。
+    /// オンメモリ容量制限で追い出したレコードを`.kdb`から単体で読み直すために使う基盤。
+    /// 永続化はせず、`load_kdb`・`insert_fast`のWAL追記・呼び出し側が行った`compact`の
+    /// 結果（`sync_record_offsets`）から都度反映する。
+    record_offsets: HashMap<u64, u64>,
 }
 
 impl Database {
@@ -232,7 +235,27 @@ impl Database {
             secondary_indexes: HashMap::new(),
             schemas: HashMap::new(),
             schema_enforcement_enabled: true,
+            record_offsets: HashMap::new(),
         }
+    }
+
+    /// レコードIDに対応する`.kdb`上のバイトオフセットを記録する。
+    pub fn set_record_offset(&mut self, id: u64, offset: u64) {
+        self.record_offsets.insert(id, offset);
+    }
+
+    /// 外部で`KdbFile::compact`を実行した後、渡した`records`と同じ順序の`offsets`から
+    /// オフセット索引を一括で反映する（`db_client`の`auto_save`・`db_ffi`のセッション保存など、
+    /// `Database`の外で`.kdb`への書き直しを行う箇所から呼ぶ）。
+    pub fn sync_record_offsets(&mut self, records: &[Record], offsets: &[u64]) {
+        for (r, &offset) in records.iter().zip(offsets.iter()) {
+            self.record_offsets.insert(r.id, offset);
+        }
+    }
+
+    /// レコードIDに対応する`.kdb`上のバイトオフセット（未記録なら`None`）
+    pub fn record_offset(&self, id: u64) -> Option<u64> {
+        self.record_offsets.get(&id).copied()
     }
 
     fn allocate_id(&mut self) -> u64 {
@@ -258,20 +281,6 @@ impl Database {
 
         let id = record.id;
         let row_idx = self.records.len();
-        let current_rows = self.store.row_count();
-
-        for (col, val) in &record.columns {
-            let column = self.store.columns.entry(col.clone()).or_insert_with(|| {
-                vec![None; current_rows]
-            });
-            column.push(Some(val.clone()));
-        }
-        let record_cols: Vec<String> = record.columns.keys().cloned().collect();
-        for (col, column) in self.store.columns.iter_mut() {
-            if !record_cols.contains(col) {
-                column.push(None);
-            }
-        }
 
         for label in &record.labels {
             self.store.label_index
@@ -289,21 +298,21 @@ impl Database {
     }
 
     /// GET BY ID
-    pub fn get(&self, id: u64) -> Result<&Record, DatabaseError> {
+    pub fn get(&self, id: u64) -> Result<Record, DatabaseError> {
         self.id_to_index
             .get(&id)
             .and_then(|&idx| self.records.get(idx))
-            .and_then(|r| r.as_ref())
+            .and_then(|r| r.clone())
             .ok_or(DatabaseError::RecordNotFound(id))
     }
 
     /// GET BY LABEL: ラベル名で複数レコードを取得
-    pub fn get_by_label(&self, label: &str) -> Vec<&Record> {
+    pub fn get_by_label(&self, label: &str) -> Vec<Record> {
         self.store.label_index
             .get(label)
             .map(|indices| {
                 indices.iter()
-                    .filter_map(|&idx| self.records.get(idx).and_then(|r| r.as_ref()))
+                    .filter_map(|&idx| self.records.get(idx).and_then(|r| r.clone()))
                     .collect()
             })
             .unwrap_or_default()
@@ -316,7 +325,8 @@ impl Database {
         self.apply_schema(&mut new_record)?;
         self.check_unique_constraints(&new_record, Some(id))?;
 
-        let old_labels: Vec<String> = self.records[row_idx].as_ref()
+        let old_record = self.records[row_idx].clone();
+        let old_labels: Vec<String> = old_record.as_ref()
             .map(|r| r.labels.clone())
             .unwrap_or_default();
         for label in &old_labels {
@@ -325,22 +335,23 @@ impl Database {
             }
         }
 
-        let current_rows = self.records.len();
-        for (col, val) in &new_record.columns {
-            // 二次インデックスを更新するため、上書きする前に旧い値を控えておく
-            let old_val = self.store.columns.get(col).and_then(|c| c.get(row_idx)).and_then(|c| c.clone());
-            {
-                let column = self.store.columns.entry(col.clone()).or_insert_with(|| {
-                    vec![None; current_rows]
-                });
-                if let Some(cell) = column.get_mut(row_idx) {
-                    *cell = Some(val.clone());
+        // 二次インデックスを更新するため、上書きする前に旧い値と比較する
+        // （値が変わった／消えたカラムだけ古いインデックスエントリを外す）。
+        if let Some(old) = &old_record {
+            for (col, old_val) in &old.columns {
+                let unchanged = new_record.columns.get(col).is_some_and(|v| v == old_val);
+                if !unchanged {
+                    secondary_index_remove(&mut self.secondary_indexes, col, old_val, row_idx);
                 }
             }
-            if let Some(old) = &old_val {
-                secondary_index_remove(&mut self.secondary_indexes, col, old, row_idx);
+        }
+        for (col, val) in &new_record.columns {
+            let unchanged = old_record.as_ref()
+                .and_then(|o| o.columns.get(col))
+                .is_some_and(|old_val| old_val == val);
+            if !unchanged {
+                secondary_index_add(&mut self.secondary_indexes, col, val, row_idx);
             }
-            secondary_index_add(&mut self.secondary_indexes, col, val, row_idx);
         }
 
         for label in &new_record.labels {
@@ -361,44 +372,34 @@ impl Database {
         let &row_idx = self.id_to_index.get(&id)
             .ok_or(DatabaseError::RecordNotFound(id))?;
 
-        let labels: Vec<String> = self.records[row_idx].as_ref()
-            .map(|r| r.labels.clone())
-            .unwrap_or_default();
-        for label in &labels {
-            if let Some(indices) = self.store.label_index.get_mut(label) {
-                indices.retain(|&i| i != row_idx);
+        let old = self.records[row_idx].take();
+        if let Some(old) = &old {
+            for label in &old.labels {
+                if let Some(indices) = self.store.label_index.get_mut(label) {
+                    indices.retain(|&i| i != row_idx);
+                }
+            }
+            for (col, val) in &old.columns {
+                secondary_index_remove(&mut self.secondary_indexes, col, val, row_idx);
             }
         }
 
-        // 二次インデックスから外すため、消す前に現在の値を控えておく
-        let old_values: Vec<(String, DataType)> = self.store.columns.iter()
-            .filter_map(|(col, vec)| vec.get(row_idx).and_then(|c| c.clone()).map(|v| (col.clone(), v)))
-            .collect();
-
-        for column in self.store.columns.values_mut() {
-            if let Some(cell) = column.get_mut(row_idx) {
-                *cell = None;
-            }
-        }
-        for (col, val) in &old_values {
-            secondary_index_remove(&mut self.secondary_indexes, col, val, row_idx);
-        }
-
-        self.records[row_idx] = None;
         self.id_to_index.remove(&id);
+        self.record_offsets.remove(&id);
         Ok(())
     }
 
     /// LIST ALL: 有効な全レコードを返す
-    pub fn list_all(&self) -> Vec<&Record> {
-        self.records.iter().filter_map(|r| r.as_ref()).collect()
+    pub fn list_all(&self) -> Vec<Record> {
+        self.records.iter().filter_map(|r| r.clone()).collect()
     }
 
     /// SEARCH BY COLUMN: カラム名と値で絞り込み検索
-    pub fn search_by_column(&self, column: &str, value: &DataType) -> Vec<&Record> {
+    pub fn search_by_column(&self, column: &str, value: &DataType) -> Vec<Record> {
         self.records.iter()
             .filter_map(|r| r.as_ref())
             .filter(|r| r.columns.get(column) == Some(value))
+            .cloned()
             .collect()
     }
 
@@ -463,7 +464,13 @@ impl Database {
 
     /// DB全体で使われているカラム名の一覧（重複なし・ソート済み）
     pub fn list_all_columns(&self) -> Vec<String> {
-        let mut cols: Vec<String> = self.store.columns.keys().cloned().collect();
+        let mut cols: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for slot in &self.records {
+            if let Some(r) = slot {
+                cols.extend(r.columns.keys().cloned());
+            }
+        }
+        let mut cols: Vec<String> = cols.into_iter().collect();
         cols.sort();
         cols
     }
@@ -496,9 +503,9 @@ impl Database {
             return Err(DatabaseError::IndexAlreadyExists(column.to_string()));
         }
         let mut index = SecondaryIndex::default();
-        if let Some(col_vec) = self.store.columns.get(column) {
-            for (row_idx, cell) in col_vec.iter().enumerate() {
-                if let Some(v) = cell {
+        for (row_idx, slot) in self.records.iter().enumerate() {
+            if let Some(r) = slot {
+                if let Some(v) = r.columns.get(column) {
                     if !matches!(v, DataType::Null) {
                         index.entries.entry(index_value_key(v)).or_default().push(row_idx);
                     }
@@ -532,11 +539,11 @@ impl Database {
     /// 二次インデックスを使って `column = value` に一致するレコードを取得する。
     /// `column` にインデックスが無ければ `None`（呼び出し側は全件走査にフォールバックする）。
     /// インデックスはあるが一致するレコードが無ければ `Some(vec![])`。
-    pub fn get_by_index(&self, column: &str, value: &DataType) -> Option<Vec<&Record>> {
+    pub fn get_by_index(&self, column: &str, value: &DataType) -> Option<Vec<Record>> {
         let index = self.secondary_indexes.get(column)?;
         let key = index_value_key(value);
         let indices: &[usize] = index.entries.get(&key).map(|v| v.as_slice()).unwrap_or(&[]);
-        Some(indices.iter().filter_map(|&i| self.records.get(i).and_then(|r| r.as_ref())).collect())
+        Some(indices.iter().filter_map(|&i| self.records.get(i).and_then(|r| r.clone())).collect())
     }
 
     // -----------------------------------------------------------------
@@ -627,7 +634,7 @@ impl Database {
                     }
                 }
             }
-            if let Some(dups) = self.unique_conflicts(label, record, schema) {
+            if let Some(dups) = self.unique_conflicts(label, &record, schema) {
                 violations.extend(dups);
             }
         }
@@ -814,20 +821,7 @@ impl Database {
             // next_id は既に設定済みなので id を上書きしないよう手動 insert
             let id = record.id;
             let row_idx = db.records.len();
-            let current_rows = db.store.row_count();
 
-            for (col, val) in &record.columns {
-                let column = db.store.columns
-                    .entry(col.clone())
-                    .or_insert_with(|| vec![None; current_rows]);
-                column.push(Some(val.clone()));
-            }
-            let record_cols: Vec<String> = record.columns.keys().cloned().collect();
-            for (col, column) in db.store.columns.iter_mut() {
-                if !record_cols.contains(col) {
-                    column.push(None);
-                }
-            }
             for label in &record.labels {
                 db.store.label_index
                     .entry(label.clone())
@@ -873,35 +867,28 @@ impl From<kdb_store::KdbError> for KdbPersistError {
 impl Database {
     /// .kdb ファイルへ保存（コンパクション: 全レコード書き直し）
     /// UPDATE/DELETE 後に呼ぶ
-    pub fn save_kdb(&self, path: &str) -> Result<(), KdbPersistError> {
+    pub fn save_kdb(&mut self, path: &str) -> Result<(), KdbPersistError> {
         let mut kdb = kdb_store::KdbFile::open_or_create(path)?;
         let records: Vec<Record> = self.records.iter().filter_map(|r| r.clone()).collect();
-        kdb.compact(&records, self.next_id)?;
+        let offsets = kdb.compact(&records, self.next_id)?;
+        self.sync_record_offsets(&records, &offsets);
         Ok(())
     }
 
     /// .kdb ファイルからロード
     pub fn load_kdb(path: &str) -> Result<Self, KdbPersistError> {
         let mut kdb = kdb_store::KdbFile::open(path)?;
-        let records = kdb.read_all_records()?;
+        let entries = kdb.read_all_records()?;
         let mut db  = Database::new();
         db.next_id  = kdb.next_id();
-        for record in records {
+        for (offset, record) in entries {
             let id      = record.id;
             let row_idx = db.records.len();
-            let cur     = db.store.row_count();
-            for (col, val) in &record.columns {
-                let column = db.store.columns.entry(col.clone()).or_insert_with(|| vec![None; cur]);
-                column.push(Some(val.clone()));
-            }
-            let rcols: Vec<String> = record.columns.keys().cloned().collect();
-            for (col, column) in db.store.columns.iter_mut() {
-                if !rcols.contains(col) { column.push(None); }
-            }
             for label in &record.labels {
                 db.store.label_index.entry(label.clone()).or_default().push(row_idx);
             }
             db.id_to_index.insert(id, row_idx);
+            db.record_offsets.insert(id, offset);
             db.records.push(Some(record));
         }
         Ok(db)
@@ -936,15 +923,6 @@ impl Database {
         }
         let id      = record.id;
         let row_idx = self.records.len();
-        let cur     = self.store.row_count();
-        for (col, val) in &record.columns {
-            let col_vec = self.store.columns.entry(col.clone()).or_insert_with(|| vec![None; cur]);
-            col_vec.push(Some(val.clone()));
-        }
-        let rcols: Vec<String> = record.columns.keys().cloned().collect();
-        for (col, col_vec) in self.store.columns.iter_mut() {
-            if !rcols.contains(col) { col_vec.push(None); }
-        }
         for label in &record.labels {
             self.store.label_index.entry(label.clone()).or_default().push(row_idx);
         }
@@ -956,7 +934,9 @@ impl Database {
         // WAL追記（kdb モードなら高速保存）
         if let Some(kdb) = kdb {
             let _ = kdb.update_next_id(self.next_id);
-            let _ = kdb.append_record(&record);
+            if let Ok(offset) = kdb.append_record(&record) {
+                self.record_offsets.insert(id, offset);
+            }
         }
         Ok(id)
     }
