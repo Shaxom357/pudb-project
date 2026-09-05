@@ -34,6 +34,10 @@ kdb login -u kagura -p root -a localhost:3000
 | `kdb whoami` | 保存済みセッションのユーザー名・接続先を表示し、`GET /db/info` でトークンがまだ有効か確認する |
 | `kdb shell-init bash` \| `zsh` | シェルプロンプトにログイン状態を表示する連携スクリプトを出力する（詳細は下記「シェルプロンプトへのログイン状態表示」参照） |
 | `kdb prompt` | 現在のログイン状態を短いタグ文字列として出力する。`shell-init` が生成するプロンプトフックが毎回のプロンプト描画時に内部的に呼び出すためのもので、通常は直接使わない |
+| `kdb in-memory-mode enable` \| `disable` | 「全データオンメモリ」の有効/無効を切り替える（`PUT /settings`）。**管理者ロール `kagura`** でログイン中のみ・`.kdb` モードのサーバーのみ |
+| `kdb in-memory-size <値>` | オンメモリ容量の上限を設定する（`PUT /settings`）。数値の後ろに `MB` / `GB` を付けると絶対サイズ、`%` を付けると搭載メモリに対する割合（例: `kdb in-memory-size 5GB` / `kdb in-memory-size 20%`）。同上の権限・モード制限 |
+
+`in-memory-mode disable`（＝容量制限モード）にすると、直近使われていない行の列データから `.kdb` へ退避してメモリ使用量を上限内に抑える（アクセス時に読み直し、再アクセスで立ち退き順が更新される）。設定はサーバー側の `<DB_FILE>.memory.json` に保存され再起動をまたいで保持される。Web UI（設定ビュー）からも同じ操作ができる。
 
 ## login オプション
 
@@ -64,8 +68,8 @@ kdb logout
 ```
 
 セッションは `~/.config/kdb/session.json`（トークンを含むためパーミッション600）に保存される。
-現バージョンでは `login` / `logout` / `whoami` / `shell-init` / `prompt` のみを提供し、SQL実行など
-他のサブコマンドは今後追加予定。
+現バージョンでは `login` / `logout` / `whoami` / `shell-init` / `prompt` / `in-memory-mode` /
+`in-memory-size` を提供する。SQL実行など他のサブコマンドは今後追加予定。
 
 ## シェルプロンプトへのログイン状態表示
 

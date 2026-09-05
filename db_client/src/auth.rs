@@ -507,6 +507,14 @@ impl AuthState {
         self.user_has_privilege(actor, Privilege::ManageUsers)
     }
 
+    /// actor が管理者ロール（`kagura`）か。オンメモリ容量設定など、
+    /// 管理者専用の運用設定の変更可否に使う。
+    pub fn is_admin(&self, actor: &str) -> bool {
+        self.find(actor)
+            .map(|u| !u.disabled && matches!(u.role, Role::Admin))
+            .unwrap_or(false)
+    }
+
     /// actor が指定 privilege を持つか（Admin ロールと `All` は常に true）。
     pub fn user_has_privilege(&self, username: &str, privilege: Privilege) -> bool {
         self.find(username)

@@ -33,6 +33,20 @@ enum Command {
     /// シェルの設定ファイル（~/.bashrc や ~/.zshrc）に
     /// `eval "$(kdb shell-init bash)"` のように1行追加して使う
     ShellInit { shell: ShellKind },
+    /// 「全データオンメモリ」の有効/無効を切り替える（管理者ロール kagura のみ）。
+    /// 例: `kdb in-memory-mode disable`
+    InMemoryMode {
+        /// enable = 全データをメモリに保持 / disable = 容量制限モード
+        #[arg(value_parser = ["enable", "disable"])]
+        state: String,
+    },
+    /// オンメモリ容量の上限を設定する（管理者ロール kagura のみ）。
+    /// 数値の後ろに MB / GB を付けると絶対サイズ、% を付けると搭載メモリに対する割合。
+    /// 例: `kdb in-memory-size 5GB` / `kdb in-memory-size 20%`
+    InMemorySize {
+        /// 上限（例: 500MB / 2GB / 20%）
+        value: String,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -76,6 +90,8 @@ async fn main() -> ExitCode {
             cmd_shell_init(shell);
             Ok(())
         }
+        Command::InMemoryMode { state } => cmd_in_memory_mode(state).await,
+        Command::InMemorySize { value } => cmd_in_memory_size(value).await,
     };
 
     match result {
@@ -164,6 +180,55 @@ async fn cmd_whoami() -> Result<(), String> {
         Err(e) => println!("status: セッションが無効です（再ログインが必要な可能性があります） - {}", e),
     }
 
+    Ok(())
+}
+
+/// 現在のセッションを使って `PUT /settings` を叩く共通処理。
+async fn put_settings_with_session(body: serde_json::Value) -> Result<serde_json::Value, String> {
+    let session = Session::load().map_err(|e| e.to_string())?;
+    let Some(session) = session else {
+        return Err("ログインしていません。'kdb login' を実行してください。".to_string());
+    };
+    let client = Client::new(session.server.clone(), false).map_err(|e| e.to_string())?;
+    client
+        .put_settings(&session.token, &body)
+        .await
+        .map_err(|e| format!("設定の更新に失敗しました: {}", e))
+}
+
+/// 更新後の設定レスポンスから、オンメモリ関連の状況を1行で表示する。
+fn print_memory_status(resp: &serde_json::Value) {
+    let all_in_memory = resp.get("all_in_memory").and_then(|v| v.as_bool()).unwrap_or(true);
+    if all_in_memory {
+        println!("全データオンメモリ: 有効（無制限）");
+        return;
+    }
+    let limit = resp.get("memory_limit_bytes").and_then(|v| v.as_u64());
+    let resident = resp.get("memory_resident_bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+    let rrows = resp.get("memory_resident_rows").and_then(|v| v.as_u64()).unwrap_or(0);
+    let trows = resp.get("memory_total_rows").and_then(|v| v.as_u64()).unwrap_or(0);
+    let limit_str = limit
+        .map(|b| format!("{:.2} MB", b as f64 / (1024.0 * 1024.0)))
+        .unwrap_or_else(|| "無制限（搭載メモリ量を取得できず）".to_string());
+    println!(
+        "全データオンメモリ: 無効（容量制限モード）  上限 {}  / 常駐 {:.2} MB, {}/{} 行",
+        limit_str,
+        resident as f64 / (1024.0 * 1024.0),
+        rrows,
+        trows
+    );
+}
+
+async fn cmd_in_memory_mode(state: String) -> Result<(), String> {
+    let enable = state == "enable";
+    let resp = put_settings_with_session(serde_json::json!({ "all_in_memory": enable })).await?;
+    print_memory_status(&resp);
+    Ok(())
+}
+
+async fn cmd_in_memory_size(value: String) -> Result<(), String> {
+    let resp = put_settings_with_session(serde_json::json!({ "memory_limit_spec": value })).await?;
+    print_memory_status(&resp);
     Ok(())
 }
 

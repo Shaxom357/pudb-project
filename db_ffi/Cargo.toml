@@ -1,6 +1,6 @@
 [package]
 name = "db_ffi"
-version = "4.7.1"
+version = "4.8.0"
 edition = "2024"
 
 # cdylib: Python/C から読み込む共有ライブラリ (.so) を生成する

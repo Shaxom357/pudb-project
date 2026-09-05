@@ -4,7 +4,8 @@
 
 ## db_engine（コアエンジン）
 - ✅ CRUD（Insert / Get / Update / Delete）
-- ✅ 列指向ストレージ（`ColumnStore`）
+- ✅ 列指向ストレージ（`ColumnStore` はラベル索引を担当。カラム値の実体は `records` が単一の保持元）
+- ✅ **全データオンメモリ ON/OFF**: `Database::set_memory_policy` による切替。既定（`all_in_memory = true`）は全レコードをメモリ常駐（従来動作・オーバーヘッドなし）。`false` にすると `MemorySizeSpec`（絶対バイト数 or 搭載メモリに対する割合）の上限内にオンメモリ量を抑え、あふれた分は直近未使用の行から `.kdb` へ退避する（アクセス時に `KdbFile::read_record_at` で単体読み直し、再アクセスで立ち退き順が更新される＝実質LRU）。`.kdb` 形式は無変更。`memory_stats()` で常駐バイト数・行数を観測できる
 - ✅ ラベル付与・検索・削除（attach / detach）。**同一レコードへのラベル重複付与は禁止**：既に付与済みのラベルを再度付与しようとした場合は変更せず `DuplicateLabel` エラーを返す（INSERT で1レコードに同じラベルを複数指定した場合も同様にエラー）
 - ✅ ラベル仮想テーブル（`HashMap<String, Vec<usize>>`）による高速検索
 - ✅ 5 種類のデータ型（Text / Integer / Float / Boolean / Null）
@@ -36,6 +37,7 @@
 - ✅ `GET /db/info` でバージョン・ストレージ状態・統計を取得
 - ✅ `POST /sql` で SQL SELECT / INSERT / UPDATE / DELETE / EXPLAIN クエリ、および二次インデックス・スキーマ管理文を実行
 - ✅ `GET /settings` / `PUT /settings` で HTTPリクエスト（`/records` `/labels` 系 REST API）受付のオンオフ、およびスキーマ強制の全体スイッチ `schema_enforcement_enabled`（**既定は有効**。`false` でラベルごとの `ENABLE SCHEMA` 状態に関わらず一時停止。サーバー再起動のたびに既定へ戻る）を切替可能。`http_api_enabled` の既定は無効（データ操作は基本 SQL 経由とし、REST API は大量テストデータ投入など用途に応じて有効化する）。いずれも指定したフィールドだけを更新し、省略したフィールドは現在値を維持
+- ✅ **全データオンメモリ設定**: `GET /settings` は現在の設定（`all_in_memory` / `memory_limit` / 解決後の上限バイト数 / 現在の常駐バイト数・行数）を返し、`PUT /settings` の `all_in_memory`（bool）・`memory_limit`（`{"kind":"bytes"|"percent","value":n}`）・`memory_limit_spec`（`"500MB"` / `"2GB"` / `"20%"` の文字列）で変更できる。変更は**管理者ロール `kagura` のみ**（他ユーザーは `403`）、かつ **`.kdb` モードのみ**（JSON モードは `400`）。設定はサイドカーファイル `<DB_FILE>.memory.json` に保存し再起動をまたいで保持する。`kdb in-memory-mode enable|disable` / `kdb in-memory-size <値>` からも変更可能。Web UI の設定ビューにトグルと上限入力を追加
 - ✅ Web UI の Records 一覧は `POST /sql`（`SELECT * FROM label.*`）経由で取得するため、REST API が無効でも常に閲覧可能
 - ✅ **ログ出力保管機能**: 起動/停止時刻、停止理由（正常 / エラー / HW・ストレージ障害）、SQL・HTTPリクエストの成功/失敗、Webクライアントの応答時間、DB保存・レコード/ラベル操作などを JSON Lines 形式でファイルへ永続保存（詳細は [api.md](api.md#ログ機能) を参照）。`GET /logs` および Web UI の「ログ」ビューから閲覧可能
 

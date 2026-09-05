@@ -1,12 +1,16 @@
 // db_engine/src/lib.rs
 // 列指向ストレージ（Column-Oriented Storage）＋ラベル検索エンジン
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 
 pub mod codec;
 pub mod crypto;
 pub mod kdb_store;
+pub mod memory;
+
+pub use memory::{MemorySizeSpec, MemoryPolicy, MemoryStats};
 
 /// カラムに格納できる値の型
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -111,6 +115,90 @@ impl ColumnStore {
     fn new() -> Self {
         ColumnStore { label_index: HashMap::new() }
     }
+}
+
+/// オンメモリ容量制限（`MemoryPolicy.all_in_memory == false`）のときに使う、
+/// 内部可変なキャッシュ状態。`Database` の公開メソッドの `&self`/`&mut self` シグネチャを
+/// 変えずに、参照系メソッドからも「`.kdb` から読み直してメモリに載せる／FIFO で追い出す」を
+/// 行えるようにするため `Mutex` で包んで持つ。
+///
+/// 不変条件:
+/// - `all_in_memory == true`: `cols` は空。列の実体は `records[idx].columns` にある（高速パス。
+///   このキャッシュには一切触れない）。
+/// - `all_in_memory == false`: `records[idx].columns` は常に空。メモリに載っている行の列は
+///   必ず `cols[idx]` にあり、載っていない行は `.kdb` から読み直す。合計サイズは上限以下。
+#[derive(Debug, Default)]
+struct MemCache {
+    /// 行番号 → 列データ（オンメモリ容量制限モードでの唯一の実体）
+    cols: HashMap<usize, HashMap<String, DataType>>,
+    /// `cols` に載っている列データの推定バイト数の合計
+    resident_bytes: u64,
+    /// 立ち退き順を決めるための単調増加カウンタ
+    tick: u64,
+    /// tick → 行番号（昇順＝古い順。先頭が最も長く使われていない）
+    order: BTreeMap<u64, usize>,
+    /// 行番号 → 現在の tick（`order` からの逆引き）
+    pos: HashMap<usize, u64>,
+}
+
+impl MemCache {
+    /// 行 `idx` を「今使った」ものとして立ち退き順の最後尾へ移動する（再アクセスでLRU更新）。
+    fn touch(&mut self, idx: usize) {
+        if let Some(old) = self.pos.remove(&idx) {
+            self.order.remove(&old);
+        }
+        self.tick += 1;
+        self.order.insert(self.tick, idx);
+        self.pos.insert(idx, self.tick);
+    }
+
+    /// 行 `idx` の列データを載せる（`touch` も行う）。
+    fn insert(&mut self, idx: usize, cols: HashMap<String, DataType>) {
+        if let Some(old) = self.cols.remove(&idx) {
+            self.resident_bytes = self.resident_bytes.saturating_sub(estimate_columns_bytes(&old));
+        }
+        self.resident_bytes += estimate_columns_bytes(&cols);
+        self.cols.insert(idx, cols);
+        self.touch(idx);
+    }
+
+    /// 行 `idx` をメモリから外す。
+    fn evict_one(&mut self, idx: usize) {
+        if let Some(old) = self.cols.remove(&idx) {
+            self.resident_bytes = self.resident_bytes.saturating_sub(estimate_columns_bytes(&old));
+        }
+        if let Some(t) = self.pos.remove(&idx) {
+            self.order.remove(&t);
+        }
+    }
+
+    /// `budget` バイト以下になるまで、最も長く使われていない行から外す。
+    fn evict_until_within(&mut self, budget: u64) {
+        while self.resident_bytes > budget {
+            let Some((&t, &victim)) = self.order.iter().next() else { break };
+            self.order.remove(&t);
+            self.pos.remove(&victim);
+            if let Some(old) = self.cols.remove(&victim) {
+                self.resident_bytes = self.resident_bytes.saturating_sub(estimate_columns_bytes(&old));
+            }
+        }
+    }
+}
+
+/// 列データの推定メモリ使用量（バイト）。`HashMap` の内部オーバーヘッドや `String` の
+/// ヒープ確保分をおおよそ見積もる（厳密なRSSではなく、上限判定に使う目安）。
+fn estimate_columns_bytes(cols: &HashMap<String, DataType>) -> u64 {
+    let mut total = 0u64;
+    for (k, v) in cols {
+        total += k.len() as u64 + 24 + 16; // キー文字列 + String構造体 + slotオーバーヘッド概算
+        total += match v {
+            DataType::Text(s) => s.len() as u64 + 24,
+            DataType::Integer(_) | DataType::Float(_) => 8,
+            DataType::Boolean(_) => 1,
+            DataType::Null => 0,
+        };
+    }
+    total
 }
 
 /// 二次インデックス（あるカラムの値 → そのカラムがその値を持つ行番号一覧）。
@@ -223,6 +311,19 @@ pub struct Database {
     /// 永続化はせず、`load_kdb`・`insert_fast`のWAL追記・呼び出し側が行った`compact`の
     /// 結果（`sync_record_offsets`）から都度反映する。
     record_offsets: HashMap<u64, u64>,
+    /// `.kdb` ファイルのパス（`load_kdb`/`load_or_new_kdb` で設定。オンメモリ容量制限で
+    /// 追い出した行をこのファイルから読み直す）。JSON モード／純メモリ運用時は `None`。
+    db_path: Option<String>,
+    /// DB全体で使われたことのあるカラム名の集合（`list_all_columns` を全件走査せず返すため。
+    /// 削除はしない＝行が全部消えてもカラム名は残る。旧 `ColumnStore.columns` と同じ挙動）。
+    all_columns: std::collections::HashSet<String>,
+    /// 「全データオンメモリ」設定（既定 = 有効・無制限）
+    memory_policy: MemoryPolicy,
+    /// 行番号 → 「`records[idx].columns` が完全か」。`true` の行はインラインの列を
+    /// そのまま使う（高速パス）。`false` の行は列を持っておらず、`mem` または `.kdb` から得る。
+    loaded: Vec<bool>,
+    /// オンメモリ容量制限モードのキャッシュ状態（内部可変）
+    mem: Mutex<MemCache>,
 }
 
 impl Database {
@@ -236,6 +337,161 @@ impl Database {
             schemas: HashMap::new(),
             schema_enforcement_enabled: true,
             record_offsets: HashMap::new(),
+            db_path: None,
+            all_columns: std::collections::HashSet::new(),
+            memory_policy: MemoryPolicy::default(),
+            loaded: Vec::new(),
+            mem: Mutex::new(MemCache::default()),
+        }
+    }
+
+    fn mem_lock(&self) -> std::sync::MutexGuard<'_, MemCache> {
+        self.mem.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn resolve_budget(&self) -> u64 {
+        self.memory_policy.limit.resolve_bytes().unwrap_or(u64::MAX)
+    }
+
+    /// 「全データオンメモリ」設定を取得する
+    pub fn memory_policy(&self) -> MemoryPolicy {
+        self.memory_policy
+    }
+
+    /// 現在のオンメモリ状況（観測用）
+    pub fn memory_stats(&self) -> MemoryStats {
+        let mem = self.mem_lock();
+        let total_rows = self.records.iter().filter(|r| r.is_some()).count();
+        let resident_rows = if self.memory_policy.all_in_memory {
+            self.loaded.iter().zip(self.records.iter())
+                .filter(|(l, r)| **l && r.is_some()).count()
+        } else {
+            mem.cols.len()
+        };
+        MemoryStats {
+            all_in_memory: self.memory_policy.all_in_memory,
+            limit_bytes: self.memory_policy.limit.resolve_bytes(),
+            resident_bytes: mem.resident_bytes,
+            resident_rows,
+            total_rows,
+        }
+    }
+
+    /// 「全データオンメモリ」設定を切り替える。
+    /// - 有効→無効: 現在インラインで保持している列を退避対象へ移し、上限バイト数まで
+    ///   FIFO/LRU で削る。
+    /// - 無効→有効: 退避してあった列をインラインへ戻す。既に追い出されている行は
+    ///   `.kdb` 依存のまま（アクセス時に読み直す）＝一括ロードはしない。
+    pub fn set_memory_policy(&mut self, mut policy: MemoryPolicy) {
+        // 退avした行を読み直すランダムアクセス機構は `.kdb` にしかない。`.kdb` バックエンドが
+        // 無い（JSONモード・純メモリ運用）場合、容量制限モードにすると追い出した行が失われて
+        // しまうため、強制的に「全データオンメモリ有効」に倒す。
+        if self.db_path.is_none() {
+            policy.all_in_memory = true;
+        }
+        let was_all_in_memory = self.memory_policy.all_in_memory;
+        self.memory_policy = policy;
+        let budget = self.resolve_budget();
+
+        if !policy.all_in_memory {
+            let n = self.records.len();
+            let mut mem = self.mem.lock().unwrap_or_else(|e| e.into_inner());
+            for idx in 0..n {
+                if self.loaded.get(idx).copied().unwrap_or(false) {
+                    if let Some(Some(rec)) = self.records.get_mut(idx) {
+                        let cols = std::mem::take(&mut rec.columns);
+                        mem.insert(idx, cols);
+                    }
+                    if let Some(f) = self.loaded.get_mut(idx) { *f = false; }
+                }
+            }
+            mem.evict_until_within(budget);
+        } else if !was_all_in_memory {
+            let entries: Vec<(usize, HashMap<String, DataType>)> = {
+                let mut mem = self.mem.lock().unwrap_or_else(|e| e.into_inner());
+                let taken: Vec<(usize, HashMap<String, DataType>)> = mem.cols.drain().collect();
+                mem.resident_bytes = 0;
+                mem.order.clear();
+                mem.pos.clear();
+                taken
+            };
+            for (idx, cols) in entries {
+                if let Some(Some(rec)) = self.records.get_mut(idx) {
+                    rec.columns = cols;
+                    if let Some(f) = self.loaded.get_mut(idx) { *f = true; }
+                }
+            }
+        }
+    }
+
+    /// 行 `row_idx` の完全なレコードを組み立てて返す（列がメモリに無ければ `.kdb` から
+    /// 読み直してメモリへ載せ、必要なら FIFO/LRU で古い行を追い出す）。
+    /// 論理削除済み・範囲外なら `None`。
+    fn hydrate_row(&self, row_idx: usize) -> Option<Record> {
+        let slot = self.records.get(row_idx)?.as_ref()?;
+        let mut rec = Record {
+            id: slot.id,
+            columns: HashMap::new(),
+            labels: slot.labels.clone(),
+        };
+        if self.loaded.get(row_idx).copied().unwrap_or(false) {
+            rec.columns = slot.columns.clone();
+            return Some(rec);
+        }
+        let id = slot.id;
+        {
+            let mut mem = self.mem_lock();
+            if let Some(cols) = mem.cols.get(&row_idx).cloned() {
+                mem.touch(row_idx);
+                rec.columns = cols;
+                return Some(rec);
+            }
+        }
+        // メモリに無い → `.kdb` から単体で読み直す
+        let (Some(offset), Some(path)) = (self.record_offsets.get(&id).copied(), self.db_path.as_deref())
+        else {
+            return Some(rec); // `.kdb` バックエンドが無い／オフセット未記録なら、そのまま（列なし）
+        };
+        let loaded_cols = match kdb_store::KdbFile::open(path)
+            .and_then(|mut k| k.read_record_at(offset))
+        {
+            Ok(r) => r.columns,
+            Err(_) => return Some(rec),
+        };
+        rec.columns = loaded_cols.clone();
+        let budget = self.resolve_budget();
+        let mut mem = self.mem_lock();
+        mem.insert(row_idx, loaded_cols);
+        if !self.memory_policy.all_in_memory {
+            mem.evict_until_within(budget);
+        }
+        Some(rec)
+    }
+
+    /// 行 `row_idx`（既に `self.records`/`self.loaded` に確保済み）の列データを、
+    /// 現在の「全データオンメモリ」設定に従って配置する。
+    fn place_columns(&mut self, row_idx: usize, cols: HashMap<String, DataType>) {
+        for k in cols.keys() {
+            self.all_columns.insert(k.clone());
+        }
+        if self.memory_policy.all_in_memory {
+            {
+                let mut mem = self.mem.lock().unwrap_or_else(|e| e.into_inner());
+                mem.evict_one(row_idx);
+            }
+            if let Some(Some(rec)) = self.records.get_mut(row_idx) {
+                rec.columns = cols;
+            }
+            if let Some(f) = self.loaded.get_mut(row_idx) { *f = true; }
+        } else {
+            if let Some(Some(rec)) = self.records.get_mut(row_idx) {
+                rec.columns = HashMap::new();
+            }
+            if let Some(f) = self.loaded.get_mut(row_idx) { *f = false; }
+            let budget = self.resolve_budget();
+            let mut mem = self.mem.lock().unwrap_or_else(|e| e.into_inner());
+            mem.insert(row_idx, cols);
+            mem.evict_until_within(budget);
         }
     }
 
@@ -293,17 +549,17 @@ impl Database {
         }
 
         self.id_to_index.insert(id, row_idx);
+        let cols = std::mem::take(&mut record.columns);
         self.records.push(Some(record));
+        self.loaded.push(false);
+        self.place_columns(row_idx, cols);
         Ok(id)
     }
 
     /// GET BY ID
     pub fn get(&self, id: u64) -> Result<Record, DatabaseError> {
-        self.id_to_index
-            .get(&id)
-            .and_then(|&idx| self.records.get(idx))
-            .and_then(|r| r.clone())
-            .ok_or(DatabaseError::RecordNotFound(id))
+        let &idx = self.id_to_index.get(&id).ok_or(DatabaseError::RecordNotFound(id))?;
+        self.hydrate_row(idx).ok_or(DatabaseError::RecordNotFound(id))
     }
 
     /// GET BY LABEL: ラベル名で複数レコードを取得
@@ -312,7 +568,7 @@ impl Database {
             .get(label)
             .map(|indices| {
                 indices.iter()
-                    .filter_map(|&idx| self.records.get(idx).and_then(|r| r.clone()))
+                    .filter_map(|&idx| self.hydrate_row(idx))
                     .collect()
             })
             .unwrap_or_default()
@@ -325,7 +581,7 @@ impl Database {
         self.apply_schema(&mut new_record)?;
         self.check_unique_constraints(&new_record, Some(id))?;
 
-        let old_record = self.records[row_idx].clone();
+        let old_record = self.hydrate_row(row_idx);
         let old_labels: Vec<String> = old_record.as_ref()
             .map(|r| r.labels.clone())
             .unwrap_or_default();
@@ -363,7 +619,9 @@ impl Database {
 
         let mut updated = new_record;
         updated.id = id;
+        let cols = std::mem::take(&mut updated.columns);
         self.records[row_idx] = Some(updated);
+        self.place_columns(row_idx, cols);
         Ok(())
     }
 
@@ -372,7 +630,8 @@ impl Database {
         let &row_idx = self.id_to_index.get(&id)
             .ok_or(DatabaseError::RecordNotFound(id))?;
 
-        let old = self.records[row_idx].take();
+        let old = self.hydrate_row(row_idx);
+        self.records[row_idx] = None;
         if let Some(old) = &old {
             for label in &old.labels {
                 if let Some(indices) = self.store.label_index.get_mut(label) {
@@ -386,20 +645,21 @@ impl Database {
 
         self.id_to_index.remove(&id);
         self.record_offsets.remove(&id);
+        self.mem_lock().evict_one(row_idx);
+        if let Some(f) = self.loaded.get_mut(row_idx) { *f = false; }
         Ok(())
     }
 
     /// LIST ALL: 有効な全レコードを返す
     pub fn list_all(&self) -> Vec<Record> {
-        self.records.iter().filter_map(|r| r.clone()).collect()
+        (0..self.records.len()).filter_map(|idx| self.hydrate_row(idx)).collect()
     }
 
     /// SEARCH BY COLUMN: カラム名と値で絞り込み検索
     pub fn search_by_column(&self, column: &str, value: &DataType) -> Vec<Record> {
-        self.records.iter()
-            .filter_map(|r| r.as_ref())
+        (0..self.records.len())
+            .filter_map(|idx| self.hydrate_row(idx))
             .filter(|r| r.columns.get(column) == Some(value))
-            .cloned()
             .collect()
     }
 
@@ -462,15 +722,10 @@ impl Database {
         labels
     }
 
-    /// DB全体で使われているカラム名の一覧（重複なし・ソート済み）
+    /// DB全体で使われているカラム名の一覧（重複なし・ソート済み）。
+    /// 走査を避けるため `all_columns`（INSERT/UPDATE 時に加算、削除はしない）から返す。
     pub fn list_all_columns(&self) -> Vec<String> {
-        let mut cols: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for slot in &self.records {
-            if let Some(r) = slot {
-                cols.extend(r.columns.keys().cloned());
-            }
-        }
-        let mut cols: Vec<String> = cols.into_iter().collect();
+        let mut cols: Vec<String> = self.all_columns.iter().cloned().collect();
         cols.sort();
         cols
     }
@@ -503,8 +758,8 @@ impl Database {
             return Err(DatabaseError::IndexAlreadyExists(column.to_string()));
         }
         let mut index = SecondaryIndex::default();
-        for (row_idx, slot) in self.records.iter().enumerate() {
-            if let Some(r) = slot {
+        for row_idx in 0..self.records.len() {
+            if let Some(r) = self.hydrate_row(row_idx) {
                 if let Some(v) = r.columns.get(column) {
                     if !matches!(v, DataType::Null) {
                         index.entries.entry(index_value_key(v)).or_default().push(row_idx);
@@ -542,8 +797,8 @@ impl Database {
     pub fn get_by_index(&self, column: &str, value: &DataType) -> Option<Vec<Record>> {
         let index = self.secondary_indexes.get(column)?;
         let key = index_value_key(value);
-        let indices: &[usize] = index.entries.get(&key).map(|v| v.as_slice()).unwrap_or(&[]);
-        Some(indices.iter().filter_map(|&i| self.records.get(i).and_then(|r| r.clone())).collect())
+        let indices: Vec<usize> = index.entries.get(&key).cloned().unwrap_or_default();
+        Some(indices.iter().filter_map(|&i| self.hydrate_row(i)).collect())
     }
 
     // -----------------------------------------------------------------
@@ -726,7 +981,7 @@ impl Database {
                     Some(hits) => hits.iter().any(|r| Some(r.id) != exclude_id && r.labels.iter().any(|l| l == label)),
                     // UNIQUE 指定時に自動でインデックスを作るため通常はここに来ないが、
                     // 保険として全件走査でも確認する
-                    None => self.records.iter().filter_map(|r| r.as_ref())
+                    None => (0..self.records.len()).filter_map(|i| self.hydrate_row(i))
                         .any(|r| Some(r.id) != exclude_id && r.labels.iter().any(|l| l == label) && r.columns.get(col) == Some(val)),
                 };
                 if conflict {
@@ -791,7 +1046,7 @@ impl Database {
     /// * `path` - 保存先ファイルパス（存在しない場合は新規作成、既存は上書き）
     pub fn save(&self, path: impl AsRef<std::path::Path>) -> Result<(), PersistError> {
         let snapshot = DatabaseSnapshot {
-            records: self.records.iter().filter_map(|r| r.clone()).collect(),
+            records: self.list_all(),
             next_id: self.next_id,
         };
         // アトミック書き込み: 一時ファイルに書いてからリネーム
@@ -828,8 +1083,12 @@ impl Database {
                     .or_insert_with(Vec::new)
                     .push(row_idx);
             }
+            for col in record.columns.keys() {
+                db.all_columns.insert(col.clone());
+            }
             db.id_to_index.insert(id, row_idx);
             db.records.push(Some(record));
+            db.loaded.push(true);
         }
         Ok(db)
     }
@@ -869,7 +1128,7 @@ impl Database {
     /// UPDATE/DELETE 後に呼ぶ
     pub fn save_kdb(&mut self, path: &str) -> Result<(), KdbPersistError> {
         let mut kdb = kdb_store::KdbFile::open_or_create(path)?;
-        let records: Vec<Record> = self.records.iter().filter_map(|r| r.clone()).collect();
+        let records: Vec<Record> = self.list_all();
         let offsets = kdb.compact(&records, self.next_id)?;
         self.sync_record_offsets(&records, &offsets);
         Ok(())
@@ -881,23 +1140,33 @@ impl Database {
         let entries = kdb.read_all_records()?;
         let mut db  = Database::new();
         db.next_id  = kdb.next_id();
+        db.db_path  = Some(path.to_string());
         for (offset, record) in entries {
             let id      = record.id;
             let row_idx = db.records.len();
             for label in &record.labels {
                 db.store.label_index.entry(label.clone()).or_default().push(row_idx);
             }
+            for col in record.columns.keys() {
+                db.all_columns.insert(col.clone());
+            }
             db.id_to_index.insert(id, row_idx);
             db.record_offsets.insert(id, offset);
             db.records.push(Some(record));
+            db.loaded.push(true);
         }
         Ok(db)
     }
 
-    /// .kdb ファイルが存在すればロード、なければ新規DB
+    /// .kdb ファイルが存在すればロード、なければ新規DB（`db_path` は常に設定する）
     pub fn load_or_new_kdb(path: &str) -> Result<Self, KdbPersistError> {
-        if std::path::Path::new(path).exists() { Self::load_kdb(path) }
-        else { Ok(Self::new()) }
+        if std::path::Path::new(path).exists() {
+            Self::load_kdb(path)
+        } else {
+            let mut db = Self::new();
+            db.db_path = Some(path.to_string());
+            Ok(db)
+        }
     }
 
     /// INSERT を WAL 追記で高速に行う（O(1)書き込み）
@@ -930,7 +1199,6 @@ impl Database {
             secondary_index_add(&mut self.secondary_indexes, col, val, row_idx);
         }
         self.id_to_index.insert(id, row_idx);
-        self.records.push(Some(record.clone()));
         // WAL追記（kdb モードなら高速保存）
         if let Some(kdb) = kdb {
             let _ = kdb.update_next_id(self.next_id);
@@ -938,6 +1206,10 @@ impl Database {
                 self.record_offsets.insert(id, offset);
             }
         }
+        let cols = std::mem::take(&mut record.columns);
+        self.records.push(Some(record));
+        self.loaded.push(false);
+        self.place_columns(row_idx, cols);
         Ok(id)
     }
 }

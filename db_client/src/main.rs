@@ -19,6 +19,7 @@ mod info_handlers;
 mod label_handlers;
 mod logging;
 mod logging_handlers;
+mod memory_settings;
 mod models;
 mod schema_sql;
 mod settings_handlers;
@@ -141,6 +142,27 @@ async fn main() {
     schema_sql::rebuild_schemas_from_sidecar(&db_path, &mut db);
     if !db.list_schema_labels().is_empty() {
         println!("[INFO] Rebuilt schema definition(s) for label(s): {}", db.list_schema_labels().join(", "));
+    }
+
+    // 「全データオンメモリ」設定も同様にサイドカーファイル `<DB_FILE>.memory.json` から読む。
+    // `.kdb` モードのときだけ適用する（JSONモードは追い出した行を読み直すランダムアクセス
+    // 機構が無いため、常に「全データオンメモリ有効」相当で動く）。
+    if is_kdb {
+        if let Some(policy) = memory_settings::load(&db_path) {
+            db.set_memory_policy(policy);
+            let s = db.memory_stats();
+            if policy.all_in_memory {
+                println!("[INFO] Memory policy: 全データオンメモリ 有効（無制限）");
+            } else {
+                let limit = s.limit_bytes
+                    .map(|b| format!("{:.2} MB", b as f64 / (1024.0 * 1024.0)))
+                    .unwrap_or_else(|| "無制限（搭載メモリ量を取得できず）".to_string());
+                println!(
+                    "[INFO] Memory policy: 容量制限モード 上限 {} / メモリ常駐 {} 行（有効 {} 行中）",
+                    limit, s.resident_rows, s.total_rows
+                );
+            }
+        }
     }
 
     let state = Arc::new(RwLock::new(AppStateInner {
