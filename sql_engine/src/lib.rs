@@ -6,16 +6,23 @@ pub mod parser;
 
 pub use executor::{
     execute_select, execute_insert, execute_insert_fast, execute_update, execute_delete,
-    CellValue, QueryResult, InsertResult, InsertExecError, UpdateResult, UpdateExecError,
-    DeleteResult, DeleteExecError,
+    explain_select, CellValue, QueryResult, InsertResult, InsertExecError, UpdateResult,
+    UpdateExecError, DeleteResult, DeleteExecError, PlanDescription,
 };
-pub use parser::{parse_select, parse_insert, parse_update, parse_delete, ParseError};
+pub use parser::{parse_select, parse_insert, parse_update, parse_delete, parse_explain, ParseError};
 pub use ast::{SelectStatement, InsertStatement, UpdateStatement, DeleteStatement};
 
 /// SQL文字列を受け取り、クエリを実行して結果を返す（SELECT専用）
 pub fn run_select(db: &db_engine::Database, sql: &str) -> Result<QueryResult, ParseError> {
     let stmt = parse_select(sql)?;
     Ok(execute_select(db, &stmt))
+}
+
+/// `EXPLAIN <SELECT文>` を受け取り、クエリは実行せず実行計画（二次インデックスを
+/// 使ったかどうか）だけを返す。
+pub fn run_explain(db: &db_engine::Database, sql: &str) -> Result<QueryResult, ParseError> {
+    let stmt = parse_explain(sql)?;
+    Ok(explain_select(db, &stmt))
 }
 
 /// INSERT実行時の統合エラー（パースエラー or 実行エラー）

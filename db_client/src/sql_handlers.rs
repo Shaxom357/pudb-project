@@ -11,8 +11,9 @@ use serde::{Deserialize, Serialize};
 use crate::auth::Privilege;
 use crate::auth_handlers::{resolve_actor, resolve_actor_readonly};
 use crate::handlers::{auto_save, AppState};
+use crate::index_sql::{execute_index_statement, parse_index_statement, save_index_definitions, IndexSqlOutcome};
 use crate::user_sql::{execute_user_statement, parse_user_statement, UserSqlOutcome};
-use sql_engine::{run_select, run_insert_fast, run_update, run_delete, CellValue};
+use sql_engine::{run_select, run_insert_fast, run_update, run_delete, run_explain, CellValue};
 
 // ---------------------------------------------------------------------------
 // リクエスト / レスポンス DTO
@@ -171,12 +172,63 @@ pub async fn execute_sql(
         };
     }
 
-    // 現時点では SELECT / INSERT / UPDATE / DELETE のみサポート
+    // 二次インデックス管理系（CREATE INDEX / DROP INDEX / SHOW INDEXES）は、CREATE USER 等と
+    // 同様にレコードストアの構造を操作する管理操作のため MANAGE_USERS 権限が必要。
+    // インデックスの実体は db_engine::Database 上に構築するが、定義（カラム名）だけを
+    // サイドカーファイルへ保存し .kdb/JSON 本体のフォーマットは変更しない。
+    if let Some(parsed) = parse_index_statement(&query) {
+        let started = std::time::Instant::now();
+        let mut inner = state.write().await;
+        let stmt = match parsed {
+            Ok(s) => s,
+            Err(e) => {
+                inner.logger.sql_query(&query, false, started.elapsed().as_millis(), Some(&e));
+                return (StatusCode::BAD_REQUEST, Json(SqlQueryResponse::error(query, e)));
+            }
+        };
+        let Some(actor) = resolve_actor(&mut inner, &headers) else {
+            let msg = "認証が必要です。/auth/login でログインしてください。";
+            inner.logger.sql_query(&query, false, started.elapsed().as_millis(), Some(msg));
+            return (StatusCode::UNAUTHORIZED, Json(SqlQueryResponse::error(query, msg)));
+        };
+        if !inner.auth.can_manage_users(&actor) {
+            let msg = "この操作には MANAGE_USERS 権限が必要です。管理者に依頼してください。";
+            inner.logger.sql_query(&query, false, started.elapsed().as_millis(), Some(msg));
+            return (StatusCode::FORBIDDEN, Json(SqlQueryResponse::error(query, msg)));
+        }
+        let outcome = execute_index_statement(inner.mgr.db_mut(), stmt);
+        // CREATE/DROP が成功した場合だけ、定義をサイドカーファイルへ保存する
+        if matches!(outcome, IndexSqlOutcome::Ok { .. }) {
+            let db_path = inner.db_path.clone();
+            if let Err(e) = save_index_definitions(&db_path, inner.mgr.db()) {
+                inner.logger.db_info(format!("インデックス定義の保存に失敗しました: {}", e));
+            }
+        }
+        return match outcome {
+            IndexSqlOutcome::Rows { columns, rows } => {
+                inner.logger.sql_query(&query, true, started.elapsed().as_millis(), None);
+                (StatusCode::OK, Json(SqlQueryResponse::rows(query, columns, rows)))
+            }
+            IndexSqlOutcome::Ok { message } => {
+                inner.logger.db_info(format!("index-mgmt by '{}': {} | query={}", actor, message, query));
+                inner.logger.sql_query(&query, true, started.elapsed().as_millis(), None);
+                (StatusCode::OK, Json(SqlQueryResponse::acknowledged(query)))
+            }
+            IndexSqlOutcome::Err { status, message } => {
+                inner.logger.sql_query(&query, false, started.elapsed().as_millis(), Some(&message));
+                let code = StatusCode::from_u16(status).unwrap_or(StatusCode::BAD_REQUEST);
+                (code, Json(SqlQueryResponse::error(query, message)))
+            }
+        };
+    }
+
+    // 現時点では SELECT / INSERT / UPDATE / DELETE / EXPLAIN のみサポート
     let upper = query.to_uppercase();
     let trimmed = upper.trim_start();
 
     // データ操作文はログイン中ユーザーの privileges を検査する（管理者は常に通過）。
-    let required_privilege = if trimmed.starts_with("SELECT") {
+    // EXPLAIN は SELECT の実行計画を見るだけなので SELECT と同じ権限とする。
+    let required_privilege = if trimmed.starts_with("SELECT") || trimmed.starts_with("EXPLAIN") {
         Some(Privilege::Select)
     } else if trimmed.starts_with("INSERT") {
         Some(Privilege::Insert)
@@ -202,6 +254,26 @@ pub async fn execute_sql(
             inner.logger.sql_query(&query, false, 0, Some(&msg));
             return (StatusCode::FORBIDDEN, Json(SqlQueryResponse::error(query, msg)));
         }
+    }
+
+    if trimmed.starts_with("EXPLAIN") {
+        let started = std::time::Instant::now();
+        let inner = state.read().await;
+        let db = inner.mgr.db();
+
+        return match run_explain(db, &query) {
+            Ok(result) => {
+                let rows: Vec<Vec<serde_json::Value>> = result.rows.iter()
+                    .map(|row| row.iter().map(cell_to_json).collect())
+                    .collect();
+                inner.logger.sql_query(&query, true, started.elapsed().as_millis(), None);
+                (StatusCode::OK, Json(SqlQueryResponse::rows(query, result.columns, rows)))
+            }
+            Err(e) => {
+                inner.logger.sql_query(&query, false, started.elapsed().as_millis(), Some(&e.to_string()));
+                (StatusCode::BAD_REQUEST, Json(SqlQueryResponse::error(query, e.to_string())))
+            }
+        };
     }
 
     if trimmed.starts_with("SELECT") {
@@ -358,6 +430,6 @@ pub async fn execute_sql(
         inner.logger.sql_query(&query, false, 0, Some("unsupported statement"));
     }
     (StatusCode::BAD_REQUEST, Json(SqlQueryResponse::error(
-        query, "Only SELECT, INSERT, UPDATE, and DELETE statements are supported in this version.",
+        query, "Only SELECT, INSERT, UPDATE, DELETE, EXPLAIN, and index/user management statements are supported in this version.",
     )))
 }

@@ -951,6 +951,31 @@ pub fn parse_select(sql: &str) -> Result<SelectStatement, ParseError> {
     Ok(stmt)
 }
 
+/// `EXPLAIN <SELECT文>` をパースする公開エントリーポイント。
+/// `EXPLAIN` の後ろは通常の SELECT 文と全く同じ構文で書ける。
+pub fn parse_explain(sql: &str) -> Result<SelectStatement, ParseError> {
+    if sql.trim().is_empty() { return Err(ParseError::EmptyQuery); }
+    let rest = strip_keyword_prefix(sql.trim_start(), "EXPLAIN")
+        .ok_or_else(|| ParseError::UnexpectedToken {
+            got: sql.trim_start().split_whitespace().next().unwrap_or("").to_string(),
+            expected: "'EXPLAIN'".into(),
+        })?;
+    parse_select(rest)
+}
+
+/// 文字列の先頭がキーワード `kw`（大文字小文字無視）に単語境界で一致すれば、
+/// その後ろの部分文字列を返す（`EXPLAIN` プレフィックスの除去専用の小さなヘルパー）。
+fn strip_keyword_prefix<'a>(s: &'a str, kw: &str) -> Option<&'a str> {
+    if s.len() < kw.len() || !s.is_char_boundary(kw.len()) { return None; }
+    let (head, rest) = s.split_at(kw.len());
+    if !head.eq_ignore_ascii_case(kw) { return None; }
+    match rest.chars().next() {
+        None => Some(rest),
+        Some(c) if c.is_whitespace() => Some(rest),
+        _ => None,
+    }
+}
+
 /// INSERT文をパースする公開エントリーポイント
 pub fn parse_insert(sql: &str) -> Result<InsertStatement, ParseError> {
     if sql.trim().is_empty() { return Err(ParseError::EmptyQuery); }
@@ -1306,6 +1331,28 @@ mod tests {
     #[test]
     fn test_select_star_rejects_having() {
         assert!(parse_select("SELECT * FROM label.employee HAVING department = 'sales'").is_err());
+    }
+
+    // --- EXPLAIN ---
+
+    #[test]
+    fn test_parse_explain_wraps_select() {
+        let s = parse_explain("EXPLAIN SELECT * FROM label.employee WHERE age = 24").unwrap();
+        assert_eq!(s.from, FromClause::Label(LabelTarget::LabelName("employee".into())));
+        assert_eq!(s.where_clause, Some(WhereExpr::Comparison(Comparison {
+            column: "age".into(), op: CompareOp::Eq, value: LiteralValue::Integer(24),
+        })));
+    }
+
+    #[test]
+    fn test_parse_explain_case_insensitive() {
+        assert!(parse_explain("explain select * from label.employee").is_ok());
+    }
+
+    #[test]
+    fn test_parse_explain_requires_keyword() {
+        assert!(parse_explain("SELECT * FROM label.employee").is_err());
+        assert!(parse_explain("EXPLAINX SELECT * FROM label.employee").is_err());
     }
     #[test]
     fn test_select_order_by_limit() {

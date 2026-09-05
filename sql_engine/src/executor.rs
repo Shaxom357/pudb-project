@@ -51,7 +51,7 @@ impl CellValue {
 // ---------------------------------------------------------------------------
 
 pub fn execute_select(db: &Database, stmt: &SelectStatement) -> QueryResult {
-    let mut records: Vec<&Record> = filter_by_from(db, &stmt.from);
+    let (mut records, _plan) = select_candidates(db, stmt);
 
     if let Some(ref where_expr) = stmt.where_clause {
         records.retain(|r| eval_where(r, where_expr));
@@ -475,6 +475,92 @@ fn eval_scalar_func(func: ScalarFunc, args: Vec<CellValue>) -> CellValue {
 // ---------------------------------------------------------------------------
 // FROM句フィルタ
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// 簡易プランナ（二次インデックスの利用判定）
+// ---------------------------------------------------------------------------
+
+/// `EXPLAIN` が返す、選択の際にどちらの経路を通ったかの説明
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlanDescription {
+    /// 二次インデックスによる等値検索を使った
+    IndexScan { column: String, candidates: usize },
+    /// インデックスを使わず全件走査した（`scanned` は WHERE 適用前の対象件数）
+    FullScan { scanned: usize },
+}
+
+/// `EXPLAIN <SELECT文>` を実行し、実際にクエリは実行せず実行計画だけを1行で返す。
+pub fn explain_select(db: &Database, stmt: &SelectStatement) -> QueryResult {
+    let (_, plan) = select_candidates(db, stmt);
+    let description = match plan {
+        PlanDescription::IndexScan { column, candidates } => format!(
+            "index scan: {} (equality) — {} candidate row(s) before remaining WHERE conditions",
+            column, candidates
+        ),
+        PlanDescription::FullScan { scanned } => format!(
+            "full scan — {} row(s) scanned before WHERE", scanned
+        ),
+    };
+    QueryResult {
+        columns: vec!["plan".to_string()],
+        rows: vec![vec![CellValue::Text(description)]],
+        total_matched: 0,
+    }
+}
+
+/// SELECT の候補レコードを決定する。`WHERE` 句全体がちょうど1つの等値比較
+/// （`column = value`）で、かつ `column` に二次インデックスがあれば、そのインデックスを
+/// 使って候補を絞り込む（ラベルによる絞り込みは、取得した候補が対象ラベルを持つかを
+/// 直接チェックすることで行う。候補数が少ない前提のため全件走査にはならない）。
+/// それ以外（複合条件・インデックス無し等）は従来どおり `FROM` 句のみで絞り込む
+/// （`WHERE` の残りの条件は呼び出し側が `eval_where` で適用する）。
+///
+/// 現状インデックスが効くのは「`WHERE` 句全体がちょうど1つの等値比較」のときだけで、
+/// `AND`/`OR`/`NOT` を含む複合条件では使われない（今後の拡張余地）。
+fn select_candidates<'a>(db: &'a Database, stmt: &SelectStatement) -> (Vec<&'a Record>, PlanDescription) {
+    if let Some((column, value)) = single_equality_condition(&stmt.where_clause) {
+        if let Some(index_hits) = db.get_by_index(&column, &literal_to_data_type(&value)) {
+            let candidates: Vec<&Record> = index_hits.into_iter()
+                .filter(|r| record_matches_from(r, &stmt.from))
+                .collect();
+            let n = candidates.len();
+            return (candidates, PlanDescription::IndexScan { column, candidates: n });
+        }
+    }
+    let records = filter_by_from(db, &stmt.from);
+    let n = records.len();
+    (records, PlanDescription::FullScan { scanned: n })
+}
+
+/// `WHERE` 句全体がちょうど1つの等値比較（`column = value`、`value` は `NULL` 以外）で
+/// あればそのカラム名と値を返す。`AND`/`OR`/`NOT` で包まれている場合や `!=`/`LIKE`/`IN`
+/// などその他の演算子の場合は `None`。
+fn single_equality_condition(where_clause: &Option<WhereExpr>) -> Option<(String, LiteralValue)> {
+    match where_clause {
+        Some(WhereExpr::Comparison(Comparison { column, op: CompareOp::Eq, value }))
+            if *value != LiteralValue::Null =>
+            Some((column.clone(), value.clone())),
+        _ => None,
+    }
+}
+
+/// レコードが FROM 句（ラベル条件）に一致するかを、そのレコード自身の `labels` を見て
+/// 直接判定する（`label_index` を介さない。インデックス経由の少数候補に対してだけ使う
+/// 想定のため、この程度の線形チェックで十分に安い）。
+fn record_matches_from(r: &Record, from: &FromClause) -> bool {
+    match from {
+        FromClause::Label(t) => record_matches_target(r, t),
+        FromClause::And(ts)  => ts.iter().all(|t| record_matches_target(r, t)),
+        FromClause::Or(ts)   => ts.iter().any(|t| record_matches_target(r, t)),
+    }
+}
+
+fn record_matches_target(r: &Record, target: &LabelTarget) -> bool {
+    match target {
+        LabelTarget::All             => true,
+        LabelTarget::LabelName(name) => r.labels.iter().any(|l| l == name),
+    }
+}
 
 fn filter_by_from<'a>(db: &'a Database, from: &FromClause) -> Vec<&'a Record> {
     match from {
@@ -1268,6 +1354,90 @@ mod select_tests {
         let db = setup();
         let r = select(&db, "SELECT age * 2 AS doubled, doubled + 1 AS plus_one FROM label.employee WHERE name = '田中'");
         assert_eq!(r.rows, vec![vec![CellValue::Integer(48), CellValue::Integer(49)]]);
+    }
+
+    // --- Step 5: 二次インデックス（簡易プランナ・EXPLAIN） ---
+
+    fn explain(db: &Database, sql: &str) -> QueryResult {
+        let stmt = crate::parser::parse_explain(sql).expect("parse should succeed");
+        explain_select(db, &stmt)
+    }
+
+    #[test]
+    fn test_select_uses_index_for_single_equality_condition() {
+        let mut db = setup();
+        db.create_index("department").unwrap();
+
+        let r = select(&db, "SELECT name FROM label.employee WHERE department = 'dev'");
+        assert_eq!(r.rows, vec![vec![CellValue::Text("田中".into())]]);
+    }
+
+    #[test]
+    fn test_select_index_result_matches_full_scan_result() {
+        // インデックス有り/無しで結果が一致することを確認する
+        let mut db_indexed = setup_departments();
+        db_indexed.create_index("department").unwrap();
+        let db_plain = setup_departments();
+
+        let with_index = select(&db_indexed, "SELECT name FROM label.employee WHERE department = 'sales' ORDER BY name");
+        let without_index = select(&db_plain, "SELECT name FROM label.employee WHERE department = 'sales' ORDER BY name");
+        assert_eq!(with_index.rows, without_index.rows);
+        assert_eq!(with_index.rows.len(), 2); // 佐藤・高橋
+    }
+
+    #[test]
+    fn test_select_index_does_not_apply_to_other_labels() {
+        // インデックスはカラム単位（ラベル横断）なので、候補をFROM句で正しく絞り込めているかを確認する
+        let mut db = Database::new();
+        insert(&mut db, "INSERT INTO (label.employee) (name, department) VALUE ('田中', 'dev')");
+        insert(&mut db, "INSERT INTO (label.manager) (name, department) VALUE ('鈴木', 'dev')");
+        db.create_index("department").unwrap();
+
+        let r = select(&db, "SELECT name FROM label.employee WHERE department = 'dev'");
+        assert_eq!(r.rows, vec![vec![CellValue::Text("田中".into())]]);
+    }
+
+    #[test]
+    fn test_explain_reports_index_scan_when_index_exists() {
+        let mut db = setup();
+        db.create_index("department").unwrap();
+        let r = explain(&db, "EXPLAIN SELECT * FROM label.employee WHERE department = 'dev'");
+        assert_eq!(r.columns, vec!["plan".to_string()]);
+        match &r.rows[0][0] {
+            CellValue::Text(s) => assert!(s.starts_with("index scan: department"), "got: {}", s),
+            _ => panic!("expected Text"),
+        }
+    }
+
+    #[test]
+    fn test_explain_reports_full_scan_when_no_index() {
+        let db = setup();
+        let r = explain(&db, "EXPLAIN SELECT * FROM label.employee WHERE department = 'dev'");
+        match &r.rows[0][0] {
+            CellValue::Text(s) => assert!(s.starts_with("full scan"), "got: {}", s),
+            _ => panic!("expected Text"),
+        }
+    }
+
+    #[test]
+    fn test_explain_reports_full_scan_for_compound_where_even_with_index() {
+        // 現状のプランナは WHERE 句全体が単一の等値比較のときだけインデックスを使う
+        let mut db = setup();
+        db.create_index("department").unwrap();
+        let r = explain(&db, "EXPLAIN SELECT * FROM label.employee WHERE department = 'dev' AND age > 20");
+        match &r.rows[0][0] {
+            CellValue::Text(s) => assert!(s.starts_with("full scan"), "got: {}", s),
+            _ => panic!("expected Text"),
+        }
+    }
+
+    #[test]
+    fn test_explain_does_not_mutate_database() {
+        let mut db = setup();
+        db.create_index("department").unwrap();
+        let before = db.count();
+        let _ = explain(&db, "EXPLAIN SELECT * FROM label.employee WHERE department = 'dev'");
+        assert_eq!(db.count(), before);
     }
 }
 

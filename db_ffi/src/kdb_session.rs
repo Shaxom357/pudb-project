@@ -327,6 +327,25 @@ pub extern "C" fn kdb_sql(ptr: *mut KdbSession, query: *const c_char) -> *mut c_
         };
     }
 
+    // EXPLAIN <SELECT文>: クエリは実行せず、二次インデックスを使ったかどうかの
+    // 実行計画だけを1行で返す（CREATE INDEX / DROP INDEX 自体は現時点では
+    // REST API (`/sql`) 経由のみで、この FFI からはまだ作成できない）。
+    if head.starts_with("EXPLAIN") {
+        return match sql_engine::run_explain(&s.db, query) {
+            Ok(result) => {
+                let rows: Vec<Vec<serde_json::Value>> = result
+                    .rows
+                    .iter()
+                    .map(|row| row.iter().map(cell_to_json).collect())
+                    .collect();
+                to_c_string(
+                    serde_json::json!({ "ok": true, "columns": result.columns, "rows": rows }).to_string(),
+                )
+            }
+            Err(e) => err_json(e.to_string()),
+        };
+    }
+
     if head.starts_with("INSERT") {
         // kdb モードなので WAL 追記（insert_fast）。追記済みのため checkpoint 不要。
         return match run_insert_fast(&mut s.db, s.kdb.as_mut(), query) {
@@ -379,7 +398,7 @@ pub extern "C" fn kdb_sql(ptr: *mut KdbSession, query: *const c_char) -> *mut c_
         };
     }
 
-    err_json("Only SELECT, INSERT, UPDATE, and DELETE statements are supported.")
+    err_json("Only SELECT, EXPLAIN, INSERT, UPDATE, and DELETE statements are supported.")
 }
 
 // ---------------------------------------------------------------------------
@@ -562,6 +581,22 @@ mod tests {
         assert_eq!(v["ok"], true);
         assert_eq!(v["total_matched"], 1);
         assert_eq!(v["rows"].as_array().unwrap().len(), 1);
+
+        kdb_close(sess);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn test_kdb_sql_explain_reports_full_scan() {
+        let path = tmp_kdb("sqlexplain");
+        let cp = cstr(&path);
+        let sess = kdb_open(cp.as_ptr());
+
+        kdb_sql(sess, cstr("INSERT INTO (label.race) (venue) VALUE ('edogawa')").as_ptr());
+        let r = read_free(kdb_sql(sess, cstr("EXPLAIN SELECT * FROM label.race WHERE venue = 'edogawa'").as_ptr()));
+        let v: serde_json::Value = serde_json::from_str(&r).unwrap();
+        assert_eq!(v["ok"], true);
+        assert!(v["rows"][0][0].as_str().unwrap().starts_with("full scan"));
 
         kdb_close(sess);
         cleanup(&path);

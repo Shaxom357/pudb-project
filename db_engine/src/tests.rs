@@ -474,3 +474,149 @@ fn test_save_and_load_all_datatypes() {
 
     let _ = std::fs::remove_file(&tmp);
 }
+
+// ---------------------------------------------------------------------------
+// 二次インデックス（CREATE INDEX / DROP INDEX）
+// ---------------------------------------------------------------------------
+
+fn insert_venue(db: &mut Database, name: &str, venue: &str) -> u64 {
+    let mut r = Record::new(0);
+    r.set("name", DataType::Text(name.to_string()));
+    r.set("venue", DataType::Text(venue.to_string()));
+    db.insert(r).unwrap()
+}
+
+#[test]
+fn test_create_index_indexes_existing_records() {
+    let mut db = Database::new();
+    insert_venue(&mut db, "race1", "edogawa");
+    insert_venue(&mut db, "race2", "toda");
+    insert_venue(&mut db, "race3", "edogawa");
+
+    db.create_index("venue").unwrap();
+    assert!(db.has_index("venue"));
+
+    let hits = db.get_by_index("venue", &DataType::Text("edogawa".to_string())).unwrap();
+    let names: Vec<&str> = hits.iter().filter_map(|r| match r.get_col("name") {
+        Some(DataType::Text(s)) => Some(s.as_str()), _ => None,
+    }).collect();
+    assert_eq!(names, vec!["race1", "race3"]);
+}
+
+#[test]
+fn test_create_index_on_column_with_no_matching_value_returns_empty() {
+    let mut db = Database::new();
+    insert_venue(&mut db, "race1", "edogawa");
+    db.create_index("venue").unwrap();
+
+    let hits = db.get_by_index("venue", &DataType::Text("toda".to_string())).unwrap();
+    assert!(hits.is_empty());
+}
+
+#[test]
+fn test_get_by_index_on_non_indexed_column_returns_none() {
+    let mut db = Database::new();
+    insert_venue(&mut db, "race1", "edogawa");
+    // "venue" にインデックスを作っていないので None（呼び出し側は全件走査にフォールバックする）
+    assert_eq!(db.get_by_index("venue", &DataType::Text("edogawa".to_string())), None);
+}
+
+#[test]
+fn test_create_index_twice_is_error() {
+    let mut db = Database::new();
+    db.create_index("venue").unwrap();
+    let err = db.create_index("venue").unwrap_err();
+    assert_eq!(err, DatabaseError::IndexAlreadyExists("venue".to_string()));
+}
+
+#[test]
+fn test_drop_index_removes_it() {
+    let mut db = Database::new();
+    db.create_index("venue").unwrap();
+    db.drop_index("venue").unwrap();
+    assert!(!db.has_index("venue"));
+    assert_eq!(db.get_by_index("venue", &DataType::Text("edogawa".to_string())), None);
+}
+
+#[test]
+fn test_drop_nonexistent_index_is_error() {
+    let mut db = Database::new();
+    let err = db.drop_index("venue").unwrap_err();
+    assert_eq!(err, DatabaseError::IndexNotFound("venue".to_string()));
+}
+
+#[test]
+fn test_list_indexes_sorted() {
+    let mut db = Database::new();
+    db.create_index("venue").unwrap();
+    db.create_index("age").unwrap();
+    assert_eq!(db.list_indexes(), vec!["age".to_string(), "venue".to_string()]);
+}
+
+#[test]
+fn test_index_created_before_insert_is_maintained_on_new_records() {
+    let mut db = Database::new();
+    db.create_index("venue").unwrap();
+    insert_venue(&mut db, "race1", "edogawa");
+    insert_venue(&mut db, "race2", "edogawa");
+
+    let hits = db.get_by_index("venue", &DataType::Text("edogawa".to_string())).unwrap();
+    assert_eq!(hits.len(), 2);
+}
+
+#[test]
+fn test_index_updated_on_update() {
+    let mut db = Database::new();
+    let id = insert_venue(&mut db, "race1", "edogawa");
+    db.create_index("venue").unwrap();
+
+    let mut updated = db.get(id).unwrap().clone();
+    updated.set("venue", DataType::Text("toda".to_string()));
+    db.update(id, updated).unwrap();
+
+    // 旧い値(edogawa)のインデックスからは外れている
+    assert!(db.get_by_index("venue", &DataType::Text("edogawa".to_string())).unwrap().is_empty());
+    // 新しい値(toda)のインデックスに入っている
+    let hits = db.get_by_index("venue", &DataType::Text("toda".to_string())).unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].id, id);
+}
+
+#[test]
+fn test_index_removed_on_delete() {
+    let mut db = Database::new();
+    let id = insert_venue(&mut db, "race1", "edogawa");
+    db.create_index("venue").unwrap();
+    db.delete(id).unwrap();
+
+    let hits = db.get_by_index("venue", &DataType::Text("edogawa".to_string())).unwrap();
+    assert!(hits.is_empty());
+}
+
+#[test]
+fn test_index_skips_null_values() {
+    let mut db = Database::new();
+    let mut r = Record::new(0);
+    r.set("venue", DataType::Null);
+    db.insert(r).unwrap();
+    db.create_index("venue").unwrap();
+
+    // NULL は等値検索インデックスの対象外
+    let hits = db.get_by_index("venue", &DataType::Null).unwrap();
+    assert!(hits.is_empty());
+}
+
+#[test]
+fn test_index_distinguishes_value_types() {
+    let mut db = Database::new();
+    let mut r1 = Record::new(0);
+    r1.set("code", DataType::Text("1".to_string()));
+    db.insert(r1).unwrap();
+    let mut r2 = Record::new(0);
+    r2.set("code", DataType::Integer(1));
+    db.insert(r2).unwrap();
+
+    db.create_index("code").unwrap();
+    assert_eq!(db.get_by_index("code", &DataType::Text("1".to_string())).unwrap().len(), 1);
+    assert_eq!(db.get_by_index("code", &DataType::Integer(1)).unwrap().len(), 1);
+}

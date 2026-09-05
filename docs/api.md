@@ -41,7 +41,7 @@
 | `POST`   | `/labels/search` | AND/OR ラベル検索 | ✅ | ✅ |
 | `PUT`    | `/labels/rename` | ラベルリネーム | ✅ | ✅ |
 | `GET`    | `/db/info` | DB バージョン・統計情報 | ✅ | - |
-| `POST`   | `/sql` | SQL SELECT / INSERT / UPDATE / DELETE 実行（一般ユーザーは付与された権限の範囲のみ・不足時 `403`）、および `MANAGE_USERS` 権限向けユーザー管理（`CREATE`/`DROP`/`ALTER USER`・`SHOW USERS`・`GRANT`/`REVOKE`。詳細は [authentication.md](authentication.md)） | ✅ | - |
+| `POST`   | `/sql` | SQL SELECT / INSERT / UPDATE / DELETE / EXPLAIN 実行（一般ユーザーは付与された権限の範囲のみ・不足時 `403`）、`MANAGE_USERS` 権限向けユーザー管理（`CREATE`/`DROP`/`ALTER USER`・`SHOW USERS`・`GRANT`/`REVOKE`。詳細は [authentication.md](authentication.md)）、および同じく `MANAGE_USERS` 権限向け二次インデックス管理（`CREATE`/`DROP INDEX`・`SHOW INDEXES`。詳細は [sql.md](sql.md#二次インデックス-create-index--drop-index--show-indexes--explain)） | ✅ | - |
 | `GET`    | `/settings` | 現在の設定取得 | ✅ | - |
 | `PUT`    | `/settings` | 設定更新（HTTPリクエスト受付オンオフ） | ✅ | - |
 | `GET`    | `/logs` | 保管されたログを新しい順に取得（`?lines=` で件数指定、既定200・上限2000） | ✅ | - |

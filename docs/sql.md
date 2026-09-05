@@ -138,6 +138,8 @@ SELECT LENGTH(name) AS len, UPPER(name) AS name_upper, ROUND(odds, 1) AS odds_r 
     カラム参照する（`AVG(age) AS avg_age, ROUND(avg_age, 0) AS avg_rounded` のように2項目に分ける）。
   - 先に指定した式のエイリアスを、後続の式からカラム参照として使うこともできる
     （`age * 2 AS doubled, doubled + 1 AS plus_one` のように左から順に評価される）。
+- `EXPLAIN <SELECT文>` で、クエリを実際には実行せず実行計画（二次インデックスを使ったかどうか）だけを
+  確認できる（詳細は[二次インデックス](#二次インデックス-create-index--drop-index--show-indexes--explain)を参照）。
 
 ## INSERT 構文
 
@@ -242,6 +244,39 @@ REVOKE DELETE FROM 'test'
   自分の `privileges` の範囲でのみデータ操作でき、不足時は `403`。詳細は
   [authentication.md](authentication.md#権限privilegesと-grant--revoke) を参照。
 - 詳細は [authentication.md](authentication.md) を参照。
+
+## 二次インデックス (CREATE INDEX / DROP INDEX / SHOW INDEXES / EXPLAIN)
+
+`POST /sql` では、あるカラムの等値検索（`WHERE column = value`）を高速化する二次インデックスの
+作成・削除もできます（**`MANAGE_USERS` 権限が必要**。管理者 `kagura` は常に保持。
+持たないユーザーが実行すると `403`。`CREATE USER` 等と同様、レコードストアの構造を操作する
+管理操作として扱う）。
+
+```sql
+CREATE INDEX ON label.race (venue)
+CREATE INDEX IF NOT EXISTS ON label.race (venue)
+DROP INDEX ON label.race (venue)
+DROP INDEX IF EXISTS ON label.race (venue)
+SHOW INDEXES
+
+EXPLAIN SELECT * FROM label.race WHERE venue = 'edogawa'
+```
+
+補足:
+- インデックスは**カラム単位**で作成される（`label.race` の部分は他の SQL 構文と書き味を揃えるための
+  表記で、`label.` は省略もできる。`CREATE INDEX ON venue (venue)` のようにラベル名は実際には使わず、
+  対象は**ラベルをまたいで「そのカラム名を持つ全レコード」**になる。KAGURA DB がスキーマレスであることに
+  合わせた設計）。
+- 対応するのは**等値検索のみ**（`WHERE column = value`）。`<`/`>`/`BETWEEN` のような範囲検索や
+  `LIKE`・`IS NULL` は現時点では高速化されない。
+- `WHERE` 句**全体がちょうど1つの等値比較**のときだけインデックスが使われる。
+  `WHERE venue = 'edogawa' AND date = '2026-01-01'` のように `AND`/`OR`/`NOT` を含む複合条件では
+  使われず、通常の全件走査になる（今後の拡張余地）。
+- インデックスの実体（値→行番号の対応表）は `.kdb`/JSON 本体には保存されない。定義（インデックスを
+  張ったカラム名）だけをサイドカーファイル `<DB_FILE>.indexes.json` に保存し、サーバー起動時に
+  そのファイルを読んで既存レコードから中身を再構築する（ラベルの検索索引と同じ方式）。
+- `EXPLAIN <SELECT文>` は実際にはクエリを実行せず、`"index scan: <column> (equality) — N candidate row(s) ..."`
+  または `"full scan — N row(s) scanned ..."` の1行を返す。権限は元の `SELECT` と同じ（`SELECT`）。
 
 ## リクエスト例
 
