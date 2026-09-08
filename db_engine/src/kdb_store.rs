@@ -12,7 +12,7 @@
 use std::io::{Read, Write, Seek, SeekFrom};
 use std::fs::{File, OpenOptions};
 use crate::codec::{encode_record, decode_record};
-use crate::crypto::{xchacha20poly1305_encrypt, xchacha20poly1305_decrypt, derive_key, CryptoError};
+use crate::crypto::{xchacha20poly1305_encrypt, xchacha20poly1305_decrypt, derive_key, hchacha20, CryptoError};
 use crate::codec::CodecError;
 use crate::Record;
 
@@ -29,17 +29,58 @@ const DEFAULT_MASTER_KEY: [u8; 32] = [
 
 fn get_master_key() -> [u8; 32] {
     if let Ok(hex) = std::env::var("KAGURA_MASTER_KEY") {
-        if hex.len() == 64 {
-            let mut key = [0u8; 32];
-            for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
-                if let Ok(s) = std::str::from_utf8(chunk) {
-                    if let Ok(b) = u8::from_str_radix(s, 16) { key[i] = b; }
-                }
-            }
+        if let Ok(key) = parse_master_key_hex(&hex) {
             return key;
         }
     }
     DEFAULT_MASTER_KEY
+}
+
+/// hex64（64桁の16進文字列）を 32 バイトのマスターキーへ厳密にパースする。
+/// 桁数不足・16進以外の文字が含まれる場合はエラー。
+pub fn parse_master_key_hex(hex: &str) -> Result<[u8; 32], String> {
+    let hex = hex.trim();
+    if hex.len() != 64 {
+        return Err(format!("マスターキーは64桁の16進文字列である必要があります（実際: {}桁）", hex.len()));
+    }
+    let mut key = [0u8; 32];
+    for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
+        let s = std::str::from_utf8(chunk).map_err(|_| "マスターキーに不正な文字が含まれています".to_string())?;
+        key[i] = u8::from_str_radix(s, 16)
+            .map_err(|_| "マスターキーは16進文字（0-9a-f）のみで構成される必要があります".to_string())?;
+    }
+    Ok(key)
+}
+
+/// 現在プロセスが使用しているマスターキー（環境変数 `KAGURA_MASTER_KEY`、無ければ既定キー）を返す。
+pub fn resolve_master_key() -> [u8; 32] {
+    get_master_key()
+}
+
+/// 現在のマスターキーを hex64 文字列で返す。
+pub fn master_key_hex() -> String {
+    bytes_to_hex(&resolve_master_key())
+}
+
+/// マスターキーの指紋（非可逆な短い識別子）。バックアップと復元先サーバーで
+/// 「同じマスターキーか」を突き合わせるために使う。キー本体は復元できない。
+/// `HChaCha20(master_key, 0^16)` の先頭16バイトを hex 表記したもの。
+pub fn master_key_fingerprint() -> String {
+    fingerprint_of_key(&resolve_master_key())
+}
+
+/// 任意のキーに対する指紋を計算する（`master_key_fingerprint` と同じ方式）。
+pub fn fingerprint_of_key(key: &[u8; 32]) -> String {
+    let d = hchacha20(key, &[0u8; 16]);
+    bytes_to_hex(&d[..16])
+}
+
+fn bytes_to_hex(b: &[u8]) -> String {
+    let mut s = String::with_capacity(b.len() * 2);
+    for byte in b {
+        s.push_str(&format!("{:02x}", byte));
+    }
+    s
 }
 
 #[derive(Debug)]
@@ -158,19 +199,30 @@ pub struct KdbFile { file: File, pub header: KdbHeader, pub enc_key: [u8; 32] }
 
 impl KdbFile {
     pub fn create(path: &str) -> Result<Self, KdbError> {
+        Self::create_with_key(path, &get_master_key())
+    }
+
+    /// マスターキーを明示指定して新規作成する（バックアップの再暗号化＝リキー用）。
+    pub fn create_with_key(path: &str, master_key: &[u8; 32]) -> Result<Self, KdbError> {
         let mut file = OpenOptions::new().read(true).write(true).create(true).truncate(true).open(path)?;
         let header  = KdbHeader::new();
-        let enc_key = derive_key(&get_master_key(), &header.salt);
+        let enc_key = derive_key(master_key, &header.salt);
         file.write_all(&header.to_bytes())?; file.flush()?;
         Ok(KdbFile { file, header, enc_key })
     }
 
     pub fn open(path: &str) -> Result<Self, KdbError> {
+        Self::open_with_key(path, &get_master_key())
+    }
+
+    /// マスターキーを明示指定して開く（旧マスターキーでの読み出し＝リキー用）。
+    /// 鍵が合わない場合、レコード読み出し時に `KdbError::Crypto` になる。
+    pub fn open_with_key(path: &str, master_key: &[u8; 32]) -> Result<Self, KdbError> {
         let mut file = OpenOptions::new().read(true).write(true).open(path)?;
         let mut hbuf = [0u8; HEADER_SIZE];
         file.read_exact(&mut hbuf)?;
         let header  = KdbHeader::from_bytes(&hbuf)?;
-        let enc_key = derive_key(&get_master_key(), &header.salt);
+        let enc_key = derive_key(master_key, &header.salt);
         Ok(KdbFile { file, header, enc_key })
     }
 
@@ -235,6 +287,25 @@ impl KdbFile {
 
     pub fn next_id(&self)      -> u64 { self.header.next_id }
     pub fn record_count(&self) -> u64 { self.header.record_count }
+}
+
+/// `.kdb` ファイルを `old_key` で復号し、`new_key` で暗号化し直して同じパスへ書き戻す
+/// （リキー）。復元先サーバーのマスターキーがバックアップ作成時と異なる場合に使う。
+///
+/// 新しいランダム salt でヘッダーを作り直すため、`new_key` が `old_key` と同一でも
+/// ファイル内容（暗号文）は変化する。`old_key` が誤っている場合は
+/// 最初のレコード復号で `KdbError::Crypto` を返す（レコード0件の場合はヘッダーの
+/// magic/version 検証のみ）。
+pub fn rekey_kdb(path: &str, old_key: &[u8; 32], new_key: &[u8; 32]) -> Result<(), KdbError> {
+    let (records, next_id) = {
+        let mut src = KdbFile::open_with_key(path, old_key)?;
+        let entries = src.read_all_records()?;
+        let records: Vec<Record> = entries.into_iter().map(|(_, r)| r).collect();
+        (records, src.next_id())
+    };
+    let mut dst = KdbFile::create_with_key(path, new_key)?;
+    dst.compact(&records, next_id)?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

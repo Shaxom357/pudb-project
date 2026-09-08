@@ -15,13 +15,13 @@ cargo test --workspace
 
 | クレート | テスト数 | 内容 |
 |----------|----------|---------|
-| `db_engine` | 39 | CRUD・ラベル操作（重複付与エラーを含む）・KDB暗号化・バイナリコーデック |
+| `db_engine` | 43 | CRUD・ラベル操作（重複付与エラーを含む）・KDB暗号化・バイナリコーデック・マスターキーのユーティリティ／リキー（バックアップ基盤） |
 | `dynamic_label_management` | 24 | AND/OR 検索・リネーム・差分・ラベル重複付与エラー |
 | `db_ffi` | 20 | FFI 関数・メモリ管理・`.kdb` セッション（WAL 追記・`kdb_sql`・NDJSON エクスポート・advisory lock） |
 | `db_client`（ユニットテスト） | 44 | ログ出力保管機能（JSON Lines 書き込み/読み出し・HW起因エラー判定・authカテゴリ記録）・認証（ログイン成功/失敗・トークン検証・ログアウト・ロックアウト・パスワード変更・複数ユーザー・権限付与/剥奪）・ユーザー管理SQL（CREATE/DROP/ALTER USER・SHOW USERS・GRANT/REVOKE のパースと実行） |
 | `db_client`（統合テスト） | 77 | HTTP API・ラベル操作（重複付与エラーを含む）・永続化・SQL SELECT/INSERT/UPDATE/DELETE（ラベル重複エラー・UPDATE LABELのWHERE絞り込み・DELETE/DELETE LABELのWHERE絞り込みを含む）・設定（HTTPリクエスト受付オンオフ）・ログ（`GET /logs`）・認証（未ログイン時の401・ログイン/ログアウト・ロックアウト・パスワード変更後の再ログイン必須化・ログイン成功/失敗のログ記録）・一般ユーザー管理（CREATE/DROP/ALTER USER・SHOW USERS・GRANT/REVOKE と `/sql`・REST API の権限強制） |
 | `sql_engine` | 60 | パーサー・実行エンジン（SELECT・INSERT・UPDATE・DELETE・WHERE・ORDER BY・LIKE・ラベル重複エラー・UPDATE LABEL/DELETE LABELのWHERE絞り込み） |
-| **合計** | **264** | |
+| **合計** | **268** | |
 
 ---
 

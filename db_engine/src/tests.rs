@@ -1103,3 +1103,92 @@ fn test_transaction_suppresses_eviction_until_end() {
     drop(db);
     cleanup_kdb(&path);
 }
+
+// ---------------------------------------------------------------------------
+// マスターキーのユーティリティ・リキー（バックアップ/復元の基盤）
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_parse_master_key_hex_valid_and_invalid() {
+    use crate::kdb_store::parse_master_key_hex;
+    let hex = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    let key = parse_master_key_hex(hex).unwrap();
+    assert_eq!(key[0], 0x00);
+    assert_eq!(key[1], 0x11);
+    assert_eq!(key[31], 0xff);
+
+    assert!(parse_master_key_hex("abcd").is_err(), "桁数不足はエラー");
+    assert!(
+        parse_master_key_hex("zz112233445566778899aabbccddeeff00112233445566778899aabbccddeeff").is_err(),
+        "16進以外の文字はエラー"
+    );
+}
+
+#[test]
+fn test_master_key_fingerprint_is_stable_and_key_dependent() {
+    use crate::kdb_store::fingerprint_of_key;
+    let a = [0x11u8; 32];
+    let b = [0x22u8; 32];
+    assert_eq!(fingerprint_of_key(&a), fingerprint_of_key(&a), "同じキーなら同じ指紋");
+    assert_ne!(fingerprint_of_key(&a), fingerprint_of_key(&b), "異なるキーなら異なる指紋");
+    assert_eq!(fingerprint_of_key(&a).len(), 32, "指紋は16バイト=32桁hex");
+}
+
+#[test]
+fn test_rekey_kdb_changes_key_and_preserves_records() {
+    use crate::kdb_store::{rekey_kdb, KdbFile};
+    let path = unique_kdb_path("rekey");
+    let old_key = [0x01u8; 32];
+    let new_key = [0x02u8; 32];
+
+    {
+        let mut kdb = KdbFile::create_with_key(&path, &old_key).unwrap();
+        let mut recs = Vec::new();
+        for i in 0..5u64 {
+            let mut r = Record::new(i + 1);
+            r.set("n", DataType::Integer(i as i64));
+            r.set("payload", DataType::Text(format!("row-{i}")));
+            recs.push(r);
+        }
+        kdb.compact(&recs, 6).unwrap();
+    }
+
+    rekey_kdb(&path, &old_key, &new_key).unwrap();
+
+    {
+        let mut kdb = KdbFile::open_with_key(&path, &old_key).unwrap();
+        assert!(kdb.read_all_records().is_err(), "旧キーでは復号できないはず");
+    }
+
+    {
+        let mut kdb = KdbFile::open_with_key(&path, &new_key).unwrap();
+        let entries = kdb.read_all_records().unwrap();
+        assert_eq!(entries.len(), 5);
+        assert_eq!(kdb.next_id(), 6);
+        assert_eq!(entries[2].1.columns.get("payload").unwrap(), &DataType::Text("row-2".into()));
+    }
+
+    cleanup_kdb(&path);
+}
+
+#[test]
+fn test_rekey_kdb_rejects_wrong_old_key() {
+    use crate::kdb_store::{rekey_kdb, KdbFile};
+    let path = unique_kdb_path("rekey_wrong");
+    let real_key = [0x0au8; 32];
+    let wrong_key = [0x0bu8; 32];
+
+    {
+        let mut kdb = KdbFile::create_with_key(&path, &real_key).unwrap();
+        let mut r = Record::new(1);
+        r.set("x", DataType::Integer(1));
+        kdb.compact(&[r], 2).unwrap();
+    }
+
+    assert!(rekey_kdb(&path, &wrong_key, &[0x0cu8; 32]).is_err(), "誤った旧キーは弾く");
+
+    let mut kdb = KdbFile::open_with_key(&path, &real_key).unwrap();
+    assert_eq!(kdb.read_all_records().unwrap().len(), 1);
+
+    cleanup_kdb(&path);
+}
