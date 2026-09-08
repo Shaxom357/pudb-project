@@ -648,6 +648,13 @@ impl AuthState {
             .unwrap_or(DEFAULT_USERNAME)
     }
 
+    /// 認証情報ファイル（`KAGURA_AUTH_FILE`、既定 `auth.json`）のパス。
+    /// バックアップに `auth.json` を同梱する際の収録元として使う。
+    /// テスト用バイパス時は空文字列。
+    pub fn file_path(&self) -> &str {
+        &self.file_path
+    }
+
     /// 管理者ユーザーが初期パスワードのままかどうか
     pub fn is_default_password(&self) -> bool {
         self.users

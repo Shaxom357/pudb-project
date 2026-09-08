@@ -368,6 +368,26 @@ COMMIT;                -- ここで初めて .kdb / JSON に永続化される
   既存の `UPDATE`/`DELETE` と同じ全書き直し（compact）方式で、途中クラッシュに対する原子性は
   既存の書き込みと同レベル。
 
+## バックアップ／復元 (BACKUP TO / RESTORE FROM)
+
+`.kdb` 本体・サイドカーファイル・`auth.json` を1つの `.kbak` アーカイブにまとめる／戻す。
+**管理者ロール `kagura` のみ**、**トランザクション中は `409`**。
+
+```sql
+BACKUP TO '/var/lib/kagura-db/backups/'              -- ディレクトリなら自動命名
+BACKUP TO '/tmp/snapshot.kbak' WITH KEY              -- マスターキーを同梱（取り扱い注意）
+BACKUP TO '/backups/' WITHOUT AUTH                   -- auth.json を含めない
+
+RESTORE FROM '/backups/kagura-backup-20260908-120000.kbak'
+RESTORE FROM '/backups/....kbak' OLD KEY '<hex64>'   -- 作成時のマスターキー（WITH KEY なら不要）
+```
+
+- `RESTORE` は現ファイルを `pre-restore-<timestamp>/` へ退避してから置き換える。
+  **反映にはサーバーの再起動が必要**で、適用後は書き込み系リクエストが `409`（`SELECT` は可能）。
+- 復元先のマスターキーが作成時と異なる場合、旧キーで復号し復元先のキーで再暗号化（リキー）する。
+- メジャーバージョンが異なる `.kbak` は復元を拒否する。
+- 詳細・災害復旧の手順は [backup.md](backup.md) を参照。
+
 ## リクエスト例
 
 ```bash

@@ -36,6 +36,9 @@ kdb login -u kagura -p root -a localhost:3000
 | `kdb prompt` | 現在のログイン状態を短いタグ文字列として出力する。`shell-init` が生成するプロンプトフックが毎回のプロンプト描画時に内部的に呼び出すためのもので、通常は直接使わない |
 | `kdb in-memory-mode enable` \| `disable` | 「全データオンメモリ」の有効/無効を切り替える（`PUT /settings`）。**管理者ロール `kagura`** でログイン中のみ・`.kdb` モードのサーバーのみ |
 | `kdb in-memory-size <値>` | オンメモリ容量の上限を設定する（`PUT /settings`）。数値の後ろに `MB` / `GB` を付けると絶対サイズ、`%` を付けると搭載メモリに対する割合（例: `kdb in-memory-size 5GB` / `kdb in-memory-size 20%`）。同上の権限・モード制限 |
+| `kdb backup [--out <パス>] [--with-key] [--no-auth] [--direct --env-file <f>]` | バックアップ（`.kbak`）を作成する。既定は稼働中サーバー経由（`BACKUP TO`）。`--direct` はサーバー停止中にローカルファイルを直接束ねる。**管理者ロール `kagura`** のみ。詳細は [backup.md](backup.md) |
+| `kdb restore <.kbak> [--old-key <hex64>] [--direct --env-file <f>]` | バックアップから復元する。サーバー経由の場合、反映にはサーバーの再起動が必要。作成時と復元先のマスターキーが異なる場合は `--old-key`（`.kbak` が `WITH KEY` なら不要） |
+| `kdb keyinfo [--reveal] [--direct --env-file <f>]` | KDB 暗号化マスターキーの指紋（`--reveal` でキー本体）を表示する（`GET /settings/master-key`）。**管理者ロール `kagura`** のみ。表示は監査ログに記録される（キー値は残らない） |
 
 `in-memory-mode disable`（＝容量制限モード）にすると、直近使われていない行の列データから `.kdb` へ退避してメモリ使用量を上限内に抑える（アクセス時に読み直し、再アクセスで立ち退き順が更新される）。設定はサーバー側の `<DB_FILE>.memory.json` に保存され再起動をまたいで保持される。Web UI（設定ビュー）からも同じ操作ができる。
 

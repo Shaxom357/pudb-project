@@ -80,6 +80,38 @@ pub async fn get_settings(State(state): State<AppState>) -> impl IntoResponse {
     (StatusCode::OK, Json(serde_json::to_value(build_response(&inner)).unwrap()))
 }
 
+/// GET /settings/master-key -- 現在の KDB 暗号化マスターキーを表示する。
+///
+/// **管理者ロール（`kagura`）のみ**。災害復旧に備えてキーを控える／バックアップの
+/// キー指紋と突き合わせる用途。監査ログにはキー本体を一切書かず、「表示した」旨のみ残す。
+pub async fn get_master_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let mut inner = state.write().await;
+    let Some(actor) = resolve_actor(&mut inner, &headers) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({ "error": "認証が必要です。/auth/login でログインしてください。" })),
+        );
+    };
+    if !inner.auth.is_admin(&actor) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({ "error": "マスターキーの表示は管理者ロール(kagura)のみ可能です" })),
+        );
+    }
+    // 監査ログ: キー値は絶対に残さない
+    inner.logger.auth_info(format!("マスターキーを表示しました (by '{}')", actor));
+    (
+        StatusCode::OK,
+        Json(json!({
+            "master_key": db_engine::kdb_store::master_key_hex(),
+            "fingerprint": db_engine::kdb_store::master_key_fingerprint(),
+        })),
+    )
+}
+
 /// PUT /settings -- 設定を更新（指定したフィールドだけを変更する。省略したフィールドは
 /// 現在値を維持する）。
 /// 「全データオンメモリ」設定（`all_in_memory` / `memory_limit`）の変更は管理者ロール

@@ -7,13 +7,13 @@
 > ・メジャーバージョンが異なると互換性は無くなります。  
 > ・メジャーバージョンが一致し、マイナーバージョンだけが異なる場合問題なく移行ができ互換性を保ちます。
 
-**バージョン: `4.9.3`**
+**バージョン: `4.10.0`**
 
 | 区分 | 説明 |
 |------|------|
 | **A = 4** (メジャー) | **【破壊的変更】** 一般ユーザーの `privileges` を実際に強制する。`/sql` の SELECT/INSERT/UPDATE/DELETE と `/records`・`/labels` 系 REST API は、ログイン中ユーザーが対応する権限（`SELECT`/`INSERT`/`UPDATE`/`DELETE`）を持たない場合 `403 Forbidden` を返す（管理者ロール `kagura` は常に全権限。既存の一般ユーザーは作成時の既定で4種すべてを保持するため挙動は変わらない）。権限を付与・剥奪する SQL 文 `GRANT <権限>[, ...] TO <ユーザー>[, ...]` / `REVOKE <権限>[, ...] FROM <ユーザー>[, ...]`（`MANAGE_USERS` 権限が必要。指定できる権限は `SELECT`/`INSERT`/`UPDATE`/`DELETE`/`MANAGE_USERS` と、まとめ指定用の `ALL`=データ操作4種・`SUPER`=4種+`MANAGE_USERS`）。3.0.0 で導入した「`/ui` と `POST /auth/login` を除く全エンドポイントがログイン必須」は継続。`.kdb` バイナリフォーマット・`auth.json` フォーマットは変更なし |
-| **B = 9** (マイナー) | **【新機能】** SQL トランザクション（`BEGIN` / `BEGIN TRANSACTION` / `START TRANSACTION`・`COMMIT`・`ROLLBACK`）を追加。複数の `INSERT`/`UPDATE`/`DELETE` を1単位にまとめ、`COMMIT` でまとめて永続化、`ROLLBACK` で `BEGIN` 前の状態へ戻す。**同時に開けるトランザクションは1つだけ**で、`BEGIN` したログインユーザーが所有者になる。開いている間、他ユーザーの `INSERT`/`UPDATE`/`DELETE`・別の `BEGIN`・所有者以外の `COMMIT`/`ROLLBACK` は `409 Conflict`。**トランザクション中は DDL（ユーザー管理・インデックス管理・スキーマ管理）不可**（`409`）。トランザクション中の `SELECT` は未コミット値が見える（read uncommitted 相当）。`BEGIN`〜`COMMIT` の間は `.kdb`/JSON を一切書き換えず、`COMMIT` 時に一度だけ `compact` でまとめて永続化する。`ROLLBACK` はディスクから読み直すだけ（サイドカーの索引・スキーマ定義・「全データオンメモリ」設定も復元）。**無操作 300 秒**で、次の書き込み系リクエストを受けた時点で自動 `ROLLBACK`。サーバー停止時も未永続化のため実質ロールバック。「全データオンメモリ」の容量制限モードでも、トランザクション中はメモリからの追い出しを止める（未永続化の行を失わないため。`COMMIT`/`ROLLBACK` 後に上限まで削り直す）。実装は `db_client/src/sql_handlers.rs` のディスパッチ層（`db_engine` には追い出し停止フラグ `begin_transaction`/`end_transaction` のみ追加）と `db_client/src/bootstrap.rs`（`ROLLBACK` 用のディスク再ロード）。**v1 の制限**: `/sql`（＝Web UI の SQL Query ビュー）からのみ利用可能。`kdb` CLI・`db_ffi` のトランザクション対応は未実装。`COMMIT` 時の `.kdb` 書き込みの原子性は既存の `UPDATE`/`DELETE` と同レベル。`db_engine`/`db_client` にユニット・統合テストを追加（新規6件）。全クレートの `Cargo.toml` を `4.9.0` に同期 |
-| **C = 3** (ビルド) | **【バックアップ機能の基盤・挙動無変更】** これから追加するバックアップ／復元機能（`.kdb` ＋ サイドカー ＋ `auth.json` を1アーカイブに束ね、別サーバーや再インストール環境でも復旧できるようにする）の土台として、`db_engine` に既存挙動を変えない追加のみを行った。(1) マスターキーの取得・表示・突き合わせ用のユーティリティ `kdb_store::parse_master_key_hex`（hex64 の厳密パース）／`resolve_master_key`／`master_key_hex`／`master_key_fingerprint`・`fingerprint_of_key`（`HChaCha20(key, 0^16)` 先頭16バイトの非可逆な指紋。バックアップと復元先のキー一致確認に使う）。(2) マスターキーを明示指定して `.kdb` を開閉する `KdbFile::open_with_key` / `create_with_key`（既存の `open`/`create` はこれらへ委譲するだけで、環境変数 `KAGURA_MASTER_KEY` を使う従来動作は不変）。(3) `.kdb` を旧キーで復号し新キーで再暗号化して書き戻す `kdb_store::rekey_kdb`（復元先サーバーのマスターキーが作成時と異なる場合に使う。誤った旧キーは復号失敗で弾き、元ファイルを壊さない）。`db_engine` にユニットテストを新規4件追加。API・SQL・`.kdb`/JSON フォーマット・`auth.json`・`kdb` CLI の挙動には一切影響しない。全クレートの `Cargo.toml` を `4.9.3` に同期 |
+| **B = 10** (マイナー) | **【新機能】** バックアップ／復元機能を追加。`.kdb` 本体（暗号化されたまま）・サイドカーファイル（`*.indexes.json` / `*.schema.json` / `*.memory.json`）・`auth.json`（既定同梱・`WITHOUT AUTH` で除外）を、`manifest.json`（形式バージョン・KAGURA バージョン・作成日時・レコード件数・**マスターキー指紋**・各ファイルの SHA-256）付きの1つの `.kbak` アーカイブ（依存ライブラリなしの独自コンテナ・非圧縮）にまとめる。**別サーバーや新規／再インストール環境でも復旧できる**ことを主眼とする。SQL 文 `BACKUP TO '<保存先>' [WITH KEY] [WITHOUT AUTH]` / `RESTORE FROM '<.kbak>' [OLD KEY '<hex64>']`（`/sql`・Web UI の SQL Query ビュー）と、`kdb backup` / `kdb restore` / `kdb keyinfo` CLI（稼働中サーバー経由＋サーバー停止中の `--direct --env-file`）。**管理者ロール `kagura` のみ**・**トランザクション中は不可**（`409`）。マスターキー本体はアーカイブに含めない（`.kbak` だけでは復元できず、`WITH KEY` 同梱か `OLD KEY` 指定か、復元先で同じ `KAGURA_MASTER_KEY` を用意する必要がある）。復元先のマスターキーが作成時と異なる場合、旧キーで復号し復元先の現キーで**リキー（再暗号化）**してから配置する。`RESTORE` は現ファイルを `pre-restore-<timestamp>/` へ退避してから置き換え、適用後は「再起動が必要」＝稼働中プロセスは書き込み系リクエストを `409` で拒否し `auto_save` を抑止する（メモリ上の復元前データでディスクを上書きしないため。`SELECT` は可能）。**メジャーバージョン非互換の `.kbak` は復元を拒否**。サーバーローカル保存先はバックアップ成功のたびに**世代管理**（保持世代数の上限＝既定7・保持日数＝既定30、`<DB_FILE>.backup.json` に永続化。`0` で無制限）で剪定する。マスターキー表示エンドポイント `GET /settings/master-key`（管理者のみ・監査ログにキー値は残さない）と `kdb keyinfo [--reveal]` を追加。実装は `db_engine`（`sha256`・`backup` モジュール）＋ `db_client`（`backup`・`backup_settings`・`sql_handlers` のディスパッチ）＋ `kdb_cli`（`backup_cmd`）。ユニット・統合テストを新規24件追加。**この版の範囲**: Web 管理 UI のバックアップカードと REST エンドポイント（`POST /backup` 等）、`PUT /settings` からの世代設定変更は後続バージョンで追加予定。全クレートの `Cargo.toml` を `4.10.0` に同期 |
+| **C = 0** (ビルド) | （マイナー更新に伴いリセット） |
 
 ---
 
@@ -29,6 +29,7 @@
 | [docs/sql.md](docs/sql.md) | SQL 機能（SELECT / INSERT / UPDATE / DELETE 構文と例・性能測定） |
 | [docs/api.md](docs/api.md) | API リファレンス・Web 管理UI・ログ機能 |
 | [docs/storage-format.md](docs/storage-format.md) | KDB 暗号化バイナリ形式の仕様 |
+| [docs/backup.md](docs/backup.md) | バックアップ／復元（`.kbak`・`BACKUP`/`RESTORE`・`kdb backup`・マスターキーの扱い・災害復旧手順） |
 | [docs/installation.md](docs/installation.md) | 本番運用向けインストール（Linux systemd / Windows タスクスケジューラ） |
 | [docs/development.md](docs/development.md) | テスト・テストデータ生成・Python バインディング |
 | [docs/version-history.md](docs/version-history.md) | 各バージョンの変更履歴（changelog） |
@@ -255,7 +256,7 @@ SQL 構文の詳細は [docs/sql.md](docs/sql.md)、全エンドポイントは 
 | テストデータ生成 | Python 3.6+ 標準ライブラリのみ |
 | ログ | JSON Lines 形式でファイル保存（[chrono](https://github.com/chronotope/chrono) でタイムスタンプ生成） |
 
-テスト（`cargo test --workspace`・合計 268 件）の内訳は [docs/development.md](docs/development.md) を参照してください。
+テスト（`cargo test --workspace`・合計 289 件）の内訳は [docs/development.md](docs/development.md) を参照してください。
 
 ---
 
