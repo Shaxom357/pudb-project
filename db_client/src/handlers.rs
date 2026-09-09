@@ -30,6 +30,10 @@ pub struct AppStateInner {
     pub auth: AuthState,
     /// 進行中のトランザクション（`BEGIN`〜`COMMIT`/`ROLLBACK`）。同時に1つだけ開ける。
     pub active_txn: Option<TxnMeta>,
+    /// `RESTORE FROM` でバックアップを適用済みの状態。`true` の間は、稼働中プロセスの
+    /// メモリ上の（＝復元前の）データで `.kdb`/JSON を上書きしないよう、`auto_save` を
+    /// 抑止し書き込み系リクエストを 409 で弾く。反映にはサーバー再起動が必要。
+    pub restore_pending: bool,
 }
 
 /// 進行中トランザクションのメタ情報
@@ -72,6 +76,10 @@ pub(crate) fn expire_stale_transaction(state: &mut AppStateInner) {
 pub type AppState = Arc<RwLock<AppStateInner>>;
 
 pub(crate) fn auto_save(state: &mut AppStateInner) {
+    // 復元適用済み: メモリ上の（復元前）データでディスクを上書きしない。
+    if state.restore_pending {
+        return;
+    }
     if let Some(kdb) = state.kdb.as_mut() {
         let records: Vec<Record> = state.mgr.db().list_all();
         let next_id = state.mgr.db().next_id();

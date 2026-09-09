@@ -13,6 +13,8 @@
 mod app;
 mod auth;
 mod auth_handlers;
+mod backup;
+mod backup_settings;
 mod bootstrap;
 mod handlers;
 mod index_sql;
@@ -176,6 +178,7 @@ async fn main() {
         logger: logger.clone(),
         auth,
         active_txn: None,
+        restore_pending: false,
     }));
 
     let (router, _) = app::build_app_with_state(state);

@@ -121,6 +121,45 @@ impl Client {
         }
     }
 
+    /// POST /sql に任意のクエリを送り、レスポンス JSON を返す（成功時のみ Ok）。
+    pub async fn post_sql(&self, token: &str, query: &str) -> Result<serde_json::Value, ApiError> {
+        let url = format!("{}/sql", self.base_url);
+        let resp = self
+            .http
+            .post(&url)
+            .bearer_auth(token)
+            .json(&serde_json::json!({ "query": query }))
+            .send()
+            .await
+            .map_err(|e| ApiError(format!("サーバー '{}' に接続できませんでした: {}", self.base_url, e)))?;
+        if resp.status().is_success() {
+            resp.json::<serde_json::Value>()
+                .await
+                .map_err(|e| ApiError(format!("応答の解析に失敗しました: {}", e)))
+        } else {
+            Err(Self::parse_error(resp).await)
+        }
+    }
+
+    /// GET /settings/master-key（管理者ロールのみ）。`{ master_key, fingerprint }` を返す。
+    pub async fn get_master_key(&self, token: &str) -> Result<serde_json::Value, ApiError> {
+        let url = format!("{}/settings/master-key", self.base_url);
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| ApiError(format!("サーバー '{}' に接続できませんでした: {}", self.base_url, e)))?;
+        if resp.status().is_success() {
+            resp.json::<serde_json::Value>()
+                .await
+                .map_err(|e| ApiError(format!("応答の解析に失敗しました: {}", e)))
+        } else {
+            Err(Self::parse_error(resp).await)
+        }
+    }
+
     pub async fn db_info(&self, token: &str) -> Result<DbInfoResponse, ApiError> {
         let url = format!("{}/db/info", self.base_url);
         let resp = self

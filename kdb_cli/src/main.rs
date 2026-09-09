@@ -2,6 +2,7 @@
 // kdb: KAGURA DB インストール後に使えるコマンドラインクライアント。
 // まずはログイン周り（login / logout / whoami）を実装する。
 
+mod backup_cmd;
 mod client;
 mod session;
 
@@ -47,6 +48,14 @@ enum Command {
         /// 上限（例: 500MB / 2GB / 20%）
         value: String,
     },
+    /// バックアップ（.kbak）を作成する（管理者ロール kagura のみ）。
+    /// 既定は稼働中サーバー経由。サーバー停止中は `--direct --env-file <f>`。
+    Backup(backup_cmd::BackupArgs),
+    /// バックアップ（.kbak）から復元する（管理者ロール kagura のみ）。
+    /// サーバー経由の場合、反映にはサーバーの再起動が必要。
+    Restore(backup_cmd::RestoreArgs),
+    /// KDB 暗号化マスターキーの指紋（と --reveal でキー本体）を表示する（管理者ロール kagura のみ）。
+    Keyinfo(backup_cmd::KeyinfoArgs),
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -92,6 +101,9 @@ async fn main() -> ExitCode {
         }
         Command::InMemoryMode { state } => cmd_in_memory_mode(state).await,
         Command::InMemorySize { value } => cmd_in_memory_size(value).await,
+        Command::Backup(args) => backup_cmd::cmd_backup(args).await,
+        Command::Restore(args) => backup_cmd::cmd_restore(args).await,
+        Command::Keyinfo(args) => backup_cmd::cmd_keyinfo(args).await,
     };
 
     match result {

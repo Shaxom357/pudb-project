@@ -76,6 +76,7 @@ pub async fn spawn_test_server_with_auth() -> (String, std::path::PathBuf) {
         logger,
         auth,
         active_txn: None,
+        restore_pending: false,
     }));
     let (app, _) = crate::app::build_app_with_state(state);
 

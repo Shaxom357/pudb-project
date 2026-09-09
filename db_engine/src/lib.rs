@@ -5,10 +5,12 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 
+pub mod backup;
 pub mod codec;
 pub mod crypto;
 pub mod kdb_store;
 pub mod memory;
+pub mod sha256;
 
 pub use memory::{MemorySizeSpec, MemoryPolicy, MemoryStats};
 

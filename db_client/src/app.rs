@@ -30,7 +30,7 @@ use crate::info_handlers::get_db_info;
 use crate::logging::Logger;
 use crate::logging_handlers::get_logs;
 use crate::models::ErrorResponse;
-use crate::settings_handlers::{get_settings, update_settings};
+use crate::settings_handlers::{get_master_key, get_settings, update_settings};
 use crate::sql_handlers::execute_sql;
 
 use crate::ui::ui_handler;
@@ -152,6 +152,7 @@ fn build_router(state: AppState) -> Router {
         .route("/db/info", get(get_db_info))
         .route("/sql", post(execute_sql))
         .route("/settings", get(get_settings).put(update_settings))
+        .route("/settings/master-key", get(get_master_key))
         .route("/logs", get(get_logs))
         .route("/auth/logout", post(logout))
         .route("/auth/password", put(change_password))
@@ -177,6 +178,7 @@ pub fn build_app(mgr: LabelManager, db_path: String) -> (Router, AppState) {
         mgr, db_path, kdb: None, http_api_enabled: true, logger,
         auth: AuthState::bypass_for_tests(),
         active_txn: None,
+        restore_pending: false,
     }));
     let router = build_router(state.clone());
     (router, state)

@@ -194,6 +194,119 @@ pub async fn execute_sql(
 ) -> impl IntoResponse {
     let query = payload.query.trim().to_string();
 
+    // バックアップ復元を適用済みなら、メモリ上の（復元前）状態でディスクを上書きしないよう
+    // 書き込み系の文をすべて 409 で弾く（反映にはサーバー再起動が必要）。参照系は許可する。
+    {
+        let inner = state.read().await;
+        if inner.restore_pending {
+            let up = query.trim_start().to_uppercase();
+            const WRITE_KEYWORDS: [&str; 16] = [
+                "INSERT", "UPDATE", "DELETE", "BEGIN", "START", "COMMIT", "ROLLBACK",
+                "CREATE", "DROP", "ALTER", "GRANT", "REVOKE", "BACKUP", "RESTORE",
+                "ENABLE", "DISABLE",
+            ];
+            if WRITE_KEYWORDS.iter().any(|k| up.starts_with(k)) {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(SqlQueryResponse::error(
+                        query,
+                        "バックアップからの復元を適用済みです。変更を反映するにはサーバーを再起動してください。",
+                    )),
+                );
+            }
+        }
+    }
+
+    // バックアップ／復元（BACKUP TO / RESTORE FROM）。管理者ロール（kagura）のみ・
+    // トランザクション中は不可。SELECT/INSERT/... のディスパッチより前に処理する。
+    if let Some(parsed) = crate::backup::parse_backup_statement(&query) {
+        let started = std::time::Instant::now();
+        let mut inner = state.write().await;
+        expire_stale_transaction(&mut inner);
+        if let Some(resp) = reject_ddl_in_txn(&inner, &query) { return resp; }
+        let stmt = match parsed {
+            Ok(s) => s,
+            Err(e) => {
+                inner.logger.sql_query(&query, false, started.elapsed().as_millis(), Some(&e));
+                return (StatusCode::BAD_REQUEST, Json(SqlQueryResponse::error(query, e)));
+            }
+        };
+        let Some(actor) = resolve_actor(&mut inner, &headers) else {
+            let msg = "認証が必要です。/auth/login でログインしてください。";
+            inner.logger.sql_query(&query, false, started.elapsed().as_millis(), Some(msg));
+            return (StatusCode::UNAUTHORIZED, Json(SqlQueryResponse::error(query, msg)));
+        };
+        if !inner.auth.is_admin(&actor) {
+            let msg = "バックアップ／復元は管理者ロール(kagura)のみ実行できます。";
+            inner.logger.sql_query(&query, false, started.elapsed().as_millis(), Some(msg));
+            return (StatusCode::FORBIDDEN, Json(SqlQueryResponse::error(query, msg)));
+        }
+
+        return match stmt {
+            crate::backup::BackupStatement::Backup { dest, with_key, include_auth } => {
+                // 現在のメモリ状態を .kdb/JSON へ確定してからアーカイブする
+                auto_save(&mut inner);
+                let db_path = inner.db_path.clone();
+                let auth_path = inner.auth.file_path().to_string();
+                let record_count = inner.mgr.db().count() as u64;
+                let settings = crate::backup_settings::load_or_default(&db_path);
+                match crate::backup::run_backup(
+                    &db_path, &auth_path, &dest, with_key, include_auth, &actor, record_count, &settings,
+                ) {
+                    Ok(o) => {
+                        inner.logger.db_info(format!(
+                            "backup created by '{}': {} ({} bytes, {} record(s){}{}); pruned {} old generation(s)",
+                            actor, o.path.display(), o.size, o.manifest.record_count,
+                            if with_key { ", WITH KEY" } else { "" },
+                            if include_auth { "" } else { ", WITHOUT AUTH" },
+                            o.pruned.len(),
+                        ));
+                        inner.logger.sql_query(&query, true, started.elapsed().as_millis(), None);
+                        let cols = vec!["path".to_string(), "bytes".to_string(), "records".to_string(), "pruned".to_string()];
+                        let row = vec![
+                            serde_json::Value::String(o.path.display().to_string()),
+                            serde_json::Value::Number(o.size.into()),
+                            serde_json::Value::Number(o.manifest.record_count.into()),
+                            serde_json::Value::Number((o.pruned.len() as u64).into()),
+                        ];
+                        (StatusCode::OK, Json(SqlQueryResponse::rows(query, cols, vec![row])))
+                    }
+                    Err(e) => {
+                        inner.logger.sql_query(&query, false, started.elapsed().as_millis(), Some(&e));
+                        (StatusCode::INTERNAL_SERVER_ERROR, Json(SqlQueryResponse::error(query, format!("バックアップに失敗しました: {}", e))))
+                    }
+                }
+            }
+            crate::backup::BackupStatement::Restore { archive, old_key } => {
+                let db_path = inner.db_path.clone();
+                let auth_path = inner.auth.file_path().to_string();
+                match crate::backup::run_restore(&db_path, &auth_path, &archive, old_key.as_deref()) {
+                    Ok(o) => {
+                        inner.restore_pending = true;
+                        inner.logger.db_warn(format!(
+                            "RESTORE applied by '{}' from {} (created {}, {} record(s), rekeyed={}); pre-restore copy at {}. RESTART REQUIRED.",
+                            actor, archive, o.manifest.created_at, o.manifest.record_count, o.rekeyed,
+                            o.pre_restore_dir.display(),
+                        ));
+                        inner.logger.sql_query(&query, true, started.elapsed().as_millis(), None);
+                        let cols = vec!["status".to_string(), "records".to_string(), "rekeyed".to_string(), "pre_restore_dir".to_string()];
+                        let row = vec![
+                            serde_json::Value::String("復元しました。反映にはサーバーの再起動が必要です".to_string()),
+                            serde_json::Value::Number(o.manifest.record_count.into()),
+                            serde_json::Value::Bool(o.rekeyed),
+                            serde_json::Value::String(o.pre_restore_dir.display().to_string()),
+                        ];
+                        (StatusCode::OK, Json(SqlQueryResponse::rows(query, cols, vec![row])))
+                    }
+                    Err(e) => {
+                        inner.logger.sql_query(&query, false, started.elapsed().as_millis(), Some(&e));
+                        (StatusCode::BAD_REQUEST, Json(SqlQueryResponse::error(query, format!("復元に失敗しました: {}", e))))
+                    }
+                }
+            }
+        };
+    }
+
     // ユーザー管理系（CREATE USER / DROP USER / ALTER USER / SHOW USERS）は
     // レコードストアではなく認証状態(AuthState)を操作する。SELECT/INSERT/... の
     // ディスパッチより前に処理し、該当しなければ None が返って通常処理へ進む。
