@@ -7,12 +7,12 @@
 > ・メジャーバージョンが異なると互換性は無くなります。  
 > ・メジャーバージョンが一致し、マイナーバージョンだけが異なる場合問題なく移行ができ互換性を保ちます。
 
-**バージョン: `4.10.0`**
+**バージョン: `4.11.0`**
 
 | 区分 | 説明 |
 |------|------|
 | **A = 4** (メジャー) | **【破壊的変更】** 一般ユーザーの `privileges` を実際に強制する。`/sql` の SELECT/INSERT/UPDATE/DELETE と `/records`・`/labels` 系 REST API は、ログイン中ユーザーが対応する権限（`SELECT`/`INSERT`/`UPDATE`/`DELETE`）を持たない場合 `403 Forbidden` を返す（管理者ロール `kagura` は常に全権限。既存の一般ユーザーは作成時の既定で4種すべてを保持するため挙動は変わらない）。権限を付与・剥奪する SQL 文 `GRANT <権限>[, ...] TO <ユーザー>[, ...]` / `REVOKE <権限>[, ...] FROM <ユーザー>[, ...]`（`MANAGE_USERS` 権限が必要。指定できる権限は `SELECT`/`INSERT`/`UPDATE`/`DELETE`/`MANAGE_USERS` と、まとめ指定用の `ALL`=データ操作4種・`SUPER`=4種+`MANAGE_USERS`）。3.0.0 で導入した「`/ui` と `POST /auth/login` を除く全エンドポイントがログイン必須」は継続。`.kdb` バイナリフォーマット・`auth.json` フォーマットは変更なし |
-| **B = 10** (マイナー) | **【新機能】** バックアップ／復元機能を追加。`.kdb` 本体（暗号化されたまま）・サイドカーファイル（`*.indexes.json` / `*.schema.json` / `*.memory.json`）・`auth.json`（既定同梱・`WITHOUT AUTH` で除外）を、`manifest.json`（形式バージョン・KAGURA バージョン・作成日時・レコード件数・**マスターキー指紋**・各ファイルの SHA-256）付きの1つの `.kbak` アーカイブ（依存ライブラリなしの独自コンテナ・非圧縮）にまとめる。**別サーバーや新規／再インストール環境でも復旧できる**ことを主眼とする。SQL 文 `BACKUP TO '<保存先>' [WITH KEY] [WITHOUT AUTH]` / `RESTORE FROM '<.kbak>' [OLD KEY '<hex64>']`（`/sql`・Web UI の SQL Query ビュー）と、`kdb backup` / `kdb restore` / `kdb keyinfo` CLI（稼働中サーバー経由＋サーバー停止中の `--direct --env-file`）。**管理者ロール `kagura` のみ**・**トランザクション中は不可**（`409`）。マスターキー本体はアーカイブに含めない（`.kbak` だけでは復元できず、`WITH KEY` 同梱か `OLD KEY` 指定か、復元先で同じ `KAGURA_MASTER_KEY` を用意する必要がある）。復元先のマスターキーが作成時と異なる場合、旧キーで復号し復元先の現キーで**リキー（再暗号化）**してから配置する。`RESTORE` は現ファイルを `pre-restore-<timestamp>/` へ退避してから置き換え、適用後は「再起動が必要」＝稼働中プロセスは書き込み系リクエストを `409` で拒否し `auto_save` を抑止する（メモリ上の復元前データでディスクを上書きしないため。`SELECT` は可能）。**メジャーバージョン非互換の `.kbak` は復元を拒否**。サーバーローカル保存先はバックアップ成功のたびに**世代管理**（保持世代数の上限＝既定7・保持日数＝既定30、`<DB_FILE>.backup.json` に永続化。`0` で無制限）で剪定する。マスターキー表示エンドポイント `GET /settings/master-key`（管理者のみ・監査ログにキー値は残さない）と `kdb keyinfo [--reveal]` を追加。実装は `db_engine`（`sha256`・`backup` モジュール）＋ `db_client`（`backup`・`backup_settings`・`sql_handlers` のディスパッチ）＋ `kdb_cli`（`backup_cmd`）。ユニット・統合テストを新規24件追加。**この版の範囲**: Web 管理 UI のバックアップカードと REST エンドポイント（`POST /backup` 等）、`PUT /settings` からの世代設定変更は後続バージョンで追加予定。全クレートの `Cargo.toml` を `4.10.0` に同期 |
+| **B = 11** (マイナー) | **【新機能】** `4.10.0` で追加したバックアップ／復元に、**Web 管理 UI と REST エンドポイント**を追加。設定ビューに「バックアップ／復元」カードを新設（今すぐバックアップ・保存先ディレクトリと世代管理の設定・保存先のバックアップ一覧＋ダウンロード＋名前指定で復元・別環境の `.kbak` をアップロードして復元・マスターキー表示）。エンドポイント: `POST /backup`（作成）／`GET /backup`（一覧＋各 `manifest` 要約＋現在のマスターキー指紋）／`GET /backup/download?name=`（`.kbak` をダウンロード。`kagura-backup-*.kbak` 以外・パス区切りを含む名前は `400`）／`POST /backup/restore`（保存先の `.kbak` を `{name, old_key?}` で復元）／`POST /backup/restore/upload`（`multipart` で `.kbak` をアップロードして復元。本文上限 4 GiB）。いずれも **管理者ロール `kagura` のみ**・**トランザクション中は `409`**・**復元適用後は `409`**（要再起動）。`GET`/`PUT /settings` に `backup_dir` / `backup_max_generations` / `backup_retention_days`（＋解決後の `backup_dir_resolved`）を追加し、`<DB_FILE>.backup.json` へ永続化（変更は管理者のみ）。`4.10.0` の SQL `BACKUP`/`RESTORE`・`kdb` CLI・`.kbak` フォーマット・マスターキーの扱い（非同梱・`WITH KEY`・`OLD KEY`・リキー）は不変。`db_client` に `backup_handlers` モジュールを追加し `axum` の `multipart` 機能を有効化。統合テストを新規5件追加。全クレートの `Cargo.toml` を `4.11.0` に同期 |
 | **C = 0** (ビルド) | （マイナー更新に伴いリセット） |
 
 ---
@@ -256,7 +256,7 @@ SQL 構文の詳細は [docs/sql.md](docs/sql.md)、全エンドポイントは 
 | テストデータ生成 | Python 3.6+ 標準ライブラリのみ |
 | ログ | JSON Lines 形式でファイル保存（[chrono](https://github.com/chronotope/chrono) でタイムスタンプ生成） |
 
-テスト（`cargo test --workspace`・合計 289 件）の内訳は [docs/development.md](docs/development.md) を参照してください。
+テスト（`cargo test --workspace`・合計 294 件）の内訳は [docs/development.md](docs/development.md) を参照してください。
 
 ---
 

@@ -40,6 +40,14 @@ pub struct SettingsResponse {
     /// メモリに実体を載せている行数 / 有効な行数
     pub memory_resident_rows: usize,
     pub memory_total_rows: usize,
+    /// バックアップの保存先ディレクトリ（空なら `<DB_FILE のディレクトリ>/backups`）。
+    pub backup_dir: String,
+    /// 解決後のバックアップ保存先（実際に使われる絶対／相対パス）。
+    pub backup_dir_resolved: String,
+    /// サーバーローカル保存先に残す世代数の上限（0 = 無制限）。
+    pub backup_max_generations: u32,
+    /// これより古いバックアップを剪定する日数（0 = 無制限）。
+    pub backup_retention_days: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -57,11 +65,21 @@ pub struct UpdateSettingsRequest {
     /// 容量上限（文字列形式。`kdb in-memory-size` から使う）。例: `"500MB"` / `"2GB"` / `"20%"`。
     #[serde(default)]
     pub memory_limit_spec: Option<String>,
+    /// バックアップの保存先ディレクトリ（空文字列で「既定に戻す」）。
+    #[serde(default)]
+    pub backup_dir: Option<String>,
+    /// バックアップの保持世代数の上限（0 = 無制限）。
+    #[serde(default)]
+    pub backup_max_generations: Option<u32>,
+    /// バックアップの保持日数（0 = 無制限）。
+    #[serde(default)]
+    pub backup_retention_days: Option<u32>,
 }
 
 fn build_response(inner: &crate::handlers::AppStateInner) -> SettingsResponse {
     let policy = inner.mgr.db().memory_policy();
     let stats = inner.mgr.db().memory_stats();
+    let bset = crate::backup_settings::load_or_default(&inner.db_path);
     SettingsResponse {
         http_api_enabled: inner.http_api_enabled,
         schema_enforcement_enabled: inner.mgr.db().is_schema_enforcement_enabled(),
@@ -71,6 +89,10 @@ fn build_response(inner: &crate::handlers::AppStateInner) -> SettingsResponse {
         memory_resident_bytes: stats.resident_bytes,
         memory_resident_rows: stats.resident_rows,
         memory_total_rows: stats.total_rows,
+        backup_dir: bset.backup_dir.clone(),
+        backup_dir_resolved: bset.resolved_dir(&inner.db_path).to_string_lossy().into_owned(),
+        backup_max_generations: bset.max_generations,
+        backup_retention_days: bset.retention_days,
     }
 }
 
@@ -174,6 +196,39 @@ pub async fn update_settings(
         inner.logger.db_info(format!(
             "memory policy updated: all_in_memory={}, limit={:?}",
             new_policy.all_in_memory, new_policy.limit
+        ));
+    }
+
+    // バックアップの世代管理設定。変更は管理者ロールのみ、サイドカーへ永続化する。
+    let touches_backup = payload.backup_dir.is_some()
+        || payload.backup_max_generations.is_some()
+        || payload.backup_retention_days.is_some();
+    if touches_backup {
+        let actor = resolve_actor(&mut inner, &headers);
+        let is_admin = actor.as_deref().map(|a| inner.auth.is_admin(a)).unwrap_or(false);
+        if !is_admin {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "error": "バックアップ設定の変更は管理者ロール(kagura)のみ可能です" })),
+            );
+        }
+        let db_path = inner.db_path.clone();
+        let mut bset = crate::backup_settings::load_or_default(&db_path);
+        if let Some(d) = payload.backup_dir {
+            bset.backup_dir = d.trim().to_string();
+        }
+        if let Some(n) = payload.backup_max_generations {
+            bset.max_generations = n;
+        }
+        if let Some(n) = payload.backup_retention_days {
+            bset.retention_days = n;
+        }
+        if let Err(e) = crate::backup_settings::save(&db_path, &bset) {
+            inner.logger.db_warn(format!("backup settings save failed: {}", e));
+        }
+        inner.logger.db_info(format!(
+            "backup settings updated: dir='{}', max_generations={}, retention_days={}",
+            bset.backup_dir, bset.max_generations, bset.retention_days
         ));
     }
 

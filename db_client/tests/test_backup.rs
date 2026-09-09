@@ -99,6 +99,80 @@ async fn test_backup_rejects_bad_syntax_and_missing_archive() {
 }
 
 #[tokio::test]
+async fn test_rest_backup_list_download_and_restore() {
+    let (base, db_path) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    post_sql(&client, &base, "INSERT INTO (label.emp) (name) VALUE ('alice')").await;
+    post_sql(&client, &base, "INSERT INTO (label.emp) (name) VALUE ('bob')").await;
+
+    // POST /backup（保存先は設定の既定＝ <db_path のディレクトリ>/backups）
+    let res = client.post(format!("{}/backup", base)).json(&serde_json::json!({})).send().await.unwrap();
+    assert_eq!(res.status().as_u16(), 200);
+    let body: serde_json::Value = res.json().await.unwrap();
+    let name = body["name"].as_str().unwrap().to_string();
+    assert_eq!(body["records"], 2);
+
+    // GET /backup で一覧に出る
+    let res = client.get(format!("{}/backup", base)).send().await.unwrap();
+    let list: serde_json::Value = res.json().await.unwrap();
+    assert!(list["files"].as_array().unwrap().iter().any(|f| f["name"] == serde_json::json!(name)));
+
+    // GET /backup/download でバイト列が取れる（先頭マジック KBAK1\n）
+    let res = client.get(format!("{}/backup/download?name={}", base, name)).send().await.unwrap();
+    assert_eq!(res.status().as_u16(), 200);
+    let bytes = res.bytes().await.unwrap();
+    assert_eq!(&bytes[..6], b"KBAK1\n");
+
+    // パストラバーサルは弾く
+    let res = client.get(format!("{}/backup/download?name=../secret.kbak", base)).send().await.unwrap();
+    assert_eq!(res.status().as_u16(), 400);
+
+    // 追加してから名前指定で復元
+    post_sql(&client, &base, "INSERT INTO (label.emp) (name) VALUE ('carol')").await;
+    let res = client.post(format!("{}/backup/restore", base)).json(&serde_json::json!({ "name": name })).send().await.unwrap();
+    assert_eq!(res.status().as_u16(), 200);
+    let body: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(body["restart_required"], true);
+    assert_eq!(body["records"], 2);
+
+    // 復元後は書き込み 409
+    let (status, _) = post_sql(&client, &base, "INSERT INTO (label.emp) (name) VALUE ('dave')").await;
+    assert_eq!(status, 409);
+
+    let restored = std::fs::read_to_string(&db_path).unwrap();
+    assert!(restored.contains("alice") && !restored.contains("carol"));
+
+    let dir = db_path.parent().unwrap().join("backups");
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn test_settings_exposes_backup_generation_fields() {
+    let (base, db_path) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let res = client.get(format!("{}/settings", base)).send().await.unwrap();
+    let s: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(s["backup_max_generations"], 7);
+    assert_eq!(s["backup_retention_days"], 30);
+
+    let res = client.put(format!("{}/settings", base))
+        .json(&serde_json::json!({ "backup_max_generations": 3, "backup_retention_days": 0 }))
+        .send().await.unwrap();
+    let s: serde_json::Value = res.json().await.unwrap();
+    assert_eq!(s["backup_max_generations"], 3);
+    assert_eq!(s["backup_retention_days"], 0);
+
+    // サイドカーに永続化されている
+    assert!(std::path::Path::new(&format!("{}.backup.json", db_path.to_string_lossy())).is_file());
+
+    let _ = std::fs::remove_file(&db_path);
+    let _ = std::fs::remove_file(format!("{}.backup.json", db_path.to_string_lossy()));
+}
+
+#[tokio::test]
 async fn test_backup_blocked_during_transaction() {
     let (base, db_path) = spawn_test_server().await;
     let client = reqwest::Client::new();
