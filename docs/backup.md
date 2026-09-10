@@ -3,13 +3,14 @@
 KAGURA DB を **別サーバーへの移設** や **新規／再インストール環境での災害復旧** に備えて、
 `.kdb` 本体・サイドカーファイル・`auth.json` を1つの `.kbak` アーカイブにまとめる機能です。
 
-- SQL: `BACKUP TO '...'` / `RESTORE FROM '...'`（Web UI の SQL Query ビュー・`/sql` API）
-- CLI: `kdb backup` / `kdb restore` / `kdb keyinfo`
+- **Web 管理 UI**: 設定ビューの「バックアップ／復元」カード（今すぐバックアップ・保存先と世代管理の設定・
+  一覧＋ダウンロード＋名前指定で復元・`.kbak` アップロードで復元・マスターキー表示）
+- **REST**: `POST /backup` / `GET /backup` / `GET /backup/download` / `POST /backup/restore` /
+  `POST /backup/restore/upload`（[api.md](api.md) 参照）
+- **SQL**: `BACKUP TO '...'` / `RESTORE FROM '...'`（Web UI の SQL Query ビュー・`/sql` API）
+- **CLI**: `kdb backup` / `kdb restore` / `kdb keyinfo`
 - 実行できるのは **管理者ロール `kagura`** のみ。**トランザクション中は不可**（`409`）。
-
-> **バージョン 4.10.0 の範囲**: SQL 文と `kdb` CLI、マスターキー表示エンドポイントを提供します。
-> Web 管理 UI のバックアップカードと REST エンドポイント（`POST /backup` 等）、`PUT /settings`
-> からの世代設定変更は後続バージョンで追加予定です。
+  **`RESTORE` 適用後は書き込み系がすべて `409`**（反映にはサーバー再起動が必要）。
 
 ---
 
@@ -154,9 +155,10 @@ kdb keyinfo --reveal
 - **保持世代数の上限**（既定 7）を超える古いものを削除
 - **保持日数**（既定 30 日）より古いものを削除
 
-いずれも `0` で「無制限」。設定は `<DB_FILE>.backup.json` に保存されます
-（値の変更 UI／API は後続バージョンで追加）。ブラウザからダウンロードしたファイルや
-`--direct` の出力は剪定対象外です。
+いずれも `0` で「無制限」。設定は `<DB_FILE>.backup.json` に保存され、
+Web UI の「バックアップ／復元」カード、または `PUT /settings` の
+`backup_dir` / `backup_max_generations` / `backup_retention_days`（管理者ロールのみ）で変更できます。
+ブラウザからダウンロードしたファイルや `--direct` の出力は剪定対象外です。
 
 ---
 
@@ -172,8 +174,23 @@ GET /settings/master-key        （管理者ロール kagura のみ）
 
 ---
 
+## Web UI からの操作
+
+設定ビューの「バックアップ／復元」カードで、次の操作ができます（管理者ロール `kagura` のみ）。
+
+- **今すぐバックアップ**: `WITH KEY`（マスターキー同梱）・`WITHOUT AUTH` の切り替えつき
+- **保存先ディレクトリ・世代管理**（保持世代数／保持日数）の設定
+- **保存先のバックアップ一覧**: 作成日時・件数・サイズ・キー指紋（現在のキーと一致すれば ✓、
+  異なれば ⚠＝復元に旧キーが必要）を表示。各行から **ダウンロード** と **復元**
+- **アップロードして復元**: 別環境で作成した `.kbak` をアップロード。必要なら旧マスターキーを入力
+- **マスターキーを表示**: `GET /settings/master-key` を呼ぶ（監査ログに表示操作のみ記録）
+
+復元はいずれも現ファイルを退避してから配置し、**反映にはサーバーの再起動が必要**です。
+
+---
+
 ## 定期バックアップ
 
-本バージョンでは専用機能は用意していません。cron / systemd timer / Windows タスク
+専用のスケジューラ機能は用意していません。cron / systemd timer / Windows タスク
 スケジューラから `kdb backup --out '<保存先ディレクトリ>/'` を定期実行してください
 （世代管理は上記のとおり自動で行われます）。

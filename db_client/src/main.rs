@@ -14,6 +14,7 @@ mod app;
 mod auth;
 mod auth_handlers;
 mod backup;
+mod backup_handlers;
 mod backup_settings;
 mod bootstrap;
 mod handlers;

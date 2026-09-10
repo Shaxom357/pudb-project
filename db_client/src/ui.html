@@ -357,6 +357,66 @@ tbody td { padding: 10px 14px; vertical-align: middle; }
           </div>
           <div class="toggle-status" id="memoryLimitStatus"></div>
         </div>
+
+        <div class="info-section-title" style="margin-top:24px">バックアップ／復元（管理者のみ）</div>
+        <div class="settings-card" id="backupCard">
+          <div class="toggle-desc" style="margin-bottom:12px">
+            <code>.kdb</code> 本体・サイドカーファイル・<code>auth.json</code> を1つの <code>.kbak</code> アーカイブにまとめます。
+            別サーバーや新規／再インストール環境でも復旧できます。<b>マスターキー本体はアーカイブに含まれません</b>
+            （「マスターキーを同梱」を選ぶか、復元先で同じ <code>KAGURA_MASTER_KEY</code> を用意する必要があります）。
+            詳細は <code>docs/backup.md</code> を参照。
+          </div>
+
+          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+            <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="backupWithKey"> マスターキーを同梱（取り扱い注意）</label>
+            <label style="display:flex;align-items:center;gap:6px"><input type="checkbox" id="backupIncludeAuth" checked> <code>auth.json</code> を同梱</label>
+            <button class="btn btn-primary" onclick="doCreateBackup()">今すぐバックアップ</button>
+          </div>
+          <div class="toggle-status" id="backupCreateStatus"></div>
+
+          <div class="form-group" style="margin-top:16px">
+            <label>保存先ディレクトリ（空＝ <code>&lt;DB_FILE のディレクトリ&gt;/backups</code>）</label>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <input type="text" id="backupDir" spellcheck="false" style="flex:1;min-width:220px" placeholder="(既定)">
+              <button class="btn" onclick="doSaveBackupSettings()">保存</button>
+            </div>
+          </div>
+          <div class="form-group">
+            <label>世代管理（0 = 無制限）</label>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <span>最大</span><input type="number" id="backupMaxGen" min="0" step="1" style="width:80px">
+              <span>世代 /</span>
+              <input type="number" id="backupRetentionDays" min="0" step="1" style="width:80px"><span>日より古いものを削除</span>
+              <button class="btn" onclick="doSaveBackupSettings()">保存</button>
+            </div>
+          </div>
+          <div class="toggle-status" id="backupSettingsStatus"></div>
+
+          <div style="margin-top:16px">
+            <div style="display:flex;justify-content:space-between;align-items:center">
+              <label style="font-weight:600">保存先のバックアップ一覧</label>
+              <button class="btn btn-sm" onclick="loadBackups()">更新</button>
+            </div>
+            <div id="backupListWrap" style="margin-top:8px;overflow-x:auto"></div>
+          </div>
+
+          <div class="form-group" style="margin-top:16px">
+            <label>アップロードして復元（別環境で作成した <code>.kbak</code>）</label>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <input type="file" id="backupUploadFile" accept=".kbak">
+              <input type="text" id="backupUploadOldKey" spellcheck="false" placeholder="旧マスターキー hex64（必要な場合）" style="flex:1;min-width:220px">
+              <button class="btn btn-danger" onclick="doRestoreUpload()">アップロードして復元</button>
+            </div>
+          </div>
+          <div class="toggle-status" id="backupRestoreStatus"></div>
+
+          <div class="info-section-title" style="margin-top:20px;font-size:12px">KDB 暗号化マスターキー</div>
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+            <button class="btn" onclick="doRevealMasterKey()">マスターキーを表示</button>
+            <code id="masterKeyOut" style="word-break:break-all"></code>
+          </div>
+          <div class="toggle-desc" style="margin-top:6px">災害復旧に備えて安全な場所に控えてください。表示操作は監査ログに記録されます（キー値は記録されません）。</div>
+        </div>
       </div>
     </div>
     <!-- Logs View -->
@@ -942,6 +1002,7 @@ async function loadSettings(){
       ? 'スキーマ強制は現在有効です（各ラベルの設定に従います）。'
       : 'スキーマ強制は現在全体で無効です（有効化したラベルも検証されません）。';
     applyMemorySettings(s);
+    applyBackupSettings(s);
   }catch(e){
     statusEl.textContent = '設定の読み込みに失敗しました';
     schemaStatusEl.textContent = '設定の読み込みに失敗しました';
@@ -949,6 +1010,7 @@ async function loadSettings(){
   }
   loadUsers();
   loadSchemas();
+  loadBackups();
 }
 
 function fmtMB(bytes){
@@ -1050,6 +1112,165 @@ async function onHttpApiToggle(){
     showToast('設定の更新に失敗しました','error');
   }
 }
+
+// ---- バックアップ／復元（設定画面） ----
+function applyBackupSettings(s){
+  const dir = document.getElementById('backupDir');
+  if(dir) dir.value = s.backup_dir || '';
+  const mg = document.getElementById('backupMaxGen');
+  if(mg) mg.value = (s.backup_max_generations ?? 7);
+  const rd = document.getElementById('backupRetentionDays');
+  if(rd) rd.value = (s.backup_retention_days ?? 30);
+  const st = document.getElementById('backupSettingsStatus');
+  if(st) st.textContent = '保存先: ' + (s.backup_dir_resolved || '(既定)');
+}
+
+async function doCreateBackup(){
+  const st = document.getElementById('backupCreateStatus');
+  st.textContent = 'バックアップを作成中...';
+  try{
+    const r = await api.post('/backup', {
+      with_key: document.getElementById('backupWithKey').checked,
+      include_auth: document.getElementById('backupIncludeAuth').checked
+    });
+    st.textContent = '作成しました: ' + r.name + '（' + fmtMB(r.bytes) + ' / ' + r.records + ' 件'
+      + (r.with_key ? ' / キー同梱' : '') + (r.includes_auth ? '' : ' / auth 除外') + '）'
+      + (r.pruned && r.pruned.length ? '　剪定: ' + r.pruned.length + ' 件' : '');
+    showToast('バックアップを作成しました','success');
+    loadBackups();
+  }catch(e){
+    st.textContent = '作成に失敗しました: ' + e.message;
+    showToast('バックアップに失敗しました（管理者ロール kagura か確認してください）','error');
+  }
+}
+
+async function doSaveBackupSettings(){
+  const st = document.getElementById('backupSettingsStatus');
+  st.textContent = '保存中...';
+  try{
+    const s = await api.put('/settings', {
+      backup_dir: document.getElementById('backupDir').value.trim(),
+      backup_max_generations: parseInt(document.getElementById('backupMaxGen').value || '0', 10),
+      backup_retention_days: parseInt(document.getElementById('backupRetentionDays').value || '0', 10)
+    });
+    applyBackupSettings(s);
+    showToast('バックアップ設定を保存しました','success');
+  }catch(e){
+    st.textContent = '保存に失敗しました: ' + e.message;
+    showToast('保存に失敗しました','error');
+  }
+}
+
+async function loadBackups(){
+  const wrap = document.getElementById('backupListWrap');
+  wrap.innerHTML = '<div class="toggle-status">読み込み中...</div>';
+  try{
+    const r = await api.get('/backup');
+    const cur = r.current_key_fingerprint;
+    if(!r.files.length){ wrap.innerHTML = '<div class="toggle-status">バックアップはまだありません。</div>'; return; }
+    const th = 'style="text-align:left;padding:6px 10px;border-bottom:2px solid #4f6ef7"';
+    const td = 'style="padding:6px 10px;border-bottom:1px solid #eee"';
+    let html = '<table style="width:100%;border-collapse:collapse;font-size:13px">'
+      + '<thead><tr><th '+th+'>ファイル</th><th '+th+'>作成</th><th '+th+'>件数</th><th '+th+'>サイズ</th><th '+th+'>キー指紋</th><th '+th+'></th></tr></thead><tbody>';
+    for(const f of r.files){
+      const keyMatch = cur && f.key_fingerprint && (f.key_fingerprint === cur);
+      const fpCell = f.key_fingerprint
+        ? '<span title="'+esc(f.key_fingerprint)+'">'+esc(String(f.key_fingerprint).slice(0,8))+'…'+(keyMatch?' ✓':(cur?' ⚠':''))+'</span>'
+        : '-';
+      html += '<tr>'
+        + '<td '+td+'><code>'+esc(f.name)+'</code>'+(f.with_key?' 🔑':'')+(f.includes_auth?'':' <span title="auth 除外">(no auth)</span>')+'</td>'
+        + '<td '+td+'>'+esc(f.created_at || '')+'</td>'
+        + '<td '+td+'>'+(f.records ?? '')+'</td>'
+        + '<td '+td+'>'+fmtMB(f.bytes)+'</td>'
+        + '<td '+td+'>'+fpCell+'</td>'
+        + '<td style="white-space:nowrap;padding:6px 10px;border-bottom:1px solid #eee">'
+        +   '<button class="btn btn-sm" data-dlbackup="'+esc(f.name)+'">DL</button> '
+        +   '<button class="btn btn-danger btn-sm" data-restorebackup="'+esc(f.name)+'">復元</button>'
+        + '</td></tr>';
+    }
+    html += '</tbody></table>';
+    if(cur) html += '<div class="toggle-status">現在のマスターキー指紋: <code>'+esc(cur)+'</code>（✓＝一致・そのまま復元可 / ⚠＝要 旧キー）</div>';
+    wrap.innerHTML = html;
+  }catch(e){
+    wrap.innerHTML = '<div class="toggle-status">一覧の取得に失敗しました: '+esc(e.message)+'</div>';
+  }
+}
+
+async function downloadBackup(name){
+  try{
+    const resp = await fetch('/backup/download?name='+encodeURIComponent(name), {headers:{...authHeaders()}});
+    if(!resp.ok){ showToast('ダウンロードに失敗しました','error'); return; }
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=>URL.revokeObjectURL(url), 1000);
+  }catch(e){ showToast('ダウンロードに失敗しました: '+e.message,'error'); }
+}
+
+async function restoreBackupByName(name){
+  if(!confirm('「'+name+'」から復元します。現在のデータは pre-restore フォルダへ退避され、反映にはサーバーの再起動が必要です。よろしいですか？')) return;
+  let oldKey = '';
+  const st = document.getElementById('backupRestoreStatus');
+  try{
+    let r;
+    try{
+      r = await api.post('/backup/restore', {name});
+    }catch(e){
+      if(String(e.message).includes('別のマスターキー') || String(e.message).includes('OLD KEY')){
+        oldKey = prompt('このバックアップは別のマスターキーで作成されています。作成時のマスターキー（hex64）を入力してください:') || '';
+        if(!oldKey) return;
+        r = await api.post('/backup/restore', {name, old_key: oldKey});
+      }else{ throw e; }
+    }
+    st.textContent = r.status + '（' + r.records + ' 件, リキー: ' + (r.rekeyed?'あり':'なし') + '）退避先: ' + r.pre_restore_dir;
+    showToast('復元しました。サーバーを再起動してください','success');
+  }catch(e){
+    st.textContent = '復元に失敗しました: ' + e.message;
+    showToast('復元に失敗しました: '+e.message,'error');
+  }
+}
+
+async function doRestoreUpload(){
+  const fileEl = document.getElementById('backupUploadFile');
+  const st = document.getElementById('backupRestoreStatus');
+  if(!fileEl.files.length){ showToast('.kbak ファイルを選択してください','error'); return; }
+  if(!confirm('アップロードした .kbak から復元します。現在のデータは退避され、反映にはサーバーの再起動が必要です。よろしいですか？')) return;
+  st.textContent = 'アップロードして復元中...';
+  const fd = new FormData();
+  fd.append('file', fileEl.files[0]);
+  const ok = document.getElementById('backupUploadOldKey').value.trim();
+  if(ok) fd.append('old_key', ok);
+  try{
+    const resp = await fetch('/backup/restore/upload', {method:'POST', headers:{...authHeaders()}, body: fd});
+    const data = await resp.json();
+    if(!resp.ok) throw new Error(data.error || ('HTTP '+resp.status));
+    st.textContent = data.status + '（' + data.records + ' 件, リキー: ' + (data.rekeyed?'あり':'なし') + '）退避先: ' + data.pre_restore_dir;
+    showToast('復元しました。サーバーを再起動してください','success');
+  }catch(e){
+    st.textContent = '復元に失敗しました: ' + e.message;
+    showToast('復元に失敗しました: '+e.message,'error');
+  }
+}
+
+async function doRevealMasterKey(){
+  const out = document.getElementById('masterKeyOut');
+  try{
+    const r = await api.get('/settings/master-key');
+    out.textContent = r.master_key + '  (指紋 ' + r.fingerprint + ')';
+  }catch(e){
+    out.textContent = '';
+    showToast('表示に失敗しました（管理者ロール kagura か確認してください）: '+e.message,'error');
+  }
+}
+
+document.addEventListener('click', function(ev){
+  const dl = ev.target.closest('[data-dlbackup]');
+  if(dl){ downloadBackup(dl.getAttribute('data-dlbackup')); return; }
+  const rs = ev.target.closest('[data-restorebackup]');
+  if(rs){ restoreBackupByName(rs.getAttribute('data-restorebackup')); return; }
+});
 
 // ---- Logs ----
 let allLogs=[];

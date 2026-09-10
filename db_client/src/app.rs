@@ -3,7 +3,7 @@
 // テストからも同じルーター定義を使えるようにする
 
 use axum::{
-    extract::{Request, State},
+    extract::{DefaultBodyLimit, Request, State},
     http::{Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -153,6 +153,15 @@ fn build_router(state: AppState) -> Router {
         .route("/sql", post(execute_sql))
         .route("/settings", get(get_settings).put(update_settings))
         .route("/settings/master-key", get(get_master_key))
+        .route("/backup", get(crate::backup_handlers::list_backups).post(crate::backup_handlers::create_backup))
+        .route("/backup/download", get(crate::backup_handlers::download_backup))
+        .route("/backup/restore", post(crate::backup_handlers::restore_backup))
+        .route(
+            "/backup/restore/upload",
+            post(crate::backup_handlers::restore_upload)
+                // アップロードする .kbak は大きくなりうる（既定 2MB では足りない）。
+                .route_layer(DefaultBodyLimit::max(4 * 1024 * 1024 * 1024)),
+        )
         .route("/logs", get(get_logs))
         .route("/auth/logout", post(logout))
         .route("/auth/password", put(change_password))

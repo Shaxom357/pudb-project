@@ -42,9 +42,14 @@
 | `PUT`    | `/labels/rename` | ラベルリネーム | ✅ | ✅ |
 | `GET`    | `/db/info` | DB バージョン・統計情報 | ✅ | - |
 | `POST`   | `/sql` | SQL SELECT / INSERT / UPDATE / DELETE / EXPLAIN 実行、トランザクション制御 `BEGIN`/`COMMIT`/`ROLLBACK`（同時に1つ・所有者のみ・DDL不可・無操作300秒で自動ROLLBACK。詳細は [sql.md](sql.md#トランザクション-begin--commit--rollback)）（一般ユーザーは付与された権限の範囲のみ・不足時 `403`）、`MANAGE_USERS` 権限向けユーザー管理（`CREATE`/`DROP`/`ALTER USER`・`SHOW USERS`・`GRANT`/`REVOKE`。詳細は [authentication.md](authentication.md)）、同じく `MANAGE_USERS` 権限向け二次インデックス管理（`CREATE`/`DROP INDEX`・`SHOW INDEXES`）、および任意スキーマ層管理（`ALTER LABEL ... DEFINE COLUMN`/`DROP COLUMN`/`ENABLE`・`DISABLE SCHEMA`・`DESCRIBE`・`SHOW SCHEMAS`・`VALIDATE LABEL`。詳細は [sql.md](sql.md#二次インデックス-create-index--drop-index--show-indexes--explain) と [sql.md](sql.md#任意スキーマ層-alter-label--define-column--enabledisable-schema--describe--show-schemas--validate-label)）、および**バックアップ／復元**（`BACKUP TO '...' [WITH KEY] [WITHOUT AUTH]` / `RESTORE FROM '...' [OLD KEY '...']`。**管理者ロール `kagura` のみ**・トランザクション中は `409`・`RESTORE` 後は再起動まで書き込み系が `409`。詳細は [backup.md](../docs/backup.md)） | ✅ | - |
-| `GET`    | `/settings` | 現在の設定取得（HTTPリクエスト受付、スキーマ強制スイッチ、全データオンメモリ設定＝`all_in_memory`・`memory_limit`・解決後の上限バイト数・現在の常駐バイト数/行数） | ✅ | - |
+| `GET`    | `/settings` | 現在の設定取得（HTTPリクエスト受付、スキーマ強制スイッチ、全データオンメモリ設定＝`all_in_memory`・`memory_limit`・解決後の上限バイト数・現在の常駐バイト数/行数、バックアップの `backup_dir`・`backup_dir_resolved`・`backup_max_generations`・`backup_retention_days`） | ✅ | - |
 | `GET`    | `/settings/master-key` | 現在の KDB 暗号化マスターキーを表示（`{"master_key":"<hex64>","fingerprint":"<指紋>"}`）。**管理者ロール `kagura` のみ**（他は `403`）。呼び出しは監査ログに記録されるが**キー値は残らない**。災害復旧に備えてキーを控える／バックアップのキー指紋と突き合わせる用途。詳細は [backup.md](../docs/backup.md) | ✅ | - |
-| `PUT`    | `/settings` | 設定更新（`http_api_enabled`、`schema_enforcement_enabled`、および全データオンメモリの `all_in_memory`（bool）・`memory_limit`（`{"kind":"bytes"\|"percent","value":n}`）・`memory_limit_spec`（`"500MB"`/`"2GB"`/`"20%"`）。指定したフィールドだけを更新）。全データオンメモリ設定の変更は**管理者ロール `kagura` のみ**（他は `403`）かつ **`.kdb` モードのみ**（JSON は `400`）で、`<DB_FILE>.memory.json` へ永続化する | ✅ | - |
+| `POST`   | `/backup` | サーバー上にバックアップ（`.kbak`）を作成（body 任意: `{"dest"?,"with_key"?:bool,"include_auth"?:bool}`）。**管理者ロール `kagura` のみ**・トランザクション中/復元適用後は `409`。詳細は [backup.md](../docs/backup.md) | ✅ | - |
+| `GET`    | `/backup` | 保存先ディレクトリの `kagura-backup-*.kbak` 一覧（各 `manifest` 要約＋現在のマスターキー指紋）。管理者のみ | ✅ | - |
+| `GET`    | `/backup/download?name=` | 1つの `.kbak` をダウンロード。`name` は `kagura-backup-*.kbak` の単一ファイル名のみ（`/`・`\`・`..` を含むと `400`）。管理者のみ | ✅ | - |
+| `POST`   | `/backup/restore` | 保存先の `.kbak` を `{"name":...,"old_key"?:...}` で復元。管理者のみ・トランザクション中は `409`。**反映にはサーバー再起動が必要**（適用後は書き込み系が `409`） | ✅ | - |
+| `POST`   | `/backup/restore/upload` | `multipart/form-data`（`file`＝`.kbak`、任意 `old_key`）をアップロードして復元。本文上限 4 GiB。管理者のみ・再起動が必要 | ✅ | - |
+| `PUT`    | `/settings` | 設定更新（`http_api_enabled`、`schema_enforcement_enabled`、全データオンメモリの `all_in_memory`（bool）・`memory_limit`（`{"kind":"bytes"\|"percent","value":n}`）・`memory_limit_spec`（`"500MB"`/`"2GB"`/`"20%"`）、およびバックアップの `backup_dir`（空＝既定）・`backup_max_generations`・`backup_retention_days`（`0`＝無制限）。指定したフィールドだけを更新）。全データオンメモリ設定の変更は**管理者ロール `kagura` のみ**かつ **`.kdb` モードのみ**（JSON は `400`）で `<DB_FILE>.memory.json` へ、バックアップ設定の変更は**管理者ロールのみ**で `<DB_FILE>.backup.json` へ永続化する | ✅ | - |
 | `GET`    | `/logs` | 保管されたログを新しい順に取得（`?lines=` で件数指定、既定200・上限2000） | ✅ | - |
 
 ### GET /db/info レスポンス例
@@ -77,7 +82,7 @@
 | **📋 Records** | レコード一覧（`POST /sql` の `SELECT * FROM label.*` 経由で取得。HTTPリクエストが無効でも閲覧可能）・検索・ラベルフィルター・自動更新（10秒）。作成・編集・削除は REST API（`/records`）を使うため、これらの操作には設定で HTTPリクエストを有効化する必要がある |
 | **ℹ️ DB Info** | バージョン・ストレージモード・暗号化状態・統計カード・カラム一覧 |
 | **🔍 SQL Query** | SQL SELECT / INSERT / UPDATE / DELETE 実行・テーブル形式結果表示・ Ctrl+Enter 対応。脆弱パスワードの `CREATE USER` 実行時は確認プロンプトを表示 |
-| **⚙️ 設定** | HTTPリクエスト（`/records` `/labels` 系 REST API）受付のオンオフを切替（既定は無効）。管理者パスワードの変更フォーム、一般ユーザーの作成・一覧・削除（管理者のみ）、スキーマ管理・スキーマ強制スイッチ、および「全データオンメモリ」設定（ON/OFF トグルと容量上限の入力。管理者のみ・`.kdb` モードのみ）もここにある |
+| **⚙️ 設定** | HTTPリクエスト（`/records` `/labels` 系 REST API）受付のオンオフを切替（既定は無効）。管理者パスワードの変更フォーム、一般ユーザーの作成・一覧・削除（管理者のみ）、スキーマ管理・スキーマ強制スイッチ、「全データオンメモリ」設定（ON/OFF トグルと容量上限の入力。管理者のみ・`.kdb` モードのみ）、および**バックアップ／復元**カード（今すぐバックアップ・保存先と世代管理の設定・一覧＋ダウンロード＋復元・`.kbak` アップロードで復元・マスターキー表示。管理者のみ。詳細は [backup.md](../docs/backup.md)）もここにある |
 | **📜 ログ** | 保管されたログ（起動/停止・SQL・HTTP・DB操作・認証・HW異常）をカテゴリで絞り込みながら一覧表示・自動更新（10秒） |
 
 ---

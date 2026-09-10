@@ -78,8 +78,6 @@ pub fn load_or_default(db_path: &str) -> BackupSettings {
 }
 
 /// サイドカーへ設定を書き出す。
-// 書き込み口（`PUT /settings` の世代設定フィールド・Web UI）は後続の Web UI PR で接続する。
-#[allow(dead_code)]
 pub fn save(db_path: &str, settings: &BackupSettings) -> std::io::Result<()> {
     let json = serde_json::to_string_pretty(settings).unwrap_or_else(|_| "{}".to_string());
     std::fs::write(sidecar_path(db_path), json)

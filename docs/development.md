@@ -19,9 +19,9 @@ cargo test --workspace
 | `dynamic_label_management` | 24 | AND/OR 検索・リネーム・差分・ラベル重複付与エラー |
 | `db_ffi` | 20 | FFI 関数・メモリ管理・`.kdb` セッション（WAL 追記・`kdb_sql`・NDJSON エクスポート・advisory lock） |
 | `db_client`（ユニットテスト） | 52 | ログ出力保管機能（JSON Lines 書き込み/読み出し・HW起因エラー判定・authカテゴリ記録）・認証（ログイン成功/失敗・トークン検証・ログアウト・ロックアウト・パスワード変更・複数ユーザー・権限付与/剥奪）・ユーザー管理SQL（CREATE/DROP/ALTER USER・SHOW USERS・GRANT/REVOKE のパースと実行）・`BACKUP`/`RESTORE` 文のパース・バックアップ設定サイドカー |
-| `db_client`（統合テスト） | 80 | HTTP API・ラベル操作（重複付与エラーを含む）・永続化・SQL SELECT/INSERT/UPDATE/DELETE（ラベル重複エラー・UPDATE LABELのWHERE絞り込み・DELETE/DELETE LABELのWHERE絞り込みを含む）・設定（HTTPリクエスト受付オンオフ）・ログ（`GET /logs`）・認証（未ログイン時の401・ログイン/ログアウト・ロックアウト・パスワード変更後の再ログイン必須化・ログイン成功/失敗のログ記録）・一般ユーザー管理（CREATE/DROP/ALTER USER・SHOW USERS・GRANT/REVOKE と `/sql`・REST API の権限強制）・バックアップ／復元（`BACKUP TO`→`RESTORE FROM` の往復・復元後の書き込み 409・トランザクション中の拒否） |
+| `db_client`（統合テスト） | 85 | HTTP API・ラベル操作（重複付与エラーを含む）・永続化・SQL SELECT/INSERT/UPDATE/DELETE（ラベル重複エラー・UPDATE LABELのWHERE絞り込み・DELETE/DELETE LABELのWHERE絞り込みを含む）・設定（HTTPリクエスト受付オンオフ・バックアップ世代設定）・ログ（`GET /logs`）・認証（未ログイン時の401・ログイン/ログアウト・ロックアウト・パスワード変更後の再ログイン必須化・ログイン成功/失敗のログ記録）・一般ユーザー管理（CREATE/DROP/ALTER USER・SHOW USERS・GRANT/REVOKE と `/sql`・REST API の権限強制）・バックアップ／復元（`BACKUP TO`→`RESTORE FROM` の往復・復元後の書き込み 409・トランザクション中の拒否・REST の作成/一覧/ダウンロード/パストラバーサル拒否/名前指定復元） |
 | `sql_engine` | 60 | パーサー・実行エンジン（SELECT・INSERT・UPDATE・DELETE・WHERE・ORDER BY・LIKE・ラベル重複エラー・UPDATE LABEL/DELETE LABELのWHERE絞り込み） |
-| **合計** | **289** | |
+| **合計** | **294** | |
 
 ---
 
