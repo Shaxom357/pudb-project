@@ -7,13 +7,13 @@
 > ・メジャーバージョンが異なると互換性は無くなります。  
 > ・メジャーバージョンが一致し、マイナーバージョンだけが異なる場合問題なく移行ができ互換性を保ちます。
 
-**バージョン: `4.11.0`**
+**バージョン: `4.11.1`**
 
 | 区分 | 説明 |
 |------|------|
 | **A = 4** (メジャー) | **【破壊的変更】** 一般ユーザーの `privileges` を実際に強制する。`/sql` の SELECT/INSERT/UPDATE/DELETE と `/records`・`/labels` 系 REST API は、ログイン中ユーザーが対応する権限（`SELECT`/`INSERT`/`UPDATE`/`DELETE`）を持たない場合 `403 Forbidden` を返す（管理者ロール `kagura` は常に全権限。既存の一般ユーザーは作成時の既定で4種すべてを保持するため挙動は変わらない）。権限を付与・剥奪する SQL 文 `GRANT <権限>[, ...] TO <ユーザー>[, ...]` / `REVOKE <権限>[, ...] FROM <ユーザー>[, ...]`（`MANAGE_USERS` 権限が必要。指定できる権限は `SELECT`/`INSERT`/`UPDATE`/`DELETE`/`MANAGE_USERS` と、まとめ指定用の `ALL`=データ操作4種・`SUPER`=4種+`MANAGE_USERS`）。3.0.0 で導入した「`/ui` と `POST /auth/login` を除く全エンドポイントがログイン必須」は継続。`.kdb` バイナリフォーマット・`auth.json` フォーマットは変更なし |
 | **B = 11** (マイナー) | **【新機能】** `4.10.0` で追加したバックアップ／復元に、**Web 管理 UI と REST エンドポイント**を追加。設定ビューに「バックアップ／復元」カードを新設（今すぐバックアップ・保存先ディレクトリと世代管理の設定・保存先のバックアップ一覧＋ダウンロード＋名前指定で復元・別環境の `.kbak` をアップロードして復元・マスターキー表示）。エンドポイント: `POST /backup`（作成）／`GET /backup`（一覧＋各 `manifest` 要約＋現在のマスターキー指紋）／`GET /backup/download?name=`（`.kbak` をダウンロード。`kagura-backup-*.kbak` 以外・パス区切りを含む名前は `400`）／`POST /backup/restore`（保存先の `.kbak` を `{name, old_key?}` で復元）／`POST /backup/restore/upload`（`multipart` で `.kbak` をアップロードして復元。本文上限 4 GiB）。いずれも **管理者ロール `kagura` のみ**・**トランザクション中は `409`**・**復元適用後は `409`**（要再起動）。`GET`/`PUT /settings` に `backup_dir` / `backup_max_generations` / `backup_retention_days`（＋解決後の `backup_dir_resolved`）を追加し、`<DB_FILE>.backup.json` へ永続化（変更は管理者のみ）。`4.10.0` の SQL `BACKUP`/`RESTORE`・`kdb` CLI・`.kbak` フォーマット・マスターキーの扱い（非同梱・`WITH KEY`・`OLD KEY`・リキー）は不変。`db_client` に `backup_handlers` モジュールを追加し `axum` の `multipart` 機能を有効化。統合テストを新規5件追加。全クレートの `Cargo.toml` を `4.11.0` に同期 |
-| **C = 0** (ビルド) | （マイナー更新に伴いリセット） |
+| **C = 1** (ビルド) | **【ドキュメントのみ】** `README.md` の「アーキテクチャ」セクションを整理。古くなっていた ASCII 図（`auth_handlers`/`user_sql`/`backup_handlers`/`index_sql`/`schema_sql` などの新モジュールや `db_engine` の `memory`/`sha256`/`backup`、サイドカーファイル・`.kbak` が未反映だった）を **Mermaid 図**へ置き換え、6 クレート（`db_client`/`sql_engine`/`dynamic_label_management`/`db_ffi`/`db_engine` ＋ CLI）単位の依存関係・データフロー・`.kdb`＋サイドカー・`.kbak` を最新状態に更新した。GitHub 上ではそのまま図として描画される。コード・API・SQL・`.kdb`/`.kbak` フォーマット・`kdb` CLI の挙動には一切影響しない。全クレートの `Cargo.toml` を `4.11.1` に同期 |
 
 ---
 
@@ -56,41 +56,41 @@ KAGURA DB は Rust で一から実装したデータベースエンジンです�
 
 ## アーキテクチャ
 
-```
-ブラウザ (Web UI)       Python         curl / HTTP クライアント
-      |                   |                      |
-      +--------+----------+                      |
-               | HTTP (POST /auth/login → Bearer トークンを取得して以後の全リクエストに付与)
-    +----------+----------------------------------+----------+
-    |              db_client  (axum REST API + Web UI)       |
-    |   auth / auth_handlers (認証・セッション管理)          |
-    |   handlers / label_handlers / info_handlers            |
-    |   sql_handlers / settings_handlers / app / models / ui |
-    +----------------------------+----------------------------+
-                                 | Rust クレート依存
-    +----------------------------+----------------------------+
-    |         dynamic_label_management                        |
-    |   LabelManager: AND/OR検索・リネーム・統計             |
-    +----------------------------+----------------------------+
-                                 |
-    +----------------------------+----------------------------+
-    |              db_engine  (コアエンジン)                  |
-    |   Database: CRUD / ColumnStore / label_index           |
-    |   codec:      バイナリシリアライズ                      |
-    |   crypto:     XChaCha20-Poly1305 AEAD (純Rust実装)    |
-    |   kdb_store:  .kdb ファイル管理 (WAL方式)              |
-    +----------------------------+----------------------------+
-                                 | C FFI (.so)
-    +----------------------------+----------------------------+
-    |       db_ffi + examples/python                          |
-    +----------------------------------------------------------+
+3 種のクライアントが `db_client`（REST）または `db_ffi`（C FFI）から接続し、いずれも最終的に
+コアエンジン `db_engine` を経由して暗号化ファイル `.kdb` を読み書きします。
+矢印は「依存・呼び出しの向き」を表します。
 
-    +----------------------------------------------------------+
-    |       sql_engine  (SQL SELECT/INSERT/UPDATE/DELETE       |
-    |                     エンジン)                            |
-    |   ast / parser / executor                               |
-    |   手書き再帰下降パーサー（外部ライブラリ不使用）         |
-    +----------------------------------------------------------+
+```mermaid
+flowchart TD
+    browser["ブラウザ / Web 管理 UI"]
+    httpc["curl ・ HTTP クライアント"]
+    cli["kdb CLI"]
+    pyapp["Python アプリ (ctypes)"]
+
+    browser -->|HTTP + Bearer トークン| dbclient
+    httpc -->|HTTP + Bearer トークン| dbclient
+    cli -->|"REST (/auth/login ・ /db/info)"| dbclient
+    pyapp -->|"C FFI (.so)"| dbffi
+
+    subgraph ws["Rust ワークスペース"]
+        dbclient["db_client<br/>axum REST API ＋ Web 管理 UI<br/>認証 / ユーザー / 権限 / 設定 / ログ / バックアップ"]
+        sqlengine["sql_engine<br/>独自拡張 SQL パーサー / 実行器<br/>（手書き再帰下降・外部ライブラリなし）"]
+        dlm["dynamic_label_management<br/>ラベル AND/OR 検索・リネーム・統計"]
+        dbffi["db_ffi<br/>C ABI 共有ライブラリ<br/>（平文 JSON 版 / 暗号化 .kdb 版）"]
+        dbengine["db_engine（コアエンジン）<br/>列指向ストア / ラベル索引 / 二次索引 / スキーマ層<br/>XChaCha20-Poly1305 AEAD ・ WAL ・ バックアップ"]
+    end
+
+    dbclient --> sqlengine
+    dbclient --> dlm
+    dbclient --> dbengine
+    sqlengine --> dbengine
+    dlm --> dbengine
+    dbffi --> sqlengine
+    dbffi --> dbengine
+    cli -.->|"kdb backup --direct（サーバー停止時）"| dbengine
+
+    dbengine -->|暗号化して永続化| kdb[(".kdb ＋ サイドカー<br/>.indexes / .schema / .memory / .backup.json")]
+    dbengine -->|BACKUP / RESTORE| kbak[(".kbak アーカイブ")]
 ```
 
 ---

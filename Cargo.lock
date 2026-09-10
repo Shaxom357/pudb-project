@@ -324,7 +324,7 @@ dependencies = [
 
 [[package]]
 name = "db_client"
-version = "4.11.0"
+version = "4.11.1"
 dependencies = [
  "argon2",
  "axum",
@@ -341,7 +341,7 @@ dependencies = [
 
 [[package]]
 name = "db_engine"
-version = "4.11.0"
+version = "4.11.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -349,7 +349,7 @@ dependencies = [
 
 [[package]]
 name = "db_ffi"
-version = "4.11.0"
+version = "4.11.1"
 dependencies = [
  "db_engine",
  "serde_json",
@@ -401,7 +401,7 @@ dependencies = [
 
 [[package]]
 name = "dynamic_label_management"
-version = "4.11.0"
+version = "4.11.1"
 dependencies = [
  "db_engine",
 ]
@@ -779,7 +779,7 @@ dependencies = [
 
 [[package]]
 name = "kdb_cli"
-version = "4.11.0"
+version = "4.11.1"
 dependencies = [
  "chrono",
  "clap",
@@ -1341,7 +1341,7 @@ checksum = "3763264f6b73151db08c50ff20d7d8a0b8796e021cdea7ceedad07b80155fa0e"
 
 [[package]]
 name = "sql_engine"
-version = "4.11.0"
+version = "4.11.1"
 dependencies = [
  "db_engine",
  "serde",
